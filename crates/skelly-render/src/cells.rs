@@ -29,9 +29,12 @@ impl Quad {
     }
 }
 
-/// Build the background + cursor quads for a grid, given the cell metrics (physical
-/// px). A cell contributes a fill only if it has an explicit background; the cursor
-/// is always an accent block at its cell.
+/// Alpha applied to the accent color for the (translucent) selection highlight.
+const SELECTION_ALPHA: f32 = 0.30;
+
+/// Build the quads for a grid, given the cell metrics (physical px), in draw order:
+/// opaque cell backgrounds, then translucent selection fills over them, then the
+/// accent cursor block. `selection` is the list of selected `(column, row)` cells.
 pub(crate) fn grid_quads(
     cell_w: f32,
     cell_h: f32,
@@ -39,30 +42,35 @@ pub(crate) fn grid_quads(
     rows: &[Vec<crate::GridCell>],
     cursor: (usize, usize),
     accent: crate::theme::Srgb,
+    selection: &[(usize, usize)],
 ) -> Vec<Quad> {
+    let cell_quad = |col: usize, row: usize, color: [f32; 4]| {
+        Quad::new(
+            pad + col as f32 * cell_w,
+            pad + row as f32 * cell_h,
+            cell_w,
+            cell_h,
+            color,
+        )
+    };
+
     let mut quads = Vec::new();
     for (row_index, row) in rows.iter().enumerate() {
-        let y = pad + row_index as f32 * cell_h;
         for (col_index, cell) in row.iter().enumerate() {
             if let Some(bg) = cell.bg {
-                quads.push(Quad::new(
-                    pad + col_index as f32 * cell_w,
-                    y,
-                    cell_w,
-                    cell_h,
-                    bg.to_linear(),
-                ));
+                quads.push(cell_quad(col_index, row_index, bg.to_linear()));
             }
         }
     }
+
+    let mut selection_color = accent.to_linear();
+    selection_color[3] = SELECTION_ALPHA;
+    for &(col, row) in selection {
+        quads.push(cell_quad(col, row, selection_color));
+    }
+
     let (cursor_col, cursor_row) = cursor;
-    quads.push(Quad::new(
-        pad + cursor_col as f32 * cell_w,
-        pad + cursor_row as f32 * cell_h,
-        cell_w,
-        cell_h,
-        accent.to_linear(),
-    ));
+    quads.push(cell_quad(cursor_col, cursor_row, accent.to_linear()));
     quads
 }
 

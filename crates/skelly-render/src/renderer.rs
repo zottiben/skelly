@@ -138,12 +138,33 @@ impl Renderer {
         self.text.resize(width, height);
     }
 
+    /// Cell metrics in physical px: `(width, height, top-left padding)`. Callers use
+    /// these to map pixel coordinates (e.g. the mouse) to grid cells.
+    #[must_use]
+    pub fn cell_metrics(&self) -> (f32, f32, f32) {
+        self.text.cell_metrics()
+    }
+
     /// Set the colored grid to display next frame, with the cursor at `cursor`
-    /// `(column, row)`. Lays out the glyphs and builds the background + cursor quads.
-    pub fn set_grid(&mut self, rows: &[Vec<GridCell>], cursor: (usize, usize)) {
+    /// `(column, row)` and `selection` the highlighted cells. Lays out the glyphs and
+    /// builds the background, selection, and cursor quads.
+    pub fn set_grid(
+        &mut self,
+        rows: &[Vec<GridCell>],
+        cursor: (usize, usize),
+        selection: &[(usize, usize)],
+    ) {
         self.text.set_cells(rows);
         let (cell_w, cell_h, pad) = self.text.cell_metrics();
-        let quads = crate::cells::grid_quads(cell_w, cell_h, pad, rows, cursor, self.theme.accent);
+        let quads = crate::cells::grid_quads(
+            cell_w,
+            cell_h,
+            pad,
+            rows,
+            cursor,
+            self.theme.accent,
+            selection,
+        );
         self.quads.set(
             &self.device,
             &self.queue,

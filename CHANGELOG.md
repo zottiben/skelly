@@ -9,6 +9,10 @@ Conventional Commits - do not hand-edit it.
 
 ### Added
 
+- M2d (core terminal, selection + clipboard): mouse-drag text selection with a
+  translucent highlight (a new selection-quad layer over the cell backgrounds),
+  Cmd/Super+C to copy the selection and Cmd/Super+V to paste into the shell
+  (`arboard`). Selection ordering / text extraction are unit-tested.
 - M2d (core terminal, scrollback): a 10k-line scrollback history with mouse-wheel
   and Shift+PageUp/PageDown scrolling, and scroll-to-bottom on keypress. The
   renderer draws the scrolled view via the grid's display offset. `skelly-term`

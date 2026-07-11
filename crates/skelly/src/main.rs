@@ -12,10 +12,10 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use skelly_config::{Appearance, Config};
 use skelly_render::{AnsiPalette, GridCell, Renderer, Srgb};
-use skelly_term::{CellColor, Terminal};
+use skelly_term::{CellColor, TermCell, Terminal};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -46,17 +46,28 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A text selection, in visible-grid cell coordinates `(column, row)`.
+#[derive(Clone, Copy)]
+struct Selection {
+    anchor: (usize, usize),
+    head: (usize, usize),
+}
+
 /// Application state driven by the winit event loop. The window, renderer, and
 /// terminal are `None` until the platform signals `resumed`.
 struct App {
     config: Config,
     proxy: EventLoopProxy<Wakeup>,
     palette: AnsiPalette,
+    clipboard: Option<arboard::Clipboard>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     terminal: Option<Terminal>,
     scale: f64,
     modifiers: ModifiersState,
+    pointer: (f64, f64),
+    selection: Option<Selection>,
+    selecting: bool,
 }
 
 impl App {
@@ -66,20 +77,25 @@ impl App {
             config,
             proxy,
             palette,
+            clipboard: arboard::Clipboard::new().ok(),
             window: None,
             renderer: None,
             terminal: None,
             scale: 1.0,
             modifiers: ModifiersState::empty(),
+            pointer: (0.0, 0.0),
+            selection: None,
+            selecting: false,
         }
     }
 
-    /// Repaint from the current terminal grid, resolving each cell's colors.
+    /// Repaint from the current terminal grid, resolving each cell's colors and
+    /// overlaying the selection highlight.
     fn redraw(&mut self) {
         let (rows, cursor) = self.terminal.as_ref().map_or_else(
             || (Vec::new(), (0, 0)),
             |term| {
-                let rows = term
+                let rows: Vec<Vec<GridCell>> = term
                     .cells()
                     .iter()
                     .map(|row| {
@@ -95,11 +111,113 @@ impl App {
                 (rows, term.cursor())
             },
         );
+        let cols = rows.first().map_or(0, Vec::len);
+        let selection = self
+            .selection
+            .map(|sel| selection_cells(sel, rows.len(), cols))
+            .unwrap_or_default();
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_grid(&rows, cursor);
+            renderer.set_grid(&rows, cursor, &selection);
             if let Err(err) = renderer.render() {
                 tracing::error!(%err, "frame render failed");
             }
+        }
+    }
+
+    /// Map the last pointer position to a grid cell `(column, row)`.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "pointer and cell metrics are small, non-negative pixel values"
+    )]
+    fn pointer_cell(&self) -> (usize, usize) {
+        let Some(renderer) = self.renderer.as_ref() else {
+            return (0, 0);
+        };
+        let (cell_w, cell_h, pad) = renderer.cell_metrics();
+        let col = ((self.pointer.0 as f32 - pad) / cell_w).floor().max(0.0) as usize;
+        let row = ((self.pointer.1 as f32 - pad) / cell_h).floor().max(0.0) as usize;
+        (col, row)
+    }
+
+    /// Copy the current selection to the clipboard.
+    fn copy_selection(&mut self) {
+        let Some(sel) = self.selection else { return };
+        let Some(term) = self.terminal.as_ref() else {
+            return;
+        };
+        let text = selection_text(sel, &term.cells());
+        if text.is_empty() {
+            return;
+        }
+        if let Some(clipboard) = self.clipboard.as_mut() {
+            if let Err(err) = clipboard.set_text(text) {
+                tracing::warn!(%err, "clipboard copy failed");
+            }
+        }
+    }
+
+    /// Paste the clipboard contents into the shell.
+    fn paste(&mut self) {
+        let Some(text) = self.clipboard.as_mut().and_then(|c| c.get_text().ok()) else {
+            return;
+        };
+        if let Some(term) = self.terminal.as_mut() {
+            term.scroll_to_bottom();
+            term.write(text.as_bytes());
+        }
+    }
+
+    /// Handle a key press: platform combos (quit/copy/paste), scrollback keys, then
+    /// terminal input.
+    fn on_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
+        if key_event.state != ElementState::Pressed {
+            return;
+        }
+        // Platform combos (Cmd/Super + Q/C/V). The terminal owns every other key -
+        // Ctrl+C etc. still reach the shell.
+        if self.modifiers.super_key() {
+            if let Key::Character(ch) = key_event.logical_key.as_ref() {
+                if ch.eq_ignore_ascii_case("q") {
+                    event_loop.exit();
+                    return;
+                }
+                if ch.eq_ignore_ascii_case("c") {
+                    self.copy_selection();
+                    return;
+                }
+                if ch.eq_ignore_ascii_case("v") {
+                    self.paste();
+                    return;
+                }
+            }
+        }
+        // Shift + PageUp/PageDown scrolls the scrollback (not sent to the shell).
+        if self.modifiers.shift_key() {
+            match key_event.logical_key.as_ref() {
+                Key::Named(NamedKey::PageUp) => {
+                    if let Some(terminal) = self.terminal.as_mut() {
+                        terminal.scroll_page(true);
+                    }
+                    return;
+                }
+                Key::Named(NamedKey::PageDown) => {
+                    if let Some(terminal) = self.terminal.as_mut() {
+                        terminal.scroll_page(false);
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
+        if let Some(bytes) = key_to_bytes(key_event, self.modifiers) {
+            if let Some(terminal) = self.terminal.as_mut() {
+                // Typing jumps back to the live prompt.
+                terminal.scroll_to_bottom();
+                terminal.write(&bytes);
+            }
+            self.selection = None; // typing clears the selection
         }
     }
 }
@@ -182,43 +300,44 @@ impl ApplicationHandler<Wakeup> for App {
             WindowEvent::KeyboardInput {
                 event: key_event, ..
             } => {
-                if key_event.state != ElementState::Pressed {
-                    return;
+                self.on_key(event_loop, &key_event);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.pointer = (position.x, position.y);
+                if self.selecting {
+                    let cell = self.pointer_cell();
+                    if let Some(selection) = self.selection.as_mut() {
+                        selection.head = cell;
+                    }
+                    if let Some(window) = self.window.as_ref() {
+                        window.request_redraw();
+                    }
                 }
-                // Quit on the platform combo (Cmd/Super + Q) without stealing it
-                // from the shell in any other case - the terminal owns every key.
-                if self.modifiers.super_key() {
-                    if let Key::Character(ch) = key_event.logical_key.as_ref() {
-                        if ch.eq_ignore_ascii_case("q") {
-                            event_loop.exit();
-                            return;
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                match state {
+                    ElementState::Pressed => {
+                        let cell = self.pointer_cell();
+                        self.selection = Some(Selection {
+                            anchor: cell,
+                            head: cell,
+                        });
+                        self.selecting = true;
+                    }
+                    ElementState::Released => {
+                        self.selecting = false;
+                        // A click with no drag clears the (single-cell) selection.
+                        if self.selection.is_some_and(|sel| sel.anchor == sel.head) {
+                            self.selection = None;
                         }
                     }
                 }
-                // Shift + PageUp/PageDown scrolls the scrollback (not sent to the shell).
-                if self.modifiers.shift_key() {
-                    match key_event.logical_key.as_ref() {
-                        Key::Named(NamedKey::PageUp) => {
-                            if let Some(terminal) = self.terminal.as_mut() {
-                                terminal.scroll_page(true);
-                            }
-                            return;
-                        }
-                        Key::Named(NamedKey::PageDown) => {
-                            if let Some(terminal) = self.terminal.as_mut() {
-                                terminal.scroll_page(false);
-                            }
-                            return;
-                        }
-                        _ => {}
-                    }
-                }
-                if let Some(bytes) = key_to_bytes(&key_event, self.modifiers) {
-                    if let Some(terminal) = self.terminal.as_mut() {
-                        // Typing jumps back to the live prompt.
-                        terminal.scroll_to_bottom();
-                        terminal.write(&bytes);
-                    }
+                if let Some(window) = self.window.as_ref() {
+                    window.request_redraw();
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -256,6 +375,64 @@ impl ApplicationHandler<Wakeup> for App {
 )]
 fn wheel_lines(delta: f64) -> i32 {
     delta.round() as i32
+}
+
+/// Order a selection's endpoints in reading order (row-major).
+fn order(sel: Selection) -> ((usize, usize), (usize, usize)) {
+    let (a, h) = (sel.anchor, sel.head);
+    if (a.1, a.0) <= (h.1, h.0) {
+        (a, h)
+    } else {
+        (h, a)
+    }
+}
+
+/// The cells covered by a linear selection, clamped to a `rows` x `cols` grid.
+fn selection_cells(sel: Selection, rows: usize, cols: usize) -> Vec<(usize, usize)> {
+    if rows == 0 || cols == 0 {
+        return Vec::new();
+    }
+    let ((start_col, start_row), (end_col, end_row)) = order(sel);
+    if start_row >= rows {
+        return Vec::new();
+    }
+    let end_row = end_row.min(rows - 1);
+    let mut cells = Vec::new();
+    for row in start_row..=end_row {
+        let first = if row == start_row { start_col } else { 0 };
+        let last = if row == end_row { end_col } else { cols - 1 };
+        for col in first..=last.min(cols - 1) {
+            cells.push((col, row));
+        }
+    }
+    cells
+}
+
+/// The text of a linear selection, row by row (trailing spaces trimmed).
+fn selection_text(sel: Selection, cells: &[Vec<TermCell>]) -> String {
+    if cells.is_empty() {
+        return String::new();
+    }
+    let ((start_col, start_row), (end_col, end_row)) = order(sel);
+    if start_row >= cells.len() {
+        return String::new();
+    }
+    let end_row = end_row.min(cells.len() - 1);
+    let mut lines = Vec::new();
+    for (row, cols) in cells.iter().enumerate().take(end_row + 1).skip(start_row) {
+        let last_col = cols.len().saturating_sub(1);
+        let first = if row == start_row { start_col } else { 0 };
+        let last = if row == end_row {
+            end_col.min(last_col)
+        } else {
+            last_col
+        };
+        let text: String = (first..=last)
+            .filter_map(|c| cols.get(c).map(|cell| cell.c))
+            .collect();
+        lines.push(text.trim_end().to_owned());
+    }
+    lines.join("\n")
 }
 
 /// Translate a key press into the bytes a terminal expects, or `None` if it has no
@@ -306,4 +483,72 @@ fn init_tracing() {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_env("SKELLY_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     fmt().with_env_filter(filter).with_target(false).init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{order, selection_cells, selection_text, Selection};
+    use skelly_term::{CellColor, TermCell};
+
+    fn grid(lines: &[&str]) -> Vec<Vec<TermCell>> {
+        lines
+            .iter()
+            .map(|line| {
+                line.chars()
+                    .map(|c| TermCell {
+                        c,
+                        fg: CellColor::Default,
+                        bg: CellColor::Default,
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn single_row_selection_text() {
+        let g = grid(&["hello world"]);
+        let sel = Selection {
+            anchor: (0, 0),
+            head: (4, 0),
+        };
+        assert_eq!(selection_text(sel, &g), "hello");
+    }
+
+    #[test]
+    fn multi_row_selection_reads_in_order() {
+        let g = grid(&["abcde", "fghij", "klmno"]);
+        let sel = Selection {
+            anchor: (2, 0),
+            head: (2, 2),
+        };
+        assert_eq!(selection_text(sel, &g), "cde\nfghij\nklm");
+    }
+
+    #[test]
+    fn reversed_endpoints_are_ordered() {
+        let g = grid(&["abcde"]);
+        let sel = Selection {
+            anchor: (4, 0),
+            head: (1, 0),
+        };
+        let (start, end) = order(sel);
+        assert_eq!((start, end), ((1, 0), (4, 0)));
+        assert_eq!(selection_text(sel, &g), "bcde");
+    }
+
+    #[test]
+    fn selection_cells_clamp_to_the_grid() {
+        let cells = selection_cells(
+            Selection {
+                anchor: (0, 0),
+                head: (100, 100),
+            },
+            3,
+            5,
+        );
+        assert_eq!(cells.len(), 15); // 3 rows x 5 cols
+        assert!(cells.contains(&(4, 2)));
+        assert!(!cells.iter().any(|&(c, r)| c >= 5 || r >= 3));
+    }
 }

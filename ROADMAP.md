@@ -44,7 +44,8 @@ ADRs (0001-0004) are ratified.
     - [x] Scrollback: 10k-line history with mouse-wheel + Shift+PageUp/Down
       scrolling and scroll-to-bottom on input; renders the scrolled view via the
       display offset. (Engine support from `alacritty_terminal`.)
-    - [ ] Selection + copy/paste (clipboard).
+    - [x] Selection + copy/paste: mouse-drag selection with a translucent highlight,
+      Cmd/Super+C copies the selection, Cmd/Super+V pastes into the shell (`arboard`).
     - [ ] VT/ANSI conformance (vttest / esctest in CI, fuzz the parser).
     - [ ] Resize/reflow polish, live theme-token resolution.
 - [ ] **M3 - Skelly shell UX.** Sidebar + tabs/groups/pinning; pane tree

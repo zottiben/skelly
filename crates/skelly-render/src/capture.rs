@@ -43,8 +43,8 @@ pub fn capture_rgba(
     ))
 }
 
-/// Like [`capture_rgba`], but renders a colored grid with per-cell backgrounds and a
-/// cursor at `cursor` `(column, row)`.
+/// Like [`capture_rgba`], but renders a colored grid with per-cell backgrounds, a
+/// cursor at `cursor` `(column, row)`, and `selection` highlighted cells.
 ///
 /// # Panics
 /// Panics if no GPU adapter/device is available or the readback fails.
@@ -56,6 +56,7 @@ pub fn capture_cells_rgba(
     scale: f64,
     rows: &[Vec<GridCell>],
     cursor: (usize, usize),
+    selection: &[(usize, usize)],
 ) -> Vec<u8> {
     let theme = Theme::resolve(&appearance.theme);
     pollster::block_on(capture_async(
@@ -67,7 +68,7 @@ pub fn capture_cells_rgba(
         |text| {
             text.set_cells(rows);
             let (cell_w, cell_h, pad) = text.cell_metrics();
-            grid_quads(cell_w, cell_h, pad, rows, cursor, theme.accent)
+            grid_quads(cell_w, cell_h, pad, rows, cursor, theme.accent, selection)
         },
     ))
 }

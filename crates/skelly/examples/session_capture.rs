@@ -67,8 +67,22 @@ fn main() {
                 .collect()
         })
         .collect();
-    let rgba =
-        skelly_render::capture_cells_rgba(&appearance, width, height, 2.0, &rows, term.cursor());
+    // A demo selection (rows 2-4) to show the translucent highlight.
+    let mut selection = Vec::new();
+    for row in 2..=4 {
+        for col in 0..30 {
+            selection.push((col, row));
+        }
+    }
+    let rgba = skelly_render::capture_cells_rgba(
+        &appearance,
+        width,
+        height,
+        2.0,
+        &rows,
+        term.cursor(),
+        &selection,
+    );
 
     let file = std::fs::File::create(&path).expect("create png");
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);

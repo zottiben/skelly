@@ -24,3 +24,5 @@ tracing-subscriber.workspace = true
 winit = "0.30.13"
 skelly-render = { version = "0.1.0", path = "../skelly-render" }
 skelly-term = { version = "0.1.0", path = "../skelly-term" }
+# Text-only clipboard; disable the default image feature to keep the tree lean.
+arboard = { version = "3.6.1", default-features = false }
