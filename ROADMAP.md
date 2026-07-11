@@ -4,10 +4,13 @@ Delivery is sequenced in milestones, each a set of thin vertical slices with a
 demoable outcome. We never start a later milestone's polish before the current one
 runs end-to-end. Rationale and detail are in the engineering playbook.
 
-## Current: M0 -> M1
+## Current: M2 -> M3
 
-M0 (foundation) is in place. The next slice begins M1 once the foundation-stack
-ADRs (0001-0004) are ratified.
+M0, M1, and the core of M2 (core terminal) are in place and run end-to-end. M2 has
+a handful of tracked carry-overs - the unchecked boxes below (bespoke cell renderer,
+cargo-fuzz, reflow/theme polish, SGR fidelity follow-ups) - which we finish
+opportunistically rather than block M3 on, since the terminal already works. M3
+(Skelly shell UX) is the next milestone.
 
 - [x] **M0 - Foundation.** Workspace, quality gates, CI, docs, ADR log, and the
   `skelly-config` slice (schema + load + validate + tests), with a runnable binary
@@ -57,15 +60,20 @@ ADRs (0001-0004) are ratified.
         2-column floor.
       - [ ] Coverage-guided `cargo-fuzz` target (nightly) for deeper fuzzing.
     - [ ] Resize/reflow polish, live theme-token resolution.
-  - [x] **M2e** - SGR text attributes: bold / italic (cosmic-text weight+style),
+  - [~] **M2e** - SGR text attributes: bold / italic (cosmic-text weight+style),
     underline (a cell-width rule quad), reverse video and dim (resolved against the
     palette: swap fg/bg using a new `default_bg`, reduce fg intensity). `skelly-term`
     exposes a `CellAttrs` bitflags set read from the engine cell flags. Also fixed a
     latent cell-grid alignment bug: full-width rows wrapped in the text buffer,
     doubling the line pitch and desyncing glyphs from the background / cursor /
     underline / selection quads - the buffer now uses `Wrap::None` so each grid row is
-    exactly one visual line. `bold_is_bright` (config) is not yet honored (bold =
-    weight only) - a follow-up.
+    exactly one visual line. Core done; SGR fidelity follow-ups remain:
+    - [ ] `bold_is_bright` config key - bold is weight-only today; when set, bold
+      should also brighten ANSI 0-7 foregrounds to their 8-15 bright variants.
+    - [ ] Distinguish underline styles (double / curly / dotted / dashed); all
+      collapse to a single underline in `skelly-term`'s `map_attrs` today.
+    - [ ] Resolve the dim-named ANSI colors and the explicit default-bg / cursor
+      named colors in `map_color` instead of falling back to the default foreground.
 - [ ] **M3 - Skelly shell UX.** Sidebar + tabs/groups/pinning; pane tree
   (split/focus/resize/zoom, <=8); command palette; settings view; live theming.
 - [ ] **M4 - Signature features.** Per-repo git diff dock with hunk staging;
