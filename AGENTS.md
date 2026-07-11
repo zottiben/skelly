@@ -43,9 +43,12 @@ windowing `winit`) - pending ratification, landed in M1. See `docs/adr/`.
 **Layout** (Cargo workspace - scaffolded; keep crate boundaries aligned with the
 design guide's modules)
 - `Cargo.toml` - `[workspace]` root
-- `crates/skelly/` - the binary: window, sidebar, pane tree, command palette, wiring
+- `crates/skelly/` - the binary: window, sidebar, pane widget/wiring, command palette
 - `crates/skelly-render/` - GPU cell-grid renderer, fonts, theme token resolution
 - `crates/skelly-term/` - PTY, shell I/O, ANSI parsing, scrollback
+- `crates/skelly-pane/` - the pane-tree model (tiling splits/focus/resize/zoom, <=8);
+  pure logic, no UI/GPU/PTY deps, a leaf like `skelly-config` (ADR-0005). The binary
+  owns the wiring (pane -> terminal, rendering, keys).
 - `crates/skelly-session/` - session timeline, non-destructive rewind (shadow worktree), git diff
 - `crates/skelly-config/` - `config.toml` load/watch/schema (the source of truth; see Hard rule 1)
 - `design/` - the binding design spec (see Design below)

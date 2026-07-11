@@ -74,8 +74,16 @@ opportunistically rather than block M3 on, since the terminal already works. M3
       collapse to a single underline in `skelly-term`'s `map_attrs` today.
     - [ ] Resolve the dim-named ANSI colors and the explicit default-bg / cursor
       named colors in `map_color` instead of falling back to the default foreground.
-- [ ] **M3 - Skelly shell UX.** Sidebar + tabs/groups/pinning; pane tree
+- [~] **M3 - Skelly shell UX.** Sidebar + tabs/groups/pinning; pane tree
   (split/focus/resize/zoom, <=8); command palette; settings view; live theming.
+  - [~] Pane tree (split/focus/resize/zoom, <=8).
+    - [x] The pane-tree **model** - a leaf crate `skelly-pane` (ADR-0005): nested
+      uneven binary splits, directional focus, keyboard resize, zoom, even-out, and
+      exact viewport tiling, capped at 8 panes. Pure logic, unit + `proptest`
+      tiling-invariant tested; no UI/GPU/PTY deps.
+    - [ ] Wire it into the window: a live terminal per pane, the renderer drawing
+      each pane at its rect with dividers + the focused `border.strong` ring, input
+      routed to the focused pane, and the split/close/focus/zoom keybindings.
 - [ ] **M4 - Signature features.** Per-repo git diff dock with hunk staging;
   session timeline with non-destructive rewind (shadow worktree).
 - [ ] **M5 - Hardening & release.** Edge/empty/error states, perf budgets,

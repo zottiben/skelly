@@ -1,0 +1,18 @@
+[package]
+name = "skelly-pane"
+description = "The pane tree: a tab's tiling layout of terminal panes (split / focus / resize / zoom, <=8). Pure logic, no UI/GPU/PTY deps."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+# Property-based testing of the tiling invariants: random op sequences must keep the
+# tree well-formed and the layout a gap-free, overlap-free tiling (playbook §4).
+proptest = "1"

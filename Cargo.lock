@@ -2191,6 +2191,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "skelly-pane"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+]
+
+[[package]]
 name = "skelly-render"
 version = "0.1.0"
 dependencies = [
