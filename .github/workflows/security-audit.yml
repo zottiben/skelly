@@ -1,7 +1,9 @@
 name: security-audit
 
-# cargo-deny gates advisories at PR time; this catches advisories filed *after*
-# the last push, on a daily schedule and whenever the dependency graph changes.
+# The PR/main gate (ci.yml) runs the full `cargo deny check`. This job re-checks
+# advisories on a daily schedule and whenever the dependency graph changes, to catch
+# advisories filed *after* the last commit. Using cargo-deny keeps one source of
+# truth for ignores (deny.toml) and needs no check-run permissions.
 on:
   schedule:
     - cron: "0 6 * * *"
@@ -9,13 +11,17 @@ on:
     paths:
       - "**/Cargo.toml"
       - "**/Cargo.lock"
+      - "deny.toml"
       - ".github/workflows/security-audit.yml"
 
+permissions:
+  contents: read
+
 jobs:
-  audit:
+  advisories:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v2
+      - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          command: check advisories
