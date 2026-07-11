@@ -13,3 +13,8 @@ publish = false
 workspace = true
 
 [dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+# Integration tests drive a real `git` against a throwaway repo in a temp dir.
+tempfile = "3"

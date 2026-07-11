@@ -2216,6 +2216,10 @@ dependencies = [
 [[package]]
 name = "skelly-session"
 version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "skelly-term"

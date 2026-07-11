@@ -13,6 +13,7 @@ old one and flip its status.
 | [0003](0003-gpu-renderer.md)                  | GPU renderer + font stack      | Accepted |
 | [0004](0004-windowing.md)                     | Windowing / input layer        | Accepted |
 | [0005](0005-pane-tree-crate.md)               | Pane-tree model as a leaf crate | Accepted |
+| [0006](0006-git-backend.md)                   | Git backend: the `git` CLI     | Accepted |
 
 ADRs 0001-0004 settle the open foundation decisions flagged in
 [`design/README.md`](../../design/README.md). Ratified 2026-07-11; the M1 walking

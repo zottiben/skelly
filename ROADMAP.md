@@ -4,13 +4,15 @@ Delivery is sequenced in milestones, each a set of thin vertical slices with a
 demoable outcome. We never start a later milestone's polish before the current one
 runs end-to-end. Rationale and detail are in the engineering playbook.
 
-## Current: M2 -> M3
+## Current: M3 -> M4
 
-M0, M1, and the core of M2 (core terminal) are in place and run end-to-end. M2 has
-a handful of tracked carry-overs - the unchecked boxes below (bespoke cell renderer,
-cargo-fuzz, reflow/theme polish, SGR fidelity follow-ups) - which we finish
-opportunistically rather than block M3 on, since the terminal already works. M3
-(Skelly shell UX) is the next milestone.
+M0, M1, the core of M2 (core terminal), and all the big M3 slices (sidebar + tabs,
+pane tree, command palette, settings view, live theming) are in place and run
+end-to-end. M2 has a handful of tracked carry-overs - the unchecked boxes below
+(bespoke cell renderer, cargo-fuzz, reflow/theme polish, SGR fidelity follow-ups) -
+plus a few M3 follow-ups, which we finish opportunistically rather than block M4 on.
+M4 (signature features) has begun: the git diff **model** landed; the diff dock UI,
+hunk staging, and the session timeline / non-destructive rewind are next.
 
 - [x] **M0 - Foundation.** Workspace, quality gates, CI, docs, ADR log, and the
   `skelly-config` slice (schema + load + validate + tests), with a runnable binary
@@ -152,8 +154,28 @@ opportunistically rather than block M3 on, since the terminal already works. M3
     workspace in both themes. (Follow-up: a separate ANSI-scheme vs UI-theme config
     key so the two are independently selectable per Hard rule 2; today one name drives
     both, and there is no theme-file watch yet.)
-- [ ] **M4 - Signature features.** Per-repo git diff dock with hunk staging;
+- [~] **M4 - Signature features.** Per-repo git diff dock with hunk staging;
   session timeline with non-destructive rewind (shadow worktree).
+  - [~] Per-repo git diff dock.
+    - [x] The read-only git diff **model** in `skelly-session` (ADR-0006: shell out
+      to the `git` CLI behind a Skelly-owned type, not libgit2). `Repo::discover`
+      finds the working tree; `Repo::status` reports the branch, ahead/behind, and
+      the changed files (staged / unstaged / untracked, with status kind + line
+      counts); `Repo::diff` returns a per-file unified diff parsed into hunks and
+      line-numbered add/del/context lines. Invocation is split from parsing so the
+      porcelain-v2 / numstat / unified-diff parsers are unit-tested from sample
+      strings (10 tests), plus an integration test driving a real `git` against a
+      throwaway repo (2 tests).
+    - [ ] The right-dock render surface + `⇧⌘G` wiring (a layer, Hard rule 4; 420px,
+      resizable 360-560), showing the changed-file list and the selected file's diff
+      with the `diff.add` / `diff.del` / `diff.hunk` tokens; scoped to the active
+      tab's repo.
+    - [ ] Per-file + hunk-level staging (`git apply --cached`), stage-all, and the
+      commit box.
+  - [ ] Session timeline + non-destructive rewind (shadow worktree via
+    `git worktree add --detach`; Hard rule 3 - HEAD/refs untouched, adversarially
+    tested). Blocked on the open decisions (timeline AI-actions contract, rewind +
+    edit, persist scope) in `design/README.md`.
 - [ ] **M5 - Hardening & release.** Edge/empty/error states, perf budgets,
   packaging (signed macOS `.app`, Linux artifacts), first tagged release.
 
