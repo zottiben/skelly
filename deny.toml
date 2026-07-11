@@ -4,7 +4,21 @@
 [advisories]
 version = 2
 yanked = "deny"
-# ignore = ["RUSTSEC-YYYY-NNNN"]  # only ever with a comment + a tracking issue.
+# Ignored only when transitive, unfixable now, and low-relevance to our threat
+# model. Each entry states why and when to revisit. Re-audit at every dep bump.
+ignore = [
+    # quick-xml XML DoS (quadratic parse / unbounded namespace alloc). Reached ONLY
+    # on Linux via winit -> sctk-adwaita (Wayland client-side window decorations,
+    # parsing the desktop theme) - never from input Skelly handles, and not compiled
+    # on macOS. No patched release within sctk-adwaita's range. Revisit when
+    # winit/sctk-adwaita bump quick-xml.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+    # ttf-parser unmaintained (not a vulnerability). Pulled transitively by
+    # cosmic-text/fontdb for font parsing; no drop-in swap until glyphon/cosmic-text
+    # migrate to skrifa. Revisit at the next cosmic-text bump.
+    "RUSTSEC-2026-0192",
+]
 
 [licenses]
 version = 2

@@ -9,6 +9,10 @@ Conventional Commits - do not hand-edit it.
 
 ### Added
 
+- M1a (walking skeleton, first slice): a native window (`winit`) with a `wgpu` GPU
+  surface that clears to the resolved Ossein theme background each frame, quitting
+  cleanly on window-close, Escape, or `q`. `skelly-render` gains the `Renderer` and
+  a minimal semantic `Theme` token resolver (no raw hex in the binary).
 - M0 foundation: Cargo workspace with the five design crates (`skelly`,
   `skelly-render`, `skelly-term`, `skelly-session`, `skelly-config`).
 - Quality gates: pinned toolchain, rustfmt, clippy (`-D warnings`, pedantic),

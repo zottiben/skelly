@@ -13,3 +13,9 @@ publish = false
 workspace = true
 
 [dependencies]
+glyphon = "0.12.0"
+pollster = "1.0.1"
+raw-window-handle = "0.6"
+skelly-config = { version = "0.1.0", path = "../skelly-config" }
+thiserror.workspace = true
+wgpu = "30"
