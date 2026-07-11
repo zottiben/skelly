@@ -47,6 +47,20 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-12 - **Tab model (first half of "sidebar + tabs").** The window now holds
+  multiple tabs, each an independent tiling workspace (its own pane tree + a live
+  shell per pane + selection); switching a tab swaps the whole terminal workspace and
+  background tabs keep their shells running. Keybindings follow the guide's Tab
+  management table: `⌘T` new tab, `⌘W` close tab, `⌘1..9` jump to the nth tab, and the
+  guide's `⌥⇧[` / `⌥⇧]` bracket chords to cycle prev/next. As with the other `⌘`
+  bindings (`⌘K` / `⌘C` / `⌘V`), the command modifier is mapped to `Super` on both
+  platforms for now; the guide's Linux `Ctrl+Shift+*` mapping waits on the full
+  `[keys]` registry. `⌘W` is tab-close and `⌥w` stays pane-close (per the 2026-07-11
+  pane-keybindings decision), so the guide's overloading of `⌘W` onto panes is not
+  adopted. Deferred to the sidebar-chrome slice (no visual tab affordance yet): closing
+  the last tab shows the guide's empty state instead of a no-op, and closing a tab with
+  a running foreground process should confirm first. Also deferred: the sidebar that
+  lists tabs, `⌘B`/`⇧⌘B` sidebar modes, groups, and pinning.
 - 2026-07-12 - **Palette fuzzy matching.** The command palette now fuzzy-matches
   (query characters must appear in order in the label, ASCII case-insensitive) and
   ranks results by an earliest-first-match, fewest-gaps score (ties keep the

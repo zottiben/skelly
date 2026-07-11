@@ -90,8 +90,51 @@ enum PaneAction {
     EvenOut,
 }
 
+/// A tab operation bound to a keyboard chord.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TabAction {
+    /// Open a new tab and switch to it.
+    New,
+    /// Close the active tab.
+    Close,
+    /// Jump to the tab at this 0-based index.
+    Goto(usize),
+    /// Cycle to the next tab.
+    Next,
+    /// Cycle to the previous tab.
+    Prev,
+}
+
+/// One tab: an independent tiling workspace - its own pane tree, a live shell per
+/// pane, the per-pane grid-size cache, and its own text selection. Tabs are fully
+/// isolated; switching tabs swaps the whole terminal workspace and its shells keep
+/// running in the background. (The sidebar that lists tabs is a later slice; today
+/// tabs are created, closed, and switched from the keyboard and command palette.)
+struct Tab {
+    /// The tiling model; every leaf maps to a live terminal in `panes`.
+    tree: PaneTree,
+    /// One live shell per pane.
+    panes: HashMap<PaneId, Terminal>,
+    /// Each pane's last-applied grid size, so we only resize on a real change.
+    dims: HashMap<PaneId, (u16, u16)>,
+    /// The active selection and the pane it belongs to.
+    selection: Option<(PaneId, Selection)>,
+}
+
+impl Tab {
+    /// A fresh tab: a single-pane tree with no shells yet (`sync_layout` spawns them).
+    fn new() -> Self {
+        Self {
+            tree: PaneTree::new(),
+            panes: HashMap::new(),
+            dims: HashMap::new(),
+            selection: None,
+        }
+    }
+}
+
 /// Application state driven by the winit event loop. The window and renderer are
-/// `None` until the platform signals `resumed`; the pane tree exists from the start.
+/// `None` until the platform signals `resumed`; the tab list exists from the start.
 struct App {
     config: Config,
     proxy: EventLoopProxy<Wakeup>,
@@ -103,19 +146,16 @@ struct App {
     clipboard: Option<arboard::Clipboard>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
-    /// The tiling model; every leaf maps to a live terminal in `panes`.
-    tree: PaneTree,
-    /// One live shell per pane.
-    panes: HashMap<PaneId, Terminal>,
-    /// Each pane's last-applied grid size, so we only resize on a real change.
-    dims: HashMap<PaneId, (u16, u16)>,
+    /// The open tabs; `active` indexes the visible one. Always at least one.
+    tabs: Vec<Tab>,
+    /// Index of the visible tab in `tabs`.
+    active: usize,
     /// Current surface size in physical px.
     size: (u32, u32),
     scale: f64,
     modifiers: ModifiersState,
     pointer: (f64, f64),
-    /// The active selection and the pane it belongs to.
-    selection: Option<(PaneId, Selection)>,
+    /// Whether a mouse-drag selection is in progress (in the active tab).
     selecting: bool,
 }
 
@@ -132,16 +172,24 @@ impl App {
             clipboard: arboard::Clipboard::new().ok(),
             window: None,
             renderer: None,
-            tree: PaneTree::new(),
-            panes: HashMap::new(),
-            dims: HashMap::new(),
+            tabs: vec![Tab::new()],
+            active: 0,
             size: (0, 0),
             scale: 1.0,
             modifiers: ModifiersState::empty(),
             pointer: (0.0, 0.0),
-            selection: None,
             selecting: false,
         }
+    }
+
+    /// The currently visible tab.
+    fn active_tab(&self) -> &Tab {
+        &self.tabs[self.active]
+    }
+
+    /// The currently visible tab, mutably.
+    fn active_tab_mut(&mut self) -> &mut Tab {
+        &mut self.tabs[self.active]
     }
 
     /// The pane area within the window (the surface inset by the window margin).
@@ -157,26 +205,31 @@ impl App {
         PANE_INSET * scale32(self.scale)
     }
 
-    /// The focused pane's live terminal, if any.
+    /// The focused pane's live terminal in the active tab, if any.
     fn focused_term(&mut self) -> Option<&mut Terminal> {
-        let id = self.tree.focused();
-        self.panes.get_mut(&id)
+        let ws = self.active_tab_mut();
+        let id = ws.tree.focused();
+        ws.panes.get_mut(&id)
     }
 
-    /// The rectangle of pane `id` in the current layout, if it is visible.
+    /// The rectangle of pane `id` in the active tab's current layout, if it is visible.
     fn pane_rect(&self, id: PaneId) -> Option<Rect> {
-        self.tree
-            .layout(self.viewport_rect())
+        let viewport = self.viewport_rect();
+        self.active_tab()
+            .tree
+            .layout(viewport)
             .into_iter()
             .find(|(pid, _)| *pid == id)
             .map(|(_, rect)| rect)
     }
 
-    /// The pane whose rectangle contains the pointer, with that rectangle.
+    /// The active tab's pane whose rectangle contains the pointer, with that rectangle.
     fn pane_at_pointer(&self) -> Option<(PaneId, Rect)> {
         let (px, py) = point_f32(self.pointer);
-        self.tree
-            .layout(self.viewport_rect())
+        let viewport = self.viewport_rect();
+        self.active_tab()
+            .tree
+            .layout(viewport)
             .into_iter()
             .find(|(_, r)| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h)
     }
@@ -189,37 +242,39 @@ impl App {
             return;
         };
         let inset = self.pane_inset();
-        let layout = self.tree.layout(self.viewport_rect());
+        let viewport = self.viewport_rect();
+        let proxy = self.proxy.clone();
+        let layout = self.active_tab().tree.layout(viewport);
 
+        let ws = self.active_tab_mut();
         // Drop shells for panes no longer in the tree (closed panes). Hidden-by-zoom
         // panes stay, since `tree.panes()` still lists them.
-        let live: HashSet<PaneId> = self.tree.panes().into_iter().collect();
-        self.panes.retain(|id, _| live.contains(id));
-        self.dims.retain(|id, _| live.contains(id));
+        let live: HashSet<PaneId> = ws.tree.panes().into_iter().collect();
+        ws.panes.retain(|id, _| live.contains(id));
+        ws.dims.retain(|id, _| live.contains(id));
 
         for (id, rect) in layout {
             let target = pane_dims(rect, cell_w, cell_h, inset);
-            if self.panes.contains_key(&id) {
-                if self.dims.get(&id) != Some(&target) {
-                    if let Some(term) = self.panes.get_mut(&id) {
-                        term.resize(target.0, target.1);
-                    }
-                    self.dims.insert(id, target);
+            if let Some(term) = ws.panes.get_mut(&id) {
+                // Existing pane: resize only when its grid size actually changed.
+                if ws.dims.get(&id) != Some(&target) {
+                    term.resize(target.0, target.1);
+                    ws.dims.insert(id, target);
                 }
             } else {
-                let proxy = self.proxy.clone();
+                let proxy = proxy.clone();
                 match Terminal::spawn(target.0, target.1, move || {
                     let _ = proxy.send_event(Wakeup);
                 }) {
                     Ok(term) => {
-                        self.panes.insert(id, term);
-                        self.dims.insert(id, target);
+                        ws.panes.insert(id, term);
+                        ws.dims.insert(id, target);
                     }
                     Err(err) => {
                         tracing::error!(%err, "failed to spawn shell for a new pane");
                         // Roll the split back so every live pane still has a shell.
-                        self.tree.set_focus(id);
-                        self.tree.close();
+                        ws.tree.set_focus(id);
+                        ws.tree.close();
                     }
                 }
             }
@@ -230,13 +285,15 @@ impl App {
     /// overlaying the selection and the focused-pane ring.
     fn redraw(&mut self) {
         let inset = self.pane_inset();
-        let layout = self.tree.layout(self.viewport_rect());
-        let focused = self.tree.focused();
+        let viewport = self.viewport_rect();
+        let ws = self.active_tab();
+        let layout = ws.tree.layout(viewport);
+        let focused = ws.tree.focused();
 
         let frames: Vec<PaneFrame> = layout
             .into_iter()
             .filter_map(|(id, rect)| {
-                let term = self.panes.get(&id)?;
+                let term = ws.panes.get(&id)?;
                 let rows: Vec<Vec<GridCell>> = term
                     .cells()
                     .iter()
@@ -247,7 +304,7 @@ impl App {
                     })
                     .collect();
                 let cols = rows.first().map_or(0, Vec::len);
-                let selection = match self.selection {
+                let selection = match ws.selection {
                     Some((sid, sel)) if sid == id => selection_cells(sel, rows.len(), cols),
                     _ => Vec::new(),
                 };
@@ -340,10 +397,10 @@ impl App {
 
     /// Copy the current selection to the clipboard.
     fn copy_selection(&mut self) {
-        let Some((id, sel)) = self.selection else {
+        let Some((id, sel)) = self.active_tab().selection else {
             return;
         };
-        let Some(term) = self.panes.get(&id) else {
+        let Some(term) = self.active_tab().panes.get(&id) else {
             return;
         };
         let text = selection_text(sel, &term.cells());
@@ -370,30 +427,29 @@ impl App {
 
     /// Apply a pane-tree operation, then reconcile terminals and request a repaint.
     fn apply_pane_action(&mut self, action: PaneAction) {
+        let cap = usize::from(self.config.panes.max).min(skelly_pane::MAX_PANES);
+        let ws = self.active_tab_mut();
         let changed = match action {
-            PaneAction::Split(dir) => {
-                let cap = usize::from(self.config.panes.max).min(skelly_pane::MAX_PANES);
-                self.tree.count() < cap && self.tree.split(dir).is_some()
-            }
-            PaneAction::Focus(dir) => self.tree.focus(dir),
-            PaneAction::FocusIndex(index) => self
+            PaneAction::Split(dir) => ws.tree.count() < cap && ws.tree.split(dir).is_some(),
+            PaneAction::Focus(dir) => ws.tree.focus(dir),
+            PaneAction::FocusIndex(index) => ws
                 .tree
                 .panes()
                 .get(index)
-                .is_some_and(|&id| self.tree.set_focus(id)),
-            PaneAction::Close => self.tree.close(),
+                .is_some_and(|&id| ws.tree.set_focus(id)),
+            PaneAction::Close => ws.tree.close(),
             PaneAction::Zoom => {
-                self.tree.zoom_toggle();
+                ws.tree.zoom_toggle();
                 true
             }
-            PaneAction::Resize(dir) => self.tree.resize(dir, RESIZE_STEP),
+            PaneAction::Resize(dir) => ws.tree.resize(dir, RESIZE_STEP),
             PaneAction::EvenOut => {
-                self.tree.even_out();
+                ws.tree.even_out();
                 true
             }
         };
         if changed {
-            self.selection = None;
+            self.active_tab_mut().selection = None;
             self.sync_layout();
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
@@ -423,6 +479,64 @@ impl App {
             renderer.set_theme(name);
         }
         self.request_redraw();
+    }
+
+    /// Open a new tab (its own pane tree + fresh shell) and switch to it.
+    fn new_tab(&mut self) {
+        self.tabs.push(Tab::new());
+        self.active = self.tabs.len() - 1;
+        self.selecting = false;
+        self.sync_layout(); // spawns the new tab's initial shell, sized to the viewport
+        self.request_redraw();
+    }
+
+    /// Close the active tab, dropping its shells (each dropped `Terminal` SIGHUPs its
+    /// shell). Keeps at least one tab open - the guide's "closing the last tab shows the
+    /// empty state" is a later slice, so for now the final tab stays put.
+    fn close_tab(&mut self) {
+        let count = self.tabs.len();
+        if count <= 1 {
+            return;
+        }
+        self.tabs.remove(self.active);
+        self.active = index_after_close(self.active, count);
+        self.selecting = false;
+        // The now-visible tab may have been sized for an earlier window; re-fit it.
+        self.sync_layout();
+        self.request_redraw();
+    }
+
+    /// Switch to the tab at `index` (0-based), if it exists and isn't already active.
+    fn goto_tab(&mut self, index: usize) {
+        if index < self.tabs.len() && index != self.active {
+            self.active = index;
+            self.selecting = false;
+            // The now-visible tab may have been sized for an earlier window; re-fit it.
+            self.sync_layout();
+            self.request_redraw();
+        }
+    }
+
+    /// Cycle to the next (`forward`) or previous tab, wrapping around.
+    fn cycle_tab(&mut self, forward: bool) {
+        let next = cycle_index(self.active, self.tabs.len(), forward);
+        if next != self.active {
+            self.active = next;
+            self.selecting = false;
+            self.sync_layout();
+            self.request_redraw();
+        }
+    }
+
+    /// Dispatch a decoded tab chord to its handler.
+    fn run_tab_action(&mut self, action: TabAction) {
+        match action {
+            TabAction::New => self.new_tab(),
+            TabAction::Close => self.close_tab(),
+            TabAction::Goto(index) => self.goto_tab(index),
+            TabAction::Next => self.cycle_tab(true),
+            TabAction::Prev => self.cycle_tab(false),
+        }
     }
 
     /// Handle a key while the command palette is open: it captures all input (typing
@@ -480,6 +594,10 @@ impl App {
             Action::FocusDown => self.apply_pane_action(PaneAction::Focus(Dir::Down)),
             Action::FocusUp => self.apply_pane_action(PaneAction::Focus(Dir::Up)),
             Action::FocusRight => self.apply_pane_action(PaneAction::Focus(Dir::Right)),
+            Action::NewTab => self.new_tab(),
+            Action::CloseTab => self.close_tab(),
+            Action::NextTab => self.cycle_tab(true),
+            Action::PrevTab => self.cycle_tab(false),
             Action::ThemeDark => self.apply_theme("ossein-dark"),
             Action::ThemeLight => self.apply_theme("ossein-light"),
             Action::Quit => event_loop.exit(),
@@ -496,6 +614,14 @@ impl App {
         if self.palette.open {
             self.on_palette_key(event_loop, key_event);
             return;
+        }
+        // Tab management (⌘T new, ⌘W close, ⌘1..9 go-to, ⌥⇧[ ] cycle). Matched on the
+        // physical key so macOS Option-glyph remapping doesn't interfere.
+        if let PhysicalKey::Code(code) = key_event.physical_key {
+            if let Some(action) = tab_action(code, self.modifiers) {
+                self.run_tab_action(action);
+                return;
+            }
         }
         // Platform combos (Cmd/Super + K/Q/C/V). The terminal owns every other key -
         // Ctrl+C etc. still reach the shell.
@@ -552,7 +678,7 @@ impl App {
                 term.scroll_to_bottom();
                 term.write(&bytes);
             }
-            self.selection = None; // typing clears the selection
+            self.active_tab_mut().selection = None; // typing clears the selection
         }
     }
 }
@@ -662,12 +788,15 @@ impl ApplicationHandler<Wakeup> for App {
         self.renderer = Some(renderer);
         // Spawn the shell for the initial pane (and size it to the viewport).
         self.sync_layout();
-        if self.panes.is_empty() {
+        if self.active_tab().panes.is_empty() {
             tracing::error!("failed to spawn the initial shell");
             event_loop.exit();
             return;
         }
-        tracing::info!(panes = self.panes.len(), "window, GPU, and shell ready");
+        tracing::info!(
+            panes = self.active_tab().panes.len(),
+            "window, GPU, and shell ready"
+        );
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: Wakeup) {
@@ -689,7 +818,7 @@ impl ApplicationHandler<Wakeup> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = (position.x, position.y);
                 if self.selecting {
-                    if let Some((id, _)) = self.selection {
+                    if let Some((id, _)) = self.active_tab().selection {
                         if let Some(rect) = self.pane_rect(id) {
                             let (cell_w, cell_h) = self.cell_size();
                             let cell = pointer_cell_in(
@@ -699,7 +828,7 @@ impl ApplicationHandler<Wakeup> for App {
                                 self.pane_inset(),
                                 self.pointer,
                             );
-                            if let Some((_, sel)) = self.selection.as_mut() {
+                            if let Some((_, sel)) = self.active_tab_mut().selection.as_mut() {
                                 sel.head = cell;
                             }
                         }
@@ -717,7 +846,7 @@ impl ApplicationHandler<Wakeup> for App {
                 match state {
                     ElementState::Pressed => {
                         if let Some((id, rect)) = self.pane_at_pointer() {
-                            self.tree.set_focus(id);
+                            self.active_tab_mut().tree.set_focus(id);
                             let (cell_w, cell_h) = self.cell_size();
                             let cell = pointer_cell_in(
                                 rect,
@@ -726,7 +855,7 @@ impl ApplicationHandler<Wakeup> for App {
                                 self.pane_inset(),
                                 self.pointer,
                             );
-                            self.selection = Some((
+                            self.active_tab_mut().selection = Some((
                                 id,
                                 Selection {
                                     anchor: cell,
@@ -740,10 +869,11 @@ impl ApplicationHandler<Wakeup> for App {
                         self.selecting = false;
                         // A click with no drag clears the (single-cell) selection.
                         if self
+                            .active_tab()
                             .selection
                             .is_some_and(|(_, sel)| sel.anchor == sel.head)
                         {
-                            self.selection = None;
+                            self.active_tab_mut().selection = None;
                         }
                     }
                 }
@@ -758,7 +888,7 @@ impl ApplicationHandler<Wakeup> for App {
                 };
                 if lines != 0 {
                     if let Some((id, _)) = self.pane_at_pointer() {
-                        if let Some(term) = self.panes.get_mut(&id) {
+                        if let Some(term) = self.active_tab_mut().panes.get_mut(&id) {
                             term.scroll_lines(lines);
                         }
                     }
@@ -822,6 +952,58 @@ fn pane_action(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
         KeyCode::Digit8 => PaneAction::FocusIndex(7),
         _ => return None,
     })
+}
+
+/// Decode a physical key + modifiers into a tab action. Tab management uses the
+/// platform command modifier (`⌘` on macOS, mapped to `Super` here to match the
+/// other `⌘` bindings): `⌘T` new tab, `⌘W` close tab, `⌘1..⌘9` jump to the nth tab;
+/// plus `⌥⇧[` / `⌥⇧]` to cycle prev / next (the guide's bracket chords). Matched on
+/// the physical key. Returns `None` for anything else (which then reaches the shell).
+fn tab_action(code: KeyCode, mods: ModifiersState) -> Option<TabAction> {
+    if mods.super_key() && !mods.alt_key() {
+        return Some(match code {
+            KeyCode::KeyT => TabAction::New,
+            KeyCode::KeyW => TabAction::Close,
+            KeyCode::Digit1 => TabAction::Goto(0),
+            KeyCode::Digit2 => TabAction::Goto(1),
+            KeyCode::Digit3 => TabAction::Goto(2),
+            KeyCode::Digit4 => TabAction::Goto(3),
+            KeyCode::Digit5 => TabAction::Goto(4),
+            KeyCode::Digit6 => TabAction::Goto(5),
+            KeyCode::Digit7 => TabAction::Goto(6),
+            KeyCode::Digit8 => TabAction::Goto(7),
+            KeyCode::Digit9 => TabAction::Goto(8),
+            _ => return None,
+        });
+    }
+    if mods.alt_key() && mods.shift_key() && !mods.super_key() {
+        return Some(match code {
+            KeyCode::BracketRight => TabAction::Next,
+            KeyCode::BracketLeft => TabAction::Prev,
+            _ => return None,
+        });
+    }
+    None
+}
+
+/// The active-tab index after cycling from `active` among `count` tabs (`forward`
+/// advances, otherwise steps back), wrapping around. A lone tab stays put.
+fn cycle_index(active: usize, count: usize, forward: bool) -> usize {
+    if count <= 1 {
+        return active;
+    }
+    if forward {
+        (active + 1) % count
+    } else {
+        (active + count - 1) % count
+    }
+}
+
+/// The new active-tab index after closing the tab at `active`, where `count` is the
+/// tab count *before* removal (always >= 2 when a tab is actually closed). Clamps into
+/// the surviving range so focus lands on a real tab.
+fn index_after_close(active: usize, count: usize) -> usize {
+    active.min(count.saturating_sub(2))
 }
 
 /// Convert a wheel delta (in lines, or approximated from pixels) to a line count.
@@ -989,8 +1171,9 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::{
-        dim, order, pane_action, pane_dims, pointer_cell_in, resolve_cell, selection_cells,
-        selection_text, PaneAction, Selection,
+        cycle_index, dim, index_after_close, order, pane_action, pane_dims, pointer_cell_in,
+        resolve_cell, selection_cells, selection_text, tab_action, PaneAction, Selection,
+        TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -1180,5 +1363,68 @@ mod tests {
         // Without the Alt leader the key belongs to the shell.
         assert_eq!(pane_action(KeyCode::KeyL, ModifiersState::empty()), None);
         assert_eq!(pane_action(KeyCode::KeyA, ModifiersState::ALT), None);
+    }
+
+    // ----- tab management -----------------------------------------------------
+
+    #[test]
+    fn super_chords_decode_to_tab_actions() {
+        let sup = ModifiersState::SUPER;
+        assert_eq!(tab_action(KeyCode::KeyT, sup), Some(TabAction::New));
+        assert_eq!(tab_action(KeyCode::KeyW, sup), Some(TabAction::Close));
+        assert_eq!(tab_action(KeyCode::Digit1, sup), Some(TabAction::Goto(0)));
+        assert_eq!(tab_action(KeyCode::Digit9, sup), Some(TabAction::Goto(8)));
+    }
+
+    #[test]
+    fn alt_shift_brackets_cycle_tabs() {
+        let alt_shift = ModifiersState::ALT | ModifiersState::SHIFT;
+        assert_eq!(
+            tab_action(KeyCode::BracketRight, alt_shift),
+            Some(TabAction::Next)
+        );
+        assert_eq!(
+            tab_action(KeyCode::BracketLeft, alt_shift),
+            Some(TabAction::Prev)
+        );
+        // Brackets without Shift are not tab actions (they reach the shell).
+        assert_eq!(tab_action(KeyCode::BracketRight, ModifiersState::ALT), None);
+    }
+
+    #[test]
+    fn tab_chords_need_the_right_modifiers() {
+        // ⌘T needs Super alone; Super+Alt is a different (unbound) chord.
+        assert_eq!(tab_action(KeyCode::KeyT, ModifiersState::empty()), None);
+        assert_eq!(
+            tab_action(KeyCode::KeyT, ModifiersState::SUPER | ModifiersState::ALT),
+            None
+        );
+        // Digit0 has no tab; Super+Digit0 is unbound.
+        assert_eq!(tab_action(KeyCode::Digit0, ModifiersState::SUPER), None);
+    }
+
+    #[test]
+    fn cycle_index_wraps_both_ways() {
+        // Three tabs, forward from the last wraps to the first; back from the first
+        // wraps to the last.
+        assert_eq!(cycle_index(2, 3, true), 0);
+        assert_eq!(cycle_index(0, 3, false), 2);
+        assert_eq!(cycle_index(0, 3, true), 1);
+        assert_eq!(cycle_index(1, 3, false), 0);
+        // A lone tab stays put in either direction.
+        assert_eq!(cycle_index(0, 1, true), 0);
+        assert_eq!(cycle_index(0, 1, false), 0);
+    }
+
+    #[test]
+    fn index_after_close_lands_on_a_surviving_tab() {
+        // Closing the last of three tabs focuses the new last (index 1).
+        assert_eq!(index_after_close(2, 3), 1);
+        // Closing a middle or first tab keeps the same index (the next tab slides in).
+        assert_eq!(index_after_close(1, 3), 1);
+        assert_eq!(index_after_close(0, 3), 0);
+        // Closing one of two tabs always lands on the sole survivor (index 0).
+        assert_eq!(index_after_close(1, 2), 0);
+        assert_eq!(index_after_close(0, 2), 0);
     }
 }

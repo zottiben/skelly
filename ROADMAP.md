@@ -76,6 +76,20 @@ opportunistically rather than block M3 on, since the terminal already works. M3
       named colors in `map_color` instead of falling back to the default foreground.
 - [~] **M3 - Skelly shell UX.** Sidebar + tabs/groups/pinning; pane tree
   (split/focus/resize/zoom, <=8); command palette; settings view; live theming.
+  - [~] Sidebar + tabs.
+    - [x] The **tab model** - `App` holds `tabs: Vec<Tab>` + `active: usize`; a `Tab`
+      bundles an independent pane tree, one live shell per pane, the grid-size cache,
+      and its own selection. Tabs are fully isolated; switching swaps the whole
+      terminal workspace and background tabs keep running. Driven by the keyboard and
+      command palette: `⌘T` new tab, `⌘W` close tab (keeps the last one), `⌘1..9`
+      go-to, `⌥⇧[` / `⌥⇧]` cycle prev/next. Unit-tested (chord decode + cycle/close
+      index math); rendering regression-checked (the active tab renders exactly as a
+      single workspace did) and the binary boots clean. Deferred to the sidebar-chrome
+      slice: closing the last tab -> empty state, and the close-confirm on a running
+      process.
+    - [ ] The left-dock **sidebar chrome** rendering the tab list (+ pinned grid,
+      footer), `⌘B` show/hide, `⇧⌘B` full<->rail, viewport inset by its width, and
+      click-to-switch. Then groups, pinning (`⇧⌘P`), and drag-reorder.
   - [x] Pane tree (split/focus/resize/zoom, <=8).
     - [x] The pane-tree **model** - a leaf crate `skelly-pane` (ADR-0005): nested
       uneven binary splits, directional focus, keyboard resize, zoom, even-out, and

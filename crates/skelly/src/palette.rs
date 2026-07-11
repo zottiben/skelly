@@ -41,6 +41,14 @@ pub(crate) enum Action {
     FocusUp,
     /// Move focus right.
     FocusRight,
+    /// Open a new tab and switch to it.
+    NewTab,
+    /// Close the active tab.
+    CloseTab,
+    /// Switch to the next tab.
+    NextTab,
+    /// Switch to the previous tab.
+    PrevTab,
     /// Switch the UI theme to Ossein Dark.
     ThemeDark,
     /// Switch the UI theme to Ossein Light.
@@ -95,6 +103,26 @@ pub(crate) const COMMANDS: &[Command] = &[
         label: "Focus pane right",
         hint: "opt L",
         action: Action::FocusRight,
+    },
+    Command {
+        label: "New tab",
+        hint: "cmd T",
+        action: Action::NewTab,
+    },
+    Command {
+        label: "Close tab",
+        hint: "cmd W",
+        action: Action::CloseTab,
+    },
+    Command {
+        label: "Next tab",
+        hint: "opt shift ]",
+        action: Action::NextTab,
+    },
+    Command {
+        label: "Previous tab",
+        hint: "opt shift [",
+        action: Action::PrevTab,
     },
     Command {
         label: "Theme: Ossein Dark",
