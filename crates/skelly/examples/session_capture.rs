@@ -6,7 +6,8 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use skelly_config::Appearance;
-use skelly_term::Terminal;
+use skelly_render::{AnsiPalette, Srgb};
+use skelly_term::{CellColor, Terminal};
 
 fn main() {
     let path = std::env::args()
@@ -16,30 +17,40 @@ fn main() {
     let (width, height) = (960_u32, 600_u32);
 
     let mut term = Terminal::spawn(cols, rows, || {}).expect("spawn shell");
-    // Let the shell print its first prompt before we type.
-    sleep(Duration::from_millis(700));
+    // Wait for the shell's first prompt before typing - heavy prompts (p10k etc.)
+    // initialize asynchronously, and typing before the prompt is ready races.
+    wait_until(&term, Duration::from_secs(6), |t| {
+        t.snapshot().iter().any(|line| !line.is_empty())
+    });
+    sleep(Duration::from_millis(400));
 
-    // The adjacent quotes concatenate only when the shell *executes* the command,
-    // so the marker appears in the output but not the echoed input line.
-    term.write(b"echo 'skelly-M1C''-live'; echo; ls -1\n");
+    // `ls -G` colorizes to a tty (the PTY is one), so the output shows real ANSI
+    // colors. The adjacent quotes concatenate only when the shell *executes* the
+    // command, so the marker appears in the output but not the echoed input.
+    term.write(b"printf 'COLORS''_LIVE\\n'; ls -G -1\n");
+    wait_until(&term, Duration::from_secs(10), |t| {
+        snapshot_has(t, "COLORS_LIVE")
+    });
+    sleep(Duration::from_millis(500));
 
-    let marker = "skelly-M1C-live";
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline && !snapshot_has(&term, marker) {
-        sleep(Duration::from_millis(50));
-    }
-    // A beat for the rest of the output.
-    sleep(Duration::from_millis(300));
-
-    let lines = term.snapshot();
     println!("--- captured grid ---");
-    for line in &lines {
+    for line in &term.snapshot() {
         println!("{line}");
     }
     println!("---------------------");
 
-    let content = lines.join("\n");
-    let rgba = skelly_render::capture_rgba(&Appearance::default(), width, height, 2.0, &content);
+    let appearance = Appearance::default();
+    let palette = AnsiPalette::resolve(&appearance.theme);
+    let rows: Vec<Vec<(char, Srgb)>> = term
+        .cells()
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|cell| (cell.c, resolve_fg(cell.fg, &palette)))
+                .collect()
+        })
+        .collect();
+    let rgba = skelly_render::capture_cells_rgba(&appearance, width, height, 2.0, &rows);
 
     let file = std::fs::File::create(&path).expect("create png");
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
@@ -55,4 +66,19 @@ fn main() {
 
 fn snapshot_has(term: &Terminal, marker: &str) -> bool {
     term.snapshot().iter().any(|line| line.contains(marker))
+}
+
+fn wait_until<F: Fn(&Terminal) -> bool>(term: &Terminal, timeout: Duration, ready: F) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline && !ready(term) {
+        sleep(Duration::from_millis(50));
+    }
+}
+
+fn resolve_fg(color: CellColor, palette: &AnsiPalette) -> Srgb {
+    match color {
+        CellColor::Default => palette.default_fg(),
+        CellColor::Indexed(index) => palette.indexed(index),
+        CellColor::Rgb(r, g, b) => Srgb { r, g, b },
+    }
 }

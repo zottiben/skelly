@@ -135,6 +135,11 @@ impl Renderer {
         self.text.set_content(text);
     }
 
+    /// Set a colored grid to display next frame: each cell is `(char, fg)`.
+    pub fn set_content_rgb(&mut self, rows: &[Vec<(char, crate::theme::Srgb)>]) {
+        self.text.set_cells(rows);
+    }
+
     /// Acquire the next surface frame, paint it, and present.
     ///
     /// Recovers from a lost/outdated swapchain by reconfiguring and skipping the

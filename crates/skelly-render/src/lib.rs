@@ -16,13 +16,15 @@
 
 #![doc(test(attr(deny(warnings))))]
 
+mod ansi;
 mod capture;
 mod error;
 mod renderer;
 mod text;
 mod theme;
 
-pub use capture::capture_rgba;
+pub use ansi::AnsiPalette;
+pub use capture::{capture_cells_rgba, capture_rgba};
 pub use error::RenderError;
 pub use renderer::Renderer;
 pub use text::TextLayer;

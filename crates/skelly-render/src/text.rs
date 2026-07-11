@@ -12,7 +12,7 @@ use glyphon::{
 use skelly_config::Appearance;
 
 use crate::error::RenderError;
-use crate::theme::Theme;
+use crate::theme::{Srgb, Theme};
 
 /// Placeholder content proving the shaping -> atlas -> GPU-draw path end-to-end.
 /// Replaced by the live terminal grid in M1c/M2.
@@ -87,6 +87,46 @@ impl TextLayer {
     pub fn set_content(&mut self, text: &str) {
         let attrs = Attrs::new().family(Family::Name(&self.family));
         self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
+    }
+
+    /// Replace the display with a colored grid: each cell is `(char, fg)`. Uses a
+    /// monospace face so columns align; consecutive same-color cells are merged into
+    /// runs to keep the span count down. (The exact fixed-metric cell renderer with
+    /// per-cell backgrounds is M2b/M2c.)
+    pub fn set_cells(&mut self, rows: &[Vec<(char, Srgb)>]) {
+        let mut runs: Vec<(String, Color)> = Vec::new();
+        for (index, row) in rows.iter().enumerate() {
+            if index > 0 {
+                runs.push((String::from("\n"), Color::rgb(0, 0, 0)));
+            }
+            let mut current: Option<(String, Color)> = None;
+            for &(ch, fg) in row {
+                let color = Color::rgb(fg.r, fg.g, fg.b);
+                match current.as_mut() {
+                    Some((text, run_color)) if *run_color == color => text.push(ch),
+                    _ => {
+                        if let Some(run) = current.take() {
+                            runs.push(run);
+                        }
+                        current = Some((ch.to_string(), color));
+                    }
+                }
+            }
+            if let Some(run) = current.take() {
+                runs.push(run);
+            }
+        }
+
+        let default = Attrs::new().family(Family::Monospace);
+        let spans = runs.iter().map(|(text, color)| {
+            (
+                text.as_str(),
+                Attrs::new().family(Family::Monospace).color(*color),
+            )
+        });
+        self.buffer
+            .set_rich_text(spans, &default, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
     }
 

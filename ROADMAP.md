@@ -24,9 +24,18 @@ ADRs (0001-0004) are ratified.
   - [x] **M1c** - PTY (`portable-pty`) + terminal core (`alacritty_terminal`): pipe
     shell output through the parser into the grid, render it live, forward
     keystrokes. Proven end-to-end with an e2e shell test + a session-capture PNG.
-- [ ] **M2 - Core terminal.** VT/ANSI correctness (vttest / esctest in CI),
-  scrollback, selection + copy/paste, resize/reflow, font shaping + Nerd Font
+- [~] **M2 - Core terminal** (in progress). VT/ANSI correctness (vttest / esctest in
+  CI), scrollback, selection + copy/paste, resize/reflow, font shaping + Nerd Font
   fallback, live theme-token resolution.
+  - [x] **M2a** - per-cell foreground colors (ANSI 16 + 256-color resolution, kept
+    separate from UI tokens) and monospace alignment. `skelly-term` exposes a colored
+    cell snapshot; `skelly-render` gains an `AnsiPalette` + colored `set_cells`.
+  - [ ] **M2b** - per-cell background colors + cursor (a colored-quad pipeline);
+    honor the configured font with proper monospace fallback.
+  - [ ] **M2c** - the real fixed-metric cell renderer (glyph atlas + instanced
+    quads) replacing reflowed text, so cells align exactly regardless of glyph.
+  - [ ] **M2d** - VT/ANSI conformance (vttest / esctest in CI, fuzz the parser),
+    scrollback, selection + copy/paste, resize/reflow, live theme-token resolution.
 - [ ] **M3 - Skelly shell UX.** Sidebar + tabs/groups/pinning; pane tree
   (split/focus/resize/zoom, <=8); command palette; settings view; live theming.
 - [ ] **M4 - Signature features.** Per-repo git diff dock with hunk staging;

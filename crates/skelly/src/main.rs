@@ -11,8 +11,8 @@ use std::sync::Arc;
 
 use anyhow::Context as _;
 use skelly_config::{Appearance, Config};
-use skelly_render::Renderer;
-use skelly_term::Terminal;
+use skelly_render::{AnsiPalette, Renderer, Srgb};
+use skelly_term::{CellColor, Terminal};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, WindowEvent};
@@ -51,6 +51,7 @@ fn main() -> anyhow::Result<()> {
 struct App {
     config: Config,
     proxy: EventLoopProxy<Wakeup>,
+    palette: AnsiPalette,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     terminal: Option<Terminal>,
@@ -60,9 +61,11 @@ struct App {
 
 impl App {
     fn new(config: Config, proxy: EventLoopProxy<Wakeup>) -> Self {
+        let palette = AnsiPalette::resolve(&config.appearance.theme);
         Self {
             config,
             proxy,
+            palette,
             window: None,
             renderer: None,
             terminal: None,
@@ -71,19 +74,33 @@ impl App {
         }
     }
 
-    /// Repaint from the current terminal snapshot.
+    /// Repaint from the current terminal grid, resolving each cell's color.
     fn redraw(&mut self) {
-        let content = self
-            .terminal
-            .as_ref()
-            .map(|t| t.snapshot().join("\n"))
-            .unwrap_or_default();
+        let rows: Vec<Vec<(char, Srgb)>> = self.terminal.as_ref().map_or_else(Vec::new, |term| {
+            term.cells()
+                .iter()
+                .map(|row| {
+                    row.iter()
+                        .map(|cell| (cell.c, resolve_fg(cell.fg, &self.palette)))
+                        .collect()
+                })
+                .collect()
+        });
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_content(&content);
+            renderer.set_content_rgb(&rows);
             if let Err(err) = renderer.render() {
                 tracing::error!(%err, "frame render failed");
             }
         }
+    }
+}
+
+/// Resolve a terminal cell's foreground color against the active ANSI palette.
+fn resolve_fg(color: CellColor, palette: &AnsiPalette) -> Srgb {
+    match color {
+        CellColor::Default => palette.default_fg(),
+        CellColor::Indexed(index) => palette.indexed(index),
+        CellColor::Rgb(r, g, b) => Srgb { r, g, b },
     }
 }
 

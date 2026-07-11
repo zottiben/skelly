@@ -21,10 +21,32 @@ use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, Processor};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 type SharedTerm = Arc<Mutex<Term<VoidListener>>>;
+
+/// A terminal color, independent of any palette: the default foreground, a palette
+/// index (ANSI 16 or the 256-color cube), or a 24-bit truecolor. Resolving an index
+/// to concrete RGB is a theming concern the renderer owns (Hard rule 2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CellColor {
+    /// The palette's default foreground.
+    Default,
+    /// A palette index (0..=255).
+    Indexed(u8),
+    /// A 24-bit truecolor.
+    Rgb(u8, u8, u8),
+}
+
+/// One grid cell: its character and foreground color. (Backgrounds arrive in M2b.)
+#[derive(Clone, Copy, Debug)]
+pub struct TermCell {
+    /// The cell's character (a space if empty).
+    pub c: char,
+    /// The cell's foreground color.
+    pub fg: CellColor,
+}
 
 /// A live terminal: a shell in a PTY, parsed into a cell grid.
 ///
@@ -145,6 +167,49 @@ impl Terminal {
             out.push(text.trim_end().to_owned());
         }
         out
+    }
+
+    /// Snapshot the visible grid as cells with per-cell foreground color (top to
+    /// bottom, left to right). Used by the renderer to draw a colored grid.
+    ///
+    /// # Panics
+    /// Panics if the terminal mutex is poisoned (i.e. the reader thread panicked
+    /// while holding it).
+    #[must_use]
+    pub fn cells(&self) -> Vec<Vec<TermCell>> {
+        let term = self.term.lock().expect("terminal mutex poisoned");
+        let grid = term.grid();
+        let columns = grid.columns();
+        let lines = grid.screen_lines();
+
+        let mut out = Vec::with_capacity(lines);
+        for line in 0..lines {
+            let row = Line(i32::try_from(line).unwrap_or(0));
+            let mut cells = Vec::with_capacity(columns);
+            for column in 0..columns {
+                let cell = &grid[row][Column(column)];
+                cells.push(TermCell {
+                    c: cell.c,
+                    fg: map_color(cell.fg),
+                });
+            }
+            out.push(cells);
+        }
+        out
+    }
+}
+
+/// Map an `alacritty_terminal` cell color to a palette-independent [`CellColor`].
+fn map_color(color: AnsiColor) -> CellColor {
+    match color {
+        AnsiColor::Spec(rgb) => CellColor::Rgb(rgb.r, rgb.g, rgb.b),
+        AnsiColor::Indexed(index) => CellColor::Indexed(index),
+        // The 16 ANSI names map to indices 0..=15; everything else (Foreground,
+        // Background, Cursor, Dim*) falls back to the default foreground for now.
+        AnsiColor::Named(named) => u8::try_from(named as usize)
+            .ok()
+            .filter(|&index| index < 16)
+            .map_or(CellColor::Default, CellColor::Indexed),
     }
 }
 

@@ -9,6 +9,12 @@ Conventional Commits - do not hand-edit it.
 
 ### Added
 
+- M2a (core terminal, colors): render per-cell foreground colors. `skelly-term`
+  exposes a colored cell snapshot (`cells()` with a palette-independent `CellColor`);
+  `skelly-render` gains an `AnsiPalette` (Ossein Dark/Light 16-color + 256-color
+  resolution, kept separate from UI tokens per Hard rule 2) and a colored
+  `set_cells`/`capture_cells_rgba`. Terminal text now also uses a monospace face so
+  columns align.
 - M1c (walking skeleton complete): spawn the login shell in a PTY (`portable-pty`)
   and parse its output with `alacritty_terminal` into a grid (`skelly-term`), paint
   the live grid on the GPU, and forward keystrokes to the shell. The reader thread

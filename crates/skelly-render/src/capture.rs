@@ -10,8 +10,9 @@
 use skelly_config::Appearance;
 
 use crate::text::TextLayer;
+use crate::theme::Srgb;
 
-/// Render `content` in `appearance`'s theme and cell font to an offscreen
+/// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
 /// padding). Blocks on GPU work.
 ///
@@ -26,16 +27,38 @@ pub fn capture_rgba(
     scale: f64,
     content: &str,
 ) -> Vec<u8> {
-    pollster::block_on(capture_async(appearance, width, height, scale, content))
+    pollster::block_on(capture_async(appearance, width, height, scale, |text| {
+        text.set_content(content);
+    }))
 }
 
-async fn capture_async(
+/// Like [`capture_rgba`], but renders a colored grid (each cell is `(char, fg)`).
+///
+/// # Panics
+/// Panics if no GPU adapter/device is available or the readback fails.
+#[must_use]
+pub fn capture_cells_rgba(
     appearance: &Appearance,
     width: u32,
     height: u32,
     scale: f64,
-    content: &str,
+    rows: &[Vec<(char, Srgb)>],
 ) -> Vec<u8> {
+    pollster::block_on(capture_async(appearance, width, height, scale, |text| {
+        text.set_cells(rows);
+    }))
+}
+
+async fn capture_async<F>(
+    appearance: &Appearance,
+    width: u32,
+    height: u32,
+    scale: f64,
+    apply: F,
+) -> Vec<u8>
+where
+    F: FnOnce(&mut TextLayer),
+{
     let instance = wgpu::Instance::default();
     let adapter = instance
         .request_adapter(&wgpu::RequestAdapterOptions::default())
@@ -67,7 +90,7 @@ async fn capture_async(
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     let mut text = TextLayer::new(&device, &queue, format, width, height, scale, appearance);
-    text.set_content(content);
+    apply(&mut text);
     text.draw(&device, &queue, &view, width, height)
         .expect("draw scene");
 
