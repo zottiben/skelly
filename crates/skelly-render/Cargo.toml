@@ -12,6 +12,11 @@ publish = false
 [lints]
 workspace = true
 
+[dev-dependencies]
+# Headless capture example: encode the offscreen render to a PNG for visual/golden
+# verification without a window.
+png = "0.17"
+
 [dependencies]
 glyphon = "0.12.0"
 pollster = "1.0.1"

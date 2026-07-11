@@ -1,49 +1,63 @@
 //! The GPU renderer.
 //!
-//! M1a: owns the `wgpu` device, queue, and surface, and clears the surface to the
-//! resolved theme background each frame. Kept decoupled from the windowing crate -
-//! it accepts anything with a raw window handle, so `skelly` never leaks `winit`
-//! types into here and the backend stays swappable (ADR-0003).
+//! M1b: owns the `wgpu` device, queue, and surface, and drives a [`TextLayer`] to
+//! paint each frame (clear to the theme background + shaped text). Kept decoupled
+//! from the windowing crate - it accepts anything with a raw window handle, so
+//! `skelly` never leaks `winit` types into here and the backend stays swappable
+//! (ADR-0003).
 
 use std::sync::Arc;
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use skelly_config::Appearance;
 
-use crate::theme::Theme;
+use crate::error::RenderError;
+use crate::text::TextLayer;
 
-/// Errors the renderer surfaces to its caller.
-#[derive(Debug, thiserror::Error)]
-pub enum RenderError {
-    /// The GPU surface failed in a way we could not silently recover from.
-    #[error("surface error: {0}")]
-    Surface(String),
-}
-
-/// Owns the GPU device and surface and paints frames.
+/// Owns the GPU device and surface and presents painted frames.
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-    theme: Theme,
+    text: TextLayer,
 }
 
 impl Renderer {
-    /// Create a renderer bound to `window`, sized `width` x `height`, clearing to
-    /// the background of the theme named `theme_name`. Blocks on GPU init.
+    /// Create a renderer bound to `window`, sized `width` x `height` physical px at
+    /// `scale_factor`, using `appearance` for the theme and cell font. Blocks on
+    /// GPU init.
     ///
     /// # Panics
     /// Panics if no suitable GPU adapter or device is available, or the surface
     /// cannot be created - all unrecoverable at startup.
     #[must_use]
-    pub fn new<W>(window: Arc<W>, width: u32, height: u32, theme_name: &str) -> Self
+    pub fn new<W>(
+        window: Arc<W>,
+        width: u32,
+        height: u32,
+        scale_factor: f64,
+        appearance: &Appearance,
+    ) -> Self
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
-        pollster::block_on(Self::new_async(window, width, height, theme_name))
+        pollster::block_on(Self::new_async(
+            window,
+            width,
+            height,
+            scale_factor,
+            appearance,
+        ))
     }
 
-    async fn new_async<W>(window: Arc<W>, width: u32, height: u32, theme_name: &str) -> Self
+    async fn new_async<W>(
+        window: Arc<W>,
+        width: u32,
+        height: u32,
+        scale_factor: f64,
+        appearance: &Appearance,
+    ) -> Self
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
@@ -85,34 +99,45 @@ impl Renderer {
         }
         surface.configure(&device, &config);
 
+        let text = TextLayer::new(
+            &device,
+            &queue,
+            config.format,
+            config.width,
+            config.height,
+            scale_factor,
+            appearance,
+        );
+
         Self {
             surface,
             device,
             queue,
             config,
-            theme: Theme::resolve(theme_name),
+            text,
         }
     }
 
-    /// Reconfigure the surface for a new size. No-ops on a zero dimension
-    /// (minimized window).
+    /// Reconfigure the surface and re-layout text for a new size. No-ops on a zero
+    /// dimension (minimized window).
     pub fn resize(&mut self, width: u32, height: u32) {
-        if width > 0 && height > 0 {
-            self.config.width = width;
-            self.config.height = height;
-            self.surface.configure(&self.device, &self.config);
+        if width == 0 || height == 0 {
+            return;
         }
+        self.config.width = width;
+        self.config.height = height;
+        self.surface.configure(&self.device, &self.config);
+        self.text.resize(width, height);
     }
 
-    /// Paint one frame: clear the surface to the theme background.
+    /// Acquire the next surface frame, paint it, and present.
     ///
     /// Recovers from a lost/outdated swapchain by reconfiguring and skipping the
-    /// frame; transient states (timeout, occluded) skip the frame; only an
-    /// unrecoverable failure is returned.
+    /// frame; transient states (timeout, occluded) skip the frame.
     ///
     /// # Errors
-    /// Returns [`RenderError::Surface`] on an unrecoverable surface validation
-    /// failure.
+    /// Returns [`RenderError`] if painting fails or the surface fails
+    /// unrecoverably.
     pub fn render(&mut self) -> Result<(), RenderError> {
         use wgpu::CurrentSurfaceTexture as Cst;
 
@@ -131,38 +156,13 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("skelly-frame"),
-            });
-
-        let bg = self.theme.bg_base;
-        {
-            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: bg.r,
-                            g: bg.g,
-                            b: bg.b,
-                            a: bg.a,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        }
-
-        self.queue.submit(std::iter::once(encoder.finish()));
+        self.text.draw(
+            &self.device,
+            &self.queue,
+            &view,
+            self.config.width,
+            self.config.height,
+        )?;
         self.queue.present(frame);
         Ok(())
     }

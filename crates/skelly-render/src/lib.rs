@@ -16,8 +16,12 @@
 
 #![doc(test(attr(deny(warnings))))]
 
+mod error;
 mod renderer;
+mod text;
 mod theme;
 
-pub use renderer::{RenderError, Renderer};
-pub use theme::{Rgba, Theme};
+pub use error::RenderError;
+pub use renderer::Renderer;
+pub use text::TextLayer;
+pub use theme::{Rgba, Srgb, Theme};

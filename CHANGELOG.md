@@ -9,6 +9,11 @@ Conventional Commits - do not hand-edit it.
 
 ### Added
 
+- M1b (walking skeleton, text): render shaped text via `glyphon`/`cosmic-text` in
+  the configured cell font and the `fg.primary` token. Extracted a reusable
+  `TextLayer` (clear + text into any target) shared by the windowed renderer and a
+  headless `capture` example that writes a PNG (visual/golden verification with no
+  window or screen-recording permission).
 - M1a (walking skeleton, first slice): a native window (`winit`) with a `wgpu` GPU
   surface that clears to the resolved Ossein theme background each frame, quitting
   cleanly on window-close, Escape, or `q`. `skelly-render` gains the `Renderer` and

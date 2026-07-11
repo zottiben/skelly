@@ -18,8 +18,9 @@ ADRs (0001-0004) are ratified.
   integration risks (GPU surface, PTY plumbing, event loop, glyph upload).
   - [x] **M1a** - native window (`winit`) + `wgpu` surface clearing to the theme
     background; clean quit. GPU-surface + event-loop risk retired.
-  - [ ] **M1b** - render text (a static line) via `glyphon`/`cosmic-text` in the
-    cell font + colors. Text-rendering risk retired.
+  - [x] **M1b** - render shaped text via `glyphon`/`cosmic-text` in the cell font +
+    `fg.primary` token; reusable `TextLayer` + headless PNG capture. Text-rendering
+    risk retired.
   - [ ] **M1c** - spawn the PTY (`portable-pty`) + terminal core
     (`alacritty_terminal`), pipe output through the parser into the grid, forward
     keystrokes to the shell. Full walking skeleton.

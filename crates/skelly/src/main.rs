@@ -74,11 +74,13 @@ impl ApplicationHandler for App {
         };
 
         let size = window.inner_size();
+        let scale_factor = window.scale_factor();
         let renderer = Renderer::new(
             window.clone(),
             size.width,
             size.height,
-            &self.config.appearance.theme,
+            scale_factor,
+            &self.config.appearance,
         );
 
         self.window = Some(window);
