@@ -1,0 +1,1804 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; background: #181825; color: #CDD6F4; font-family: 'IBM Plex Sans', system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  a { color: #BD93F9; text-decoration: none; }
+  a:hover { color: #D6BBFC; }
+  ::selection { background: rgba(189,147,249,0.28); color: #F5F0FF; }
+  h1,h2,h3,h4 { font-family: 'Space Grotesk', sans-serif; margin: 0; }
+  code, .mono { font-family: 'JetBrains Mono', monospace; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #3A3A54; border-radius: 6px; border: 2px solid #181825; }
+  ::-webkit-scrollbar-thumb:hover { background: #4A4A66; }
+  @keyframes skcaret { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+</style>
+</helmet>
+<div style="display:grid; grid-template-columns: 264px 1fr; min-height:100vh; align-items:start;">
+
+  <!-- ============ LEFT DOC NAV ============ -->
+  <aside style="position:sticky; top:0; height:100vh; overflow-y:auto; background:#1A1826; border-right:1px solid #383A54; padding:26px 20px 40px;">
+    <div style="display:flex; align-items:center; gap:11px; margin-bottom:26px;">
+      <div style="position:relative; width:30px; height:30px; flex:0 0 auto;"><div style="position:absolute; left:50%; top:9%; transform:translateX(-50%); width:6%; height:82%; border-radius:999px; background:#BD93F9; opacity:0.3;"></div><div style="position:absolute; left:37%; top:3%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div><div style="position:absolute; left:29%; top:29%; width:42%; height:42%; transform:rotate(45deg); border-radius:22%; background:#BD93F9;"></div><div style="position:absolute; left:37%; top:71%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div></div>
+      <div>
+        <div style="font-family:'JetBrains Mono',monospace; font-weight:700; font-size:16px; letter-spacing:-0.5px; color:#CDD6F4;">skelly</div>
+        <div style="font-size:10.5px; letter-spacing:1.5px; text-transform:uppercase; color:#7F849C;">Design Guide</div>
+      </div>
+    </div>
+    <nav style="display:flex; flex-direction:column; gap:2px;">
+      <sc-for list="{{ nav }}" as="item" hint-placeholder-count="12">
+        <a href="{{ item.href }}" style="display:flex; align-items:baseline; gap:9px; padding:7px 10px; border-radius:6px; font-size:13px; color:#BAC2DE;" style-hover="background:#313244; color:#CDD6F4;">
+          <span class="mono" style="font-size:10.5px; color:#585B70; width:16px; flex:0 0 auto;">{{ item.num }}</span>
+          <span>{{ item.label }}</span>
+        </a>
+      </sc-for>
+    </nav>
+    <div style="margin-top:26px; padding:12px 12px 13px; border:1px solid #383A54; border-radius:8px; background:#232338;">
+      <div class="mono" style="font-size:10px; letter-spacing:1px; color:#7F849C; text-transform:uppercase; margin-bottom:5px;">Handoff target</div>
+      <div style="font-size:12px; line-height:1.5; color:#A6ADC8;">Reference spec for <b style="color:#CDD6F4;">Claude Code</b>. Build to it &mdash; do not treat as a working app.</div>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN COLUMN ============ -->
+  <main style="min-width:0; max-width:1080px; padding:0 clamp(28px,5vw,72px);">
+
+    <!-- ===== COVER ===== -->
+    <section id="cover" style="padding:88px 0 64px; border-bottom:1px solid #2A2A3E;">
+      <div style="display:flex; align-items:center; gap:10px; margin-bottom:34px;">
+        <span class="mono" style="font-size:12px; color:#BD93F9;">~/skelly</span>
+        <span class="mono" style="font-size:12px; color:#585B70;">on</span>
+        <span class="mono" style="font-size:12px; color:#94E2D5;">main</span>
+        <span class="mono" style="font-size:12px; color:#585B70;">&mdash; v0.1 design spec</span>
+      </div>
+      <div style="display:flex; align-items:center; gap:22px; margin-bottom:26px;">
+        <div style="position:relative; width:64px; height:64px; flex:0 0 auto;"><div style="position:absolute; left:50%; top:9%; transform:translateX(-50%); width:6%; height:82%; border-radius:999px; background:#BD93F9; opacity:0.3;"></div><div style="position:absolute; left:37%; top:3%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div><div style="position:absolute; left:29%; top:29%; width:42%; height:42%; transform:rotate(45deg); border-radius:22%; background:#BD93F9;"></div><div style="position:absolute; left:37%; top:71%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div></div>
+        <h1 style="font-size:clamp(52px,8vw,88px); font-weight:700; letter-spacing:-3px; line-height:0.9; color:#CDD6F4;">skelly<span style="color:#BD93F9;">.</span></h1>
+      </div>
+      <p style="font-size:clamp(20px,2.4vw,27px); line-height:1.35; font-weight:500; max-width:22ch; letter-spacing:-0.5px; color:#CDD6F4; margin:0 0 14px;">A barebones terminal, built in Rust.</p>
+      <p style="font-size:16px; line-height:1.6; max-width:60ch; color:#A6ADC8; margin:0 0 34px;">Minimal by design and built for keyboard-driven development in vim, neovim &amp; LazyVim. Multi-pane splits, per-repo git diff, and a rewindable session timeline &mdash; specified here end-to-end so nothing is left to guess.</p>
+      <div style="display:flex; flex-wrap:wrap; gap:8px;">
+        <sc-for list="{{ coverMeta }}" as="m" hint-placeholder-count="4">
+          <div style="display:flex; align-items:center; gap:7px; padding:7px 13px; border:1px solid #34344E; border-radius:999px; background:#232338;">
+            <span class="mono" style="font-size:10.5px; letter-spacing:0.5px; color:#7F849C;">{{ m.k }}</span>
+            <span style="font-size:12.5px; font-weight:500; color:#CDD6F4;">{{ m.v }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+
+    <!-- ===== HOW TO READ (Claude Code framing) ===== -->
+    <section style="padding:38px 0; border-bottom:1px solid #2A2A3E;">
+      <div style="border:1px solid #4A3D6E; border-radius:12px; background:linear-gradient(180deg,#2A2142,#201C34); padding:26px 28px;">
+        <div style="display:flex; align-items:center; gap:9px; margin-bottom:14px;">
+          <div style="width:7px; height:7px; border-radius:2px; background:#BD93F9;"></div>
+          <h3 style="font-size:15px; letter-spacing:0.3px; color:#D6BBFC;">How to read this document</h3>
+        </div>
+        <p style="font-size:14.5px; line-height:1.65; color:#BAC2DE; margin:0 0 16px; max-width:74ch;">This is a <b style="color:#CDD6F4;">design guide</b>, not source code and not a finished product. Every screen shown is a static mockup describing intended layout, tokens, and behavior. Build the real application in Rust from these specifications &mdash; do not attempt to copy this HTML, scrape it for logic, or assume any of it runs.</p>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px;">
+          <div style="border:1px solid #34344E; border-radius:8px; background:#181825; padding:14px 16px;">
+            <div style="font-size:12px; font-weight:600; color:#A6E3A1; margin-bottom:7px;">✓ Treat as truth</div>
+            <ul style="margin:0; padding-left:16px; font-size:12.5px; line-height:1.6; color:#A6ADC8;">
+              <li>Token values (color, type, spacing, motion)</li>
+              <li>Component anatomy &amp; states</li>
+              <li>Layout dimensions &amp; keybindings</li>
+              <li>Interaction flows &amp; empty states</li>
+            </ul>
+          </div>
+          <div style="border:1px solid #34344E; border-radius:8px; background:#181825; padding:14px 16px;">
+            <div style="font-size:12px; font-weight:600; color:#F38BA8; margin-bottom:7px;">✗ Do not do</div>
+            <ul style="margin:0; padding-left:16px; font-size:12.5px; line-height:1.6; color:#A6ADC8;">
+              <li>Reuse this HTML/CSS as app code</li>
+              <li>Ship the guide's own chrome</li>
+              <li>Infer behavior not written down &mdash; ask</li>
+              <li>Assume web tech; target is native Rust</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== PRINCIPLES ===== -->
+    <section id="principles" style="padding:52px 0; border-bottom:1px solid #2A2A3E;">
+      <div class="mono" style="font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">01 &mdash; Foundations</div>
+      <h2 style="font-size:34px; font-weight:600; letter-spacing:-1px; margin-bottom:12px;">Design principles</h2>
+      <p style="font-size:15px; line-height:1.6; color:#A6ADC8; max-width:64ch; margin:0 0 30px;">Five rules that resolve every ambiguous decision. When a spec is silent, fall back to these in order.</p>
+      <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:14px;">
+        <sc-for list="{{ principles }}" as="p" hint-placeholder-count="5">
+          <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:20px 20px 22px;">
+            <div class="mono" style="font-size:11px; color:#BD93F9; margin-bottom:12px;">{{ p.n }}</div>
+            <h3 style="font-size:16px; font-weight:600; margin-bottom:8px; color:#CDD6F4;">{{ p.t }}</h3>
+            <p style="font-size:13px; line-height:1.6; color:#A6ADC8; margin:0;">{{ p.d }}</p>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+
+    <!-- ===== BRAND ===== -->
+    <section id="brand" style="padding:52px 0; border-bottom:1px solid #2A2A3E;">
+      <div class="mono" style="font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">02 &mdash; Brand</div>
+      <h2 style="font-size:34px; font-weight:600; letter-spacing:-1px; margin-bottom:12px;">Logo, mark &amp; app icon</h2>
+      <p style="font-size:15px; line-height:1.6; color:#A6ADC8; max-width:66ch; margin:0 0 30px;">The mark is an <b style="color:#CDD6F4;">abstract vertebra</b>: a solid central disc flanked by two smaller discs, threaded on a faint spine &mdash; a stacked vertebral column. Skeletal and minimal &mdash; never a skull, never Halloween.</p>
+
+      <!-- mark on tiles -->
+      <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:16px; margin-bottom:30px;">
+        <!-- primary mark -->
+        <div style="border:1px solid #383A54; border-radius:10px; overflow:hidden; background:#232338;">
+          <div style="height:150px; display:flex; align-items:center; justify-content:center; background:#181825;">
+            <div style="position:relative; width:64px; height:64px;"><div style="position:absolute; left:50%; top:9%; transform:translateX(-50%); width:6%; height:82%; border-radius:999px; background:#BD93F9; opacity:0.3;"></div><div style="position:absolute; left:37%; top:3%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div><div style="position:absolute; left:29%; top:29%; width:42%; height:42%; transform:rotate(45deg); border-radius:22%; background:#BD93F9;"></div><div style="position:absolute; left:37%; top:71%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div></div>
+          </div>
+          <div style="padding:11px 14px; font-size:12px; color:#A6ADC8;">Primary mark <span class="mono" style="color:#585B70;">— two-tone</span></div>
+        </div>
+        <!-- mono mark -->
+        <div style="border:1px solid #383A54; border-radius:10px; overflow:hidden; background:#232338;">
+          <div style="height:150px; display:flex; align-items:center; justify-content:center; background:#181825;">
+            <div style="position:relative; width:64px; height:64px;"><div style="position:absolute; left:50%; top:9%; transform:translateX(-50%); width:6%; height:82%; border-radius:999px; background:#CDD6F4; opacity:0.3;"></div><div style="position:absolute; left:37%; top:3%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div><div style="position:absolute; left:29%; top:29%; width:42%; height:42%; transform:rotate(45deg); border-radius:22%; background:#CDD6F4;"></div><div style="position:absolute; left:37%; top:71%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div></div>
+          </div>
+          <div style="padding:11px 14px; font-size:12px; color:#A6ADC8;">Monochrome <span class="mono" style="color:#585B70;">— on dark</span></div>
+        </div>
+        <!-- inverse mark -->
+        <div style="border:1px solid #383A54; border-radius:10px; overflow:hidden; background:#232338;">
+          <div style="height:150px; display:flex; align-items:center; justify-content:center; background:#EFF1F5;">
+            <div style="position:relative; width:64px; height:64px;"><div style="position:absolute; left:50%; top:9%; transform:translateX(-50%); width:6%; height:82%; border-radius:999px; background:#8839EF; opacity:0.3;"></div><div style="position:absolute; left:37%; top:3%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#4C4F69;"></div><div style="position:absolute; left:29%; top:29%; width:42%; height:42%; transform:rotate(45deg); border-radius:22%; background:#8839EF;"></div><div style="position:absolute; left:37%; top:71%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#4C4F69;"></div></div>
+          </div>
+          <div style="padding:11px 14px; font-size:12px; color:#A6ADC8;">On light <span class="mono" style="color:#585B70;">— deep mauve</span></div>
+        </div>
+      </div>
+
+      <!-- app icons -->
+      <h3 style="font-size:16px; font-weight:600; margin-bottom:6px; color:#CDD6F4;">App icon</h3>
+      <p style="font-size:13px; line-height:1.6; color:#A6ADC8; max-width:64ch; margin:0 0 18px;">macOS squircle (22% corner radius) and a flat Linux/tray variant. Icon safe area: mark occupies the central 56%. Never place the wordmark inside the icon.</p>
+      <div style="display:flex; flex-wrap:wrap; gap:20px; align-items:flex-end; margin-bottom:8px;">
+        <!-- macOS icon 128 -->
+        <div style="text-align:center;">
+          <div style="width:118px; height:118px; border-radius:27px; background:radial-gradient(120% 120% at 30% 15%,#2A2540 0%,#1E1B30 55%,#11111B 100%); border:1px solid #44445E; box-shadow:0 12px 32px rgba(0,0,0,0.5); display:flex; align-items:center; justify-content:center;">
+            <div style="position:relative; width:60px; height:60px;"><div style="position:absolute; left:50%; top:9%; transform:translateX(-50%); width:6%; height:82%; border-radius:999px; background:#BD93F9; opacity:0.3;"></div><div style="position:absolute; left:37%; top:3%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div><div style="position:absolute; left:29%; top:29%; width:42%; height:42%; transform:rotate(45deg); border-radius:22%; background:#BD93F9;"></div><div style="position:absolute; left:37%; top:71%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div></div>
+          </div>
+          <div class="mono" style="font-size:10.5px; color:#7F849C; margin-top:10px;">macOS · 128px</div>
+        </div>
+        <!-- flat/linux 96 -->
+        <div style="text-align:center;">
+          <div style="width:90px; height:90px; border-radius:18px; background:#1E1B30; border:1px solid #44445E; display:flex; align-items:center; justify-content:center;">
+            <div style="position:relative; width:46px; height:46px;"><div style="position:absolute; left:50%; top:9%; transform:translateX(-50%); width:6%; height:82%; border-radius:999px; background:#BD93F9; opacity:0.3;"></div><div style="position:absolute; left:37%; top:3%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div><div style="position:absolute; left:29%; top:29%; width:42%; height:42%; transform:rotate(45deg); border-radius:22%; background:#BD93F9;"></div><div style="position:absolute; left:37%; top:71%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div></div>
+          </div>
+          <div class="mono" style="font-size:10.5px; color:#7F849C; margin-top:10px;">Linux · flat</div>
+        </div>
+        <!-- mono tray 40 -->
+        <div style="text-align:center;">
+          <div style="width:40px; height:40px; border-radius:9px; background:#313244; border:1px solid #44445E; display:flex; align-items:center; justify-content:center;">
+            <div style="position:relative; width:22px; height:22px;"><div style="position:absolute; left:50%; top:9%; transform:translateX(-50%); width:6%; height:82%; border-radius:999px; background:#CDD6F4; opacity:0.3;"></div><div style="position:absolute; left:37%; top:3%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div><div style="position:absolute; left:29%; top:29%; width:42%; height:42%; transform:rotate(45deg); border-radius:22%; background:#CDD6F4;"></div><div style="position:absolute; left:37%; top:71%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div></div>
+          </div>
+          <div class="mono" style="font-size:10.5px; color:#7F849C; margin-top:10px;">Tray · 16px</div>
+        </div>
+        <!-- wordmark lockup -->
+        <div style="flex:1 1 260px; min-width:240px; border:1px solid #383A54; border-radius:12px; background:#232338; padding:22px 24px; align-self:stretch; display:flex; flex-direction:column; justify-content:center;">
+          <div style="font-size:11px; letter-spacing:1.5px; text-transform:uppercase; color:#7F849C; margin-bottom:14px;" class="mono">Wordmark lockup</div>
+          <div style="display:flex; align-items:center; gap:12px;">
+            <div style="position:relative; width:34px; height:34px; flex:0 0 auto;"><div style="position:absolute; left:50%; top:9%; transform:translateX(-50%); width:6%; height:82%; border-radius:999px; background:#BD93F9; opacity:0.3;"></div><div style="position:absolute; left:37%; top:3%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div><div style="position:absolute; left:29%; top:29%; width:42%; height:42%; transform:rotate(45deg); border-radius:22%; background:#BD93F9;"></div><div style="position:absolute; left:37%; top:71%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div></div>
+            <div class="mono" style="font-weight:700; font-size:28px; letter-spacing:-1.5px; color:#CDD6F4;">skelly<span style="display:inline-block; width:12px; height:24px; background:#BD93F9; margin-left:3px; transform:translateY(3px); animation:skcaret 1.1s steps(1) infinite;"></span></div>
+          </div>
+          <div style="font-size:12px; color:#A6ADC8; margin-top:14px; line-height:1.5;">Set in <b style="color:#CDD6F4;">JetBrains Mono 700</b>, lowercase, tracking &minus;1.5px. The caret block is optional and only animates in-product.</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== COLOR & THEMES ===== -->
+    <section id="color" style="padding:52px 0; border-bottom:1px solid #2A2A3E;">
+      <div class="mono" style="font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">03 &mdash; Color</div>
+      <h2 style="font-size:34px; font-weight:600; letter-spacing:-1px; margin-bottom:12px;">Semantic tokens &amp; themes</h2>
+      <p style="font-size:15px; line-height:1.6; color:#A6ADC8; max-width:70ch; margin:0 0 20px;">The UI never references raw hex. Every surface reads a <b style="color:#CDD6F4;">semantic token</b> that resolves per active theme. Ships with <b style="color:#CDD6F4;">Ossein Dark</b> (default) and <b style="color:#CDD6F4;">Ossein Light</b>, built on a <b style="color:#CDD6F4;">Catppuccin Mocha</b> base with a Dracula-purple accent. Naming: <code style="color:#BD93F9;">category.role.state</code>.</p>
+
+      <div style="display:flex; gap:8px; margin-bottom:26px; flex-wrap:wrap;">
+        <div style="display:flex; align-items:center; gap:8px; padding:8px 14px; border:1px solid #3A3A54; border-radius:8px; background:#232338;">
+          <div style="width:14px; height:14px; border-radius:4px; background:#181825; border:1px solid #4A4A66;"></div>
+          <span style="font-size:12.5px; font-weight:600; color:#CDD6F4;">Ossein Dark</span><span class="mono" style="font-size:10.5px; color:#7F849C;">default</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:8px; padding:8px 14px; border:1px solid #3A3A54; border-radius:8px; background:#232338;">
+          <div style="width:14px; height:14px; border-radius:4px; background:#EFF1F5; border:1px solid #CCD0DA;"></div>
+          <span style="font-size:12.5px; font-weight:600; color:#CDD6F4;">Ossein Light</span>
+        </div>
+      </div>
+
+      <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:16px;">
+        <sc-for list="{{ colorGroups }}" as="g" hint-placeholder-count="7">
+          <div style="border:1px solid #383A54; border-radius:10px; background:#232338; overflow:hidden;">
+            <div style="padding:12px 16px; border-bottom:1px solid #2E2E44; display:flex; justify-content:space-between; align-items:center;">
+              <span style="font-size:13px; font-weight:600; color:#CDD6F4;">{{ g.group }}</span>
+              <span class="mono" style="font-size:10px; letter-spacing:1px; text-transform:uppercase; color:#585B70;">dark · light</span>
+            </div>
+            <div>
+              <sc-for list="{{ g.rows }}" as="r" hint-placeholder-count="4">
+                <div style="display:grid; grid-template-columns:1fr auto auto; align-items:center; gap:12px; padding:9px 16px; border-bottom:1px solid #26263C;">
+                  <div style="min-width:0;">
+                    <div class="mono" style="font-size:12px; color:#CDD6F4; white-space:nowrap;">{{ r.t }}</div>
+                    <div style="font-size:11px; color:#7F849C; margin-top:1px;">{{ r.role }}</div>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:6px;">
+                    <div style="width:20px; height:20px; border-radius:5px; border:1px solid rgba(255,255,255,0.08); background:{{ r.d }};"></div>
+                    <span class="mono" style="font-size:10px; color:#A6ADC8; width:64px;">{{ r.d }}</span>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:6px;">
+                    <div style="width:20px; height:20px; border-radius:5px; border:1px solid rgba(0,0,0,0.12); background:{{ r.l }};"></div>
+                    <span class="mono" style="font-size:10px; color:#A6ADC8; width:64px;">{{ r.l }}</span>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+
+      <!-- theme side-by-side preview -->
+      <h3 style="font-size:16px; font-weight:600; margin:34px 0 6px; color:#CDD6F4;">Theme applied</h3>
+      <p style="font-size:13px; line-height:1.6; color:#A6ADC8; max-width:64ch; margin:0 0 18px;">Same layout, both themes. Sidebar, active pane border, prompt accent, and status bar all shift together.</p>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+        <!-- dark preview -->
+        <div style="border:1px solid #3A3A54; border-radius:10px; overflow:hidden;">
+          <div style="display:grid; grid-template-columns:74px 1fr; height:186px; background:#181825;">
+            <div style="background:#1E1E2E; border-right:1px solid #2E2E44; padding:10px 8px; display:flex; flex-direction:column; gap:6px;">
+              <div style="height:20px; border-radius:5px; background:rgba(189,147,249,0.14); border:1px solid rgba(189,147,249,0.4);"></div>
+              <div style="height:20px; border-radius:5px; background:#313244;"></div>
+              <div style="height:20px; border-radius:5px; background:#313244;"></div>
+            </div>
+            <div style="padding:12px; font-family:'JetBrains Mono',monospace; font-size:11px; line-height:1.7;">
+              <div><span style="color:#A6E3A1;">~/skelly</span> <span style="color:#89B4FA;">main</span> <span style="color:#BD93F9;">❯</span> <span style="color:#CDD6F4;">cargo build</span></div>
+              <div style="color:#7F849C;">   Compiling skelly v0.1.0</div>
+              <div style="color:#A6E3A1;">    Finished in 2.14s</div>
+              <div style="color:#BD93F9;">❯ <span style="display:inline-block;width:7px;height:13px;background:#BD93F9;transform:translateY(2px);"></span></div>
+            </div>
+          </div>
+          <div style="padding:6px 12px; background:#1E1E2E; border-top:1px solid #2E2E44; display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:9.5px; color:#7F849C;"><span>Ossein Dark</span><span style="color:#A6E3A1;">● +12 −3</span></div>
+        </div>
+        <!-- light preview -->
+        <div style="border:1px solid #CCD0DA; border-radius:10px; overflow:hidden;">
+          <div style="display:grid; grid-template-columns:74px 1fr; height:186px; background:#EFF1F5;">
+            <div style="background:#E6E9EF; border-right:1px solid #DCE0E8; padding:10px 8px; display:flex; flex-direction:column; gap:6px;">
+              <div style="height:20px; border-radius:5px; background:rgba(136,57,239,0.14); border:1px solid rgba(136,57,239,0.4);"></div>
+              <div style="height:20px; border-radius:5px; background:#F7F8FC;"></div>
+              <div style="height:20px; border-radius:5px; background:#F7F8FC;"></div>
+            </div>
+            <div style="padding:12px; font-family:'JetBrains Mono',monospace; font-size:11px; line-height:1.7;">
+              <div><span style="color:#40A02B;">~/skelly</span> <span style="color:#1E66F5;">main</span> <span style="color:#8839EF;">❯</span> <span style="color:#4C4F69;">cargo build</span></div>
+              <div style="color:#8C8FA1;">   Compiling skelly v0.1.0</div>
+              <div style="color:#40A02B;">    Finished in 2.14s</div>
+              <div style="color:#8839EF;">❯ <span style="display:inline-block;width:7px;height:13px;background:#8839EF;transform:translateY(2px);"></span></div>
+            </div>
+          </div>
+          <div style="padding:6px 12px; background:#E6E9EF; border-top:1px solid #DCE0E8; display:flex; justify-content:space-between; font-family:'JetBrains Mono',monospace; font-size:9.5px; color:#8C8FA1;"><span>Ossein Light</span><span style="color:#40A02B;">● +12 −3</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== ANSI / TERMINAL PALETTE ===== -->
+    <section id="ansi" style="padding:52px 0; border-bottom:1px solid #2A2A3E;">
+      <div class="mono" style="font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">04 &mdash; Terminal palette</div>
+      <h2 style="font-size:34px; font-weight:600; letter-spacing:-1px; margin-bottom:12px;">ANSI 16 &amp; preset schemes</h2>
+      <p style="font-size:15px; line-height:1.6; color:#A6ADC8; max-width:70ch; margin:0 0 24px;">The cell colors used by programs inside the terminal. Independent from UI tokens so users can pair any ANSI scheme with any UI theme. Cursor <code style="color:#BD93F9;">accent</code>, selection <code style="color:#BD93F9;">rgba(189,147,249,0.28)</code>.</p>
+
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:14px;">
+        <div>
+          <div class="mono" style="font-size:11px; color:#BAC2DE; margin-bottom:10px;">Ossein Dark · 16-color</div>
+          <div style="display:grid; grid-template-columns:repeat(8,1fr); gap:6px;">
+            <sc-for list="{{ ansiDark }}" as="a" hint-placeholder-count="16">
+              <div style="text-align:center;">
+                <div style="height:38px; border-radius:6px; border:1px solid rgba(255,255,255,0.07); background:{{ a.c }};"></div>
+                <div class="mono" style="font-size:8.5px; color:#7F849C; margin-top:4px;">{{ a.i }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <div>
+          <div class="mono" style="font-size:11px; color:#BAC2DE; margin-bottom:10px;">Ossein Light · 16-color</div>
+          <div style="display:grid; grid-template-columns:repeat(8,1fr); gap:6px;">
+            <sc-for list="{{ ansiLight }}" as="a" hint-placeholder-count="16">
+              <div style="text-align:center;">
+                <div style="height:38px; border-radius:6px; border:1px solid rgba(0,0,0,0.1); background:{{ a.c }};"></div>
+                <div class="mono" style="font-size:8.5px; color:#7F849C; margin-top:4px;">{{ a.i }}</div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+
+      <h3 style="font-size:16px; font-weight:600; margin:34px 0 6px; color:#CDD6F4;">Bundled preset schemes</h3>
+      <p style="font-size:13px; line-height:1.6; color:#A6ADC8; max-width:70ch; margin:0 0 18px;">Ship the trending vim/neovim schemes as importable <code style="color:#BD93F9;">*.skelly-theme</code> TOML files. Selecting one remaps the full ANSI palette and, optionally, the UI tokens. Credit preserved in metadata.</p>
+      <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:12px;">
+        <sc-for list="{{ presets }}" as="p" hint-placeholder-count="10">
+          <div style="border:1px solid #383A54; border-radius:10px; overflow:hidden; background:#232338;">
+            <div style="padding:14px 14px 12px; background:{{ p.bg }};">
+              <div style="font-family:'JetBrains Mono',monospace; font-size:12px; font-weight:600; color:{{ p.fg }};">aa bb cc</div>
+              <div style="display:flex; gap:5px; margin-top:10px;">
+                <sc-for list="{{ p.dots }}" as="d" hint-placeholder-count="6">
+                  <div style="width:15px; height:15px; border-radius:999px; background:{{ d }};"></div>
+                </sc-for>
+              </div>
+            </div>
+            <div style="padding:10px 14px 12px; display:flex; justify-content:space-between; align-items:baseline; gap:6px;">
+              <div style="min-width:0;">
+                <div style="font-size:12.5px; font-weight:600; color:#CDD6F4; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ p.name }}</div>
+                <div class="mono" style="font-size:10px; color:#7F849C;">@{{ p.by }}</div>
+              </div>
+              <sc-if value="{{ p.tag }}" hint-placeholder-val="">
+                <span class="mono" style="font-size:9px; letter-spacing:0.5px; text-transform:uppercase; color:#BD93F9; border:1px solid #4A3D6E; border-radius:5px; padding:2px 6px; white-space:nowrap;">{{ p.tag }}</span>
+              </sc-if>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+
+    <!-- ===== TYPOGRAPHY ===== -->
+    <section id="type" style="padding:52px 0; border-bottom:1px solid #2A2A3E;">
+      <div class="mono" style="font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">05 &mdash; Type</div>
+      <h2 style="font-size:34px; font-weight:600; letter-spacing:-1px; margin-bottom:12px;">Typography</h2>
+      <p style="font-size:15px; line-height:1.6; color:#A6ADC8; max-width:70ch; margin:0 0 26px;">Three families. <b style="color:#CDD6F4;">Space Grotesk</b> for display, <b style="color:#CDD6F4;">IBM Plex Sans</b> for all UI text, <b style="color:#CDD6F4;">JetBrains Mono</b> for terminal cells, code, and every token/keybinding label. The mono is fully user-swappable &mdash; point it at any installed font, Nerd Fonts included; the UI faces are fixed.</p>
+
+      <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:26px;">
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:22px 20px;">
+          <div style="font-family:'Space Grotesk',sans-serif; font-size:52px; font-weight:700; letter-spacing:-2px; line-height:1; color:#CDD6F4;">Ag</div>
+          <div style="font-size:13px; font-weight:600; margin-top:14px; color:#CDD6F4;">Space Grotesk</div>
+          <div class="mono" style="font-size:10.5px; color:#7F849C; margin-top:2px;">display · 400–700</div>
+        </div>
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:22px 20px;">
+          <div style="font-family:'IBM Plex Sans',sans-serif; font-size:52px; font-weight:600; line-height:1; color:#CDD6F4;">Ag</div>
+          <div style="font-size:13px; font-weight:600; margin-top:14px; color:#CDD6F4;">IBM Plex Sans</div>
+          <div class="mono" style="font-size:10.5px; color:#7F849C; margin-top:2px;">UI · 400–600</div>
+        </div>
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:22px 20px;">
+          <div class="mono" style="font-size:52px; font-weight:700; line-height:1; color:#BD93F9;">Ag</div>
+          <div style="font-size:13px; font-weight:600; margin-top:14px; color:#CDD6F4;">JetBrains Mono</div>
+          <div class="mono" style="font-size:10.5px; color:#7F849C; margin-top:2px;">code · 400–700 · ligatures</div>
+        </div>
+      </div>
+
+      <div style="border:1px solid #383A54; border-radius:10px; background:#232338; overflow:hidden;">
+        <div style="display:grid; grid-template-columns:1.4fr 1fr 1fr; padding:10px 20px; border-bottom:1px solid #2E2E44;">
+          <span class="mono" style="font-size:10px; letter-spacing:1px; text-transform:uppercase; color:#7F849C;">Preview / token</span>
+          <span class="mono" style="font-size:10px; letter-spacing:1px; text-transform:uppercase; color:#7F849C;">Font</span>
+          <span class="mono" style="font-size:10px; letter-spacing:1px; text-transform:uppercase; color:#7F849C;">px / lh / track</span>
+        </div>
+        <sc-for list="{{ typeScale }}" as="t" hint-placeholder-count="8">
+          <div style="display:grid; grid-template-columns:1.4fr 1fr 1fr; align-items:center; gap:10px; padding:12px 20px; border-bottom:1px solid #26263C;">
+            <div><span class="mono" style="font-size:12px; color:#BD93F9;">type.{{ t.tok }}</span> <span style="font-size:12px; color:#7F849C; margin-left:8px;">{{ t.use }}</span></div>
+            <span style="font-size:12.5px; color:#BAC2DE;">{{ t.font }}</span>
+            <span class="mono" style="font-size:11px; color:#A6ADC8;">{{ t.size }}</span>
+          </div>
+        </sc-for>
+      </div>
+
+      <div style="margin-top:16px; border:1px solid #383A54; border-radius:10px; background:#1A1A2B; padding:16px 20px;">
+        <div class="mono" style="font-size:11px; color:#BAC2DE; margin-bottom:10px;">Terminal cell metrics</div>
+        <div style="display:flex; flex-wrap:wrap; gap:22px; font-size:12.5px; color:#A6ADC8;">
+          <div><b style="color:#CDD6F4;">14px</b> default cell · user 8–32</div>
+          <div>line-height <b style="color:#CDD6F4;">1.2</b></div>
+          <div>ligatures <b style="color:#CDD6F4;">on</b> (toggle)</div>
+          <div>fallback <b style="color:#CDD6F4;">Symbols Nerd Font</b></div>
+          <div>bold → <b style="color:#CDD6F4;">bright ANSI</b> (toggle)</div>
+        </div>
+      </div>
+      <div style="margin-top:14px; border:1px solid #4A3D6E; border-radius:10px; background:linear-gradient(180deg,#201C34,#1A1A2B); padding:16px 20px;">
+        <div style="display:flex; align-items:center; gap:9px; margin-bottom:8px;"><span style="width:7px; height:7px; border-radius:2px; background:#BD93F9;"></span><span style="font-size:13px; font-weight:600; color:#D6BBFC;">Custom &amp; Nerd Fonts</span></div>
+        <p style="font-size:12.5px; line-height:1.6; color:#A6ADC8; margin:0 0 12px; max-width:78ch;">Skelly is used mostly as a neovim / LazyVim IDE, so glyph coverage matters. Users point <code style="color:#BD93F9;">font_family</code> at <b style="color:#CDD6F4;">any installed monospace font</b>; patched <b style="color:#CDD6F4;">Nerd Fonts</b> are first-class so devicons, statusline separators, and git symbols render in the cell grid.</p>
+        <div style="display:flex; flex-wrap:wrap; gap:10px;">
+          <span style="padding:6px 11px; border-radius:7px; border:1px solid #34344E; background:#181825; font-family:'JetBrains Mono'; font-size:11.5px; color:#BAC2DE;">System font discovery</span>
+          <span style="padding:6px 11px; border-radius:7px; border:1px solid #34344E; background:#181825; font-family:'JetBrains Mono'; font-size:11.5px; color:#BAC2DE;">Per-profile override</span>
+          <span style="padding:6px 11px; border-radius:7px; border:1px solid #34344E; background:#181825; font-family:'JetBrains Mono'; font-size:11.5px; color:#BAC2DE;">Fallback chain</span>
+          <span style="padding:6px 11px; border-radius:7px; border:1px solid #34344E; background:#181825; font-family:'JetBrains Mono'; font-size:11.5px; color:#BAC2DE;">Bold / italic variants</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== SPACE / RADIUS / MOTION ===== -->
+    <section id="scale" style="padding:52px 0; border-bottom:1px solid #2A2A3E;">
+      <div class="mono" style="font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">06 &mdash; Scale</div>
+      <h2 style="font-size:34px; font-weight:600; letter-spacing:-1px; margin-bottom:12px;">Space, radius, elevation &amp; motion</h2>
+      <p style="font-size:15px; line-height:1.6; color:#A6ADC8; max-width:70ch; margin:0 0 26px;">All spacing on a <b style="color:#CDD6F4;">4px</b> grid. Chrome stays tight &mdash; the terminal grid gets the room.</p>
+
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+        <!-- spacing -->
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:18px 20px;">
+          <div style="font-size:13px; font-weight:600; margin-bottom:14px; color:#CDD6F4;">Spacing &mdash; 4px base</div>
+          <div style="display:flex; flex-direction:column; gap:8px;">
+            <sc-for list="{{ spacing }}" as="s" hint-placeholder-count="12">
+              <div style="display:flex; align-items:center; gap:12px;">
+                <span class="mono" style="font-size:11px; color:#BAC2DE; width:34px;">{{ s.n }}</span>
+                <span class="mono" style="font-size:10px; color:#7F849C; width:26px;">{{ s.px }}</span>
+                <div style="height:10px; border-radius:2px; background:#BD93F9; width:{{ s.px }}px;"></div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <!-- radii -->
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:18px 20px;">
+          <div style="font-size:13px; font-weight:600; margin-bottom:14px; color:#CDD6F4;">Radius</div>
+          <div style="display:flex; flex-direction:column; gap:9px;">
+            <sc-for list="{{ radii }}" as="r" hint-placeholder-count="7">
+              <div style="display:flex; align-items:center; gap:12px;">
+                <div style="width:30px; height:30px; flex:0 0 auto; background:#383A54; border:1px solid #4A4A66; border-radius:{{ r.px }}px;"></div>
+                <span class="mono" style="font-size:11px; color:#BAC2DE; width:38px;">{{ r.n }}</span>
+                <span class="mono" style="font-size:10px; color:#7F849C; width:26px;">{{ r.px }}</span>
+                <span style="font-size:11.5px; color:#A6ADC8;">{{ r.use }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+        <!-- elevation -->
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:18px 20px;">
+          <div style="font-size:13px; font-weight:600; margin-bottom:16px; color:#CDD6F4;">Elevation</div>
+          <div style="display:flex; flex-direction:column; gap:14px;">
+            <sc-for list="{{ elevation }}" as="e" hint-placeholder-count="5">
+              <div style="display:flex; align-items:center; gap:14px;">
+                <div style="width:44px; height:30px; flex:0 0 auto; background:#383A54; border:1px solid #44445E; border-radius:7px; box-shadow:{{ e.v }};"></div>
+                <div style="min-width:0;">
+                  <span class="mono" style="font-size:11.5px; color:#CDD6F4;">{{ e.n }}</span>
+                  <span style="font-size:11.5px; color:#A6ADC8; margin-left:8px;">{{ e.use }}</span>
+                  <div class="mono" style="font-size:9.5px; color:#585B70; margin-top:1px;">{{ e.v }}</div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+        <!-- motion -->
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:18px 20px;">
+          <div style="font-size:13px; font-weight:600; margin-bottom:14px; color:#CDD6F4;">Motion</div>
+          <div style="display:flex; flex-direction:column; gap:8px; margin-bottom:16px;">
+            <sc-for list="{{ motion }}" as="m" hint-placeholder-count="5">
+              <div style="display:grid; grid-template-columns:70px 52px 1fr; align-items:center; gap:10px;">
+                <span class="mono" style="font-size:11.5px; color:#CDD6F4;">{{ m.n }}</span>
+                <span class="mono" style="font-size:11px; color:#BD93F9;">{{ m.v }}</span>
+                <span style="font-size:11.5px; color:#A6ADC8;">{{ m.use }}</span>
+              </div>
+            </sc-for>
+          </div>
+          <div style="border-top:1px solid #2E2E44; padding-top:12px; display:flex; flex-direction:column; gap:6px;">
+            <sc-for list="{{ easings }}" as="e" hint-placeholder-count="3">
+              <div style="display:flex; align-items:baseline; gap:10px;">
+                <span class="mono" style="font-size:11px; color:#BAC2DE; width:80px;">{{ e.n }}</span>
+                <span class="mono" style="font-size:10px; color:#7F849C;">{{ e.v }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== ICONOGRAPHY ===== -->
+    <section id="icons" style="padding:52px 0; border-bottom:1px solid #2A2A3E;">
+      <div class="mono" style="font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">07 &mdash; Icons</div>
+      <h2 style="font-size:34px; font-weight:600; letter-spacing:-1px; margin-bottom:12px;">Iconography</h2>
+      <p style="font-size:15px; line-height:1.6; color:#A6ADC8; max-width:70ch; margin:0 0 8px;">One thin, geometric line set. <b style="color:#CDD6F4;">1.5px</b> stroke on a <b style="color:#CDD6F4;">16px</b> grid (also 20/24), round caps &amp; joins, no fills. Icons inherit <code style="color:#BD93F9;">fg.secondary</code>, brighten to <code style="color:#BD93F9;">fg.primary</code> on hover and <code style="color:#BD93F9;">accent</code> when active. Glyphs below are reference targets.</p>
+      <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(110px,1fr)); gap:10px; margin-top:20px;">
+        <sc-for list="{{ iconSet }}" as="ic" hint-placeholder-count="16">
+          <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:16px 10px 12px; text-align:center;">
+            <div class="mono" style="font-size:22px; color:#CDD6F4; line-height:1; height:26px;">{{ ic.s }}</div>
+            <div class="mono" style="font-size:10.5px; color:#A6ADC8; margin-top:10px;">{{ ic.n }}</div>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+
+    <!-- ===== WINDOW ANATOMY ===== -->
+    <section id="anatomy" style="padding:52px 0; border-bottom:1px solid #2A2A3E;">
+      <div class="mono" style="font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">08 &mdash; Layout</div>
+      <h2 style="font-size:34px; font-weight:600; letter-spacing:-1px; margin-bottom:12px;">Window anatomy</h2>
+      <p style="font-size:15px; line-height:1.6; color:#A6ADC8; max-width:72ch; margin:0 0 26px;">Two zones: a <b style="color:#CDD6F4;">vertical tab sidebar</b> (left) and a <b style="color:#CDD6F4;">tiling pane workspace</b> (right) sized for a full-screen neovim editor. An optional right dock slides over for git &amp; timeline. Numbered regions below map to the spec.</p>
+
+      <!-- annotated window -->
+      <div style="border-radius:12px; overflow:hidden; border:1px solid #3A3A54; box-shadow:0 16px 48px rgba(0,0,0,0.52); background:#181825;">
+        <div style="display:grid; grid-template-columns:224px 1fr;">
+          <!-- SIDEBAR -->
+          <div style="background:#1E1E2E; border-right:1px solid #2E2E44; display:flex; flex-direction:column; min-height:440px;">
+            <!-- control strip -->
+            <div style="height:38px; display:flex; align-items:center; gap:7px; padding:0 13px; position:relative;">
+              <div style="width:11px; height:11px; border-radius:999px; background:#FF5555;"></div>
+              <div style="width:11px; height:11px; border-radius:999px; background:#BD93F9;"></div>
+              <div style="width:11px; height:11px; border-radius:999px; background:#A6E3A1;"></div>
+              <span style="position:absolute; right:-11px; top:5px; z-index:5; width:22px; height:22px; border-radius:999px; background:#BD93F9; color:#181825; font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center; box-shadow:0 2px 6px rgba(0,0,0,.4);">1</span>
+            </div>
+            <!-- workspace chips -->
+            <div style="padding:4px 13px 10px; display:flex; gap:7px; position:relative;">
+              <div style="width:26px; height:26px; border-radius:7px; background:rgba(189,147,249,0.16); border:1px solid rgba(189,147,249,0.4); display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono',monospace; font-size:11px; color:#BD93F9;">P</div>
+              <div style="width:26px; height:26px; border-radius:7px; background:#313244; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono',monospace; font-size:11px; color:#7F849C;">W</div>
+              <div style="width:26px; height:26px; border-radius:7px; background:#313244; display:flex; align-items:center; justify-content:center; color:#7F849C; font-size:14px;">+</div>
+              <span style="position:absolute; right:-11px; top:-2px; z-index:5; width:22px; height:22px; border-radius:999px; background:#BD93F9; color:#181825; font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center;">2</span>
+            </div>
+            <!-- command input -->
+            <div style="padding:0 13px 12px; position:relative;">
+              <div style="display:flex; align-items:center; gap:8px; height:32px; padding:0 11px; border-radius:8px; background:#313244; border:1px solid #34344E;">
+                <span style="color:#7F849C; font-size:13px;">⌕</span>
+                <span style="font-size:12px; color:#7F849C;">Search or run…</span>
+              </div>
+              <span style="position:absolute; right:-11px; top:1px; z-index:5; width:22px; height:22px; border-radius:999px; background:#BD93F9; color:#181825; font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center;">3</span>
+            </div>
+            <!-- pinned grid -->
+            <div style="padding:0 13px 12px; position:relative;">
+              <div style="font-family:'JetBrains Mono',monospace; font-size:9px; letter-spacing:1px; text-transform:uppercase; color:#585B70; margin-bottom:7px;">Pinned</div>
+              <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px;">
+                <div style="aspect-ratio:1; border-radius:8px; background:#313244; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono',monospace; font-size:11px; color:#94E2D5;">✳</div>
+                <div style="aspect-ratio:1; border-radius:8px; background:#313244; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono',monospace; font-size:11px; color:#F5C2E7;">⑂</div>
+                <div style="aspect-ratio:1; border-radius:8px; background:#313244; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono',monospace; font-size:11px; color:#89B4FA;">◈</div>
+              </div>
+              <span style="position:absolute; right:-11px; top:16px; z-index:5; width:22px; height:22px; border-radius:999px; background:#BD93F9; color:#181825; font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center;">4</span>
+            </div>
+            <!-- tab list -->
+            <div style="padding:0 9px; position:relative; flex:1 1 auto;">
+              <div style="font-family:'JetBrains Mono',monospace; font-size:9px; letter-spacing:1px; text-transform:uppercase; color:#585B70; margin:0 4px 6px;">skelly · main</div>
+              <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px; background:rgba(189,147,249,0.14); border:1px solid rgba(189,147,249,0.28); margin-bottom:3px;">
+                <span style="width:3px; height:14px; border-radius:2px; background:#BD93F9;"></span>
+                <span style="font-size:12.5px; color:#CDD6F4; font-weight:500;">cargo build</span>
+              </div>
+              <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px; margin-bottom:3px;">
+                <span style="width:3px; height:14px; border-radius:2px; background:transparent;"></span>
+                <span style="font-size:12.5px; color:#BAC2DE;">nvim src/</span>
+              </div>
+              <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px;">
+                <span style="width:3px; height:14px; border-radius:2px; background:transparent;"></span>
+                <span style="font-size:12.5px; color:#BAC2DE;">docker logs</span>
+              </div>
+              <span style="position:absolute; right:-11px; top:34px; z-index:5; width:22px; height:22px; border-radius:999px; background:#BD93F9; color:#181825; font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center;">5</span>
+            </div>
+            <!-- new tab -->
+            <div style="padding:6px 13px; position:relative;">
+              <div style="display:flex; align-items:center; gap:9px; height:28px; color:#7F849C; font-size:12.5px;"><span style="font-size:14px;">+</span> New tab</div>
+              <span style="position:absolute; right:-11px; top:8px; z-index:5; width:22px; height:22px; border-radius:999px; background:#BD93F9; color:#181825; font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center;">6</span>
+            </div>
+            <!-- utility bar -->
+            <div style="height:40px; border-top:1px solid #2E2E44; display:flex; align-items:center; gap:16px; padding:0 15px; position:relative; color:#7F849C; font-size:14px;">
+              <span>⚙</span><span>◐</span><span>⟲</span><span>⑂</span>
+              <span style="position:absolute; right:-11px; top:9px; z-index:5; width:22px; height:22px; border-radius:999px; background:#BD93F9; color:#181825; font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center;">7</span>
+            </div>
+          </div>
+          <!-- CONTENT -->
+          <div style="position:relative; display:flex; flex-direction:column;">
+            <div style="flex:1 1 auto; display:grid; grid-template-columns:1fr 1px 1fr;">
+              <!-- active pane -->
+              <div style="position:relative; padding:14px 16px; font-family:'JetBrains Mono',monospace; font-size:12px; line-height:1.75; box-shadow:inset 0 0 0 1.5px #6C6F93;">
+                <div><span style="color:#A6E3A1;">~/skelly</span> <span style="color:#89B4FA;">main</span> <span style="color:#BD93F9;">❯</span> <span style="color:#CDD6F4;">cargo build</span></div>
+                <div style="color:#7F849C;">   Compiling skelly v0.1.0</div>
+                <div style="color:#A6E3A1;">    Finished dev in 2.14s</div>
+                <div style="color:#BD93F9;">❯ <span style="display:inline-block;width:7px;height:14px;background:#BD93F9;transform:translateY(2px);"></span></div>
+                <span style="position:absolute; left:14px; top:12px; z-index:5; width:22px; height:22px; border-radius:999px; background:#BD93F9; color:#181825; font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center;">8</span>
+              </div>
+              <div style="background:#3A3A54;"></div>
+              <!-- second pane -->
+              <div style="padding:14px 16px; font-family:'JetBrains Mono',monospace; font-size:12px; line-height:1.75; color:#7F849C;">
+                <div style="color:#F5C2E7;">nvim</div>
+                <div style="color:#7F849C;">  1 fn main() {</div>
+                <div style="color:#7F849C;">  2   render();</div>
+                <div style="color:#7F849C;">  3 }</div>
+              </div>
+            </div>
+            <!-- status line -->
+            <div style="height:24px; border-top:1px solid #2E2E44; background:#1A1826; display:flex; align-items:center; gap:14px; padding:0 14px; font-family:'JetBrains Mono',monospace; font-size:10.5px; color:#7F849C; position:relative;">
+              <span style="color:#A6E3A1;">~/skelly</span><span style="color:#89B4FA;">⑂ main</span><span>NORMAL</span><span>rust</span><span style="margin-left:auto;">Ln 4, Col 3</span>
+              <span style="position:absolute; left:6px; top:1px; z-index:5; width:22px; height:22px; border-radius:999px; background:#BD93F9; color:#181825; font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center;">9</span>
+            </div>
+            <!-- dock handle -->
+            <div style="position:absolute; right:0; top:0; bottom:0; width:6px; background:linear-gradient(90deg,transparent,#313244); border-left:1px solid #34344E;"></div>
+            <span style="position:absolute; right:8px; top:50%; transform:translateY(-50%); z-index:5; width:22px; height:22px; border-radius:999px; background:#BD93F9; color:#181825; font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center;">10</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- legend + dims -->
+      <div style="display:grid; grid-template-columns:1.6fr 1fr; gap:16px; margin-top:20px;">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px 18px;">
+          <sc-for list="{{ anatomy }}" as="a" hint-placeholder-count="10">
+            <div style="display:flex; gap:10px; align-items:flex-start;">
+              <span class="mono" style="flex:0 0 auto; width:19px; height:19px; border-radius:999px; border:1px solid #4A3D6E; color:#BD93F9; font-size:10px; font-weight:700; display:flex; align-items:center; justify-content:center; margin-top:1px;">{{ a.n }}</span>
+              <div style="min-width:0;">
+                <div style="font-size:12.5px; font-weight:600; color:#CDD6F4;">{{ a.t }}</div>
+                <div style="font-size:11.5px; line-height:1.5; color:#9399B2;">{{ a.d }}</div>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:16px 18px; align-self:start;">
+          <div class="mono" style="font-size:10px; letter-spacing:1px; text-transform:uppercase; color:#7F849C; margin-bottom:12px;">Dimensions</div>
+          <div style="display:flex; flex-direction:column; gap:9px;">
+            <sc-for list="{{ dims }}" as="d" hint-placeholder-count="8">
+              <div style="display:flex; justify-content:space-between; gap:10px; font-size:12px;">
+                <span style="color:#A6ADC8;">{{ d.k }}</span>
+                <span class="mono" style="color:#CDD6F4;">{{ d.v }}</span>
+              </div>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+
+      <!-- NAVIGATION & SURFACES -->
+      <h3 style="font-size:16px; font-weight:600; margin:34px 0 6px; color:#CDD6F4;">Navigation &amp; surfaces</h3>
+      <p style="font-size:13.5px; line-height:1.6; color:#9399B2; max-width:74ch; margin:0 0 18px;">There is <b style="color:#CDD6F4;">no separate “git mode” or “timeline screen.”</b> The terminal pane tree is always the base layer and never closes. Git diff and the session timeline open as a <b style="color:#CDD6F4;">right dock</b> over your live terminal; the command palette is a centered overlay; settings is a full in-window view with the terminal still running underneath. Everything is reached the same three ways &mdash; a <b style="color:#CDD6F4;">keybinding</b>, the <b style="color:#CDD6F4;">command palette</b>, or a <b style="color:#CDD6F4;">utility-bar icon</b> &mdash; and dismissed with <code style="color:#BD93F9;">Esc</code> (or the same key again).</p>
+      <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:14px;">
+        <!-- surface A: right dock -->
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; overflow:hidden;">
+          <div style="height:118px; background:#181825; display:grid; grid-template-columns:26px 1fr 92px;">
+            <div style="background:#1E1E2E; border-right:1px solid #2E2E44;"></div>
+            <div style="padding:9px 10px; font-family:'JetBrains Mono'; font-size:8.5px; color:#7F849C; line-height:1.7;"><div><span style="color:#A6E3A1;">~/skelly</span> <span style="color:#BD93F9;">❯</span></div><div style="color:#585B70;">live terminal</div></div>
+            <div style="background:#232338; border-left:1px solid #4A3D6E; padding:8px 8px; font-family:'JetBrains Mono'; font-size:8px; color:#89B4FA; line-height:1.6;"><div style="color:#BAC2DE;">git ⑂</div><div style="color:#A6E3A1;">+ added</div><div style="color:#F38BA8;">− removed</div></div>
+          </div>
+          <div style="padding:11px 13px;">
+            <div style="font-size:12.5px; font-weight:600; color:#CDD6F4;">Right dock</div>
+            <div style="font-size:11px; color:#9399B2; margin-top:2px; line-height:1.5;">Git diff · timeline. Slides in, resizable, pushes or overlays.</div>
+            <div class="mono" style="font-size:10px; color:#BD93F9; margin-top:7px;">open ⇧⌘G / ⇧⌘H · close Esc</div>
+          </div>
+        </div>
+        <!-- surface B: palette -->
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; overflow:hidden;">
+          <div style="height:118px; background:#181825; position:relative;">
+            <div style="position:absolute; inset:0; opacity:0.4; padding:9px 10px; font-family:'JetBrains Mono'; font-size:8.5px; color:#585B70; line-height:1.7;"><div>~/skelly ❯ live terminal</div></div>
+            <div style="position:absolute; left:50%; top:52%; transform:translate(-50%,-50%); width:74%; border-radius:7px; background:#232338; border:1px solid #4A3D6E; box-shadow:0 8px 20px rgba(0,0,0,0.5); padding:7px 9px;"><div style="font-family:'JetBrains Mono'; font-size:8px; color:#CDD6F4;">&gt; split_</div><div style="height:1px; background:#2E2E44; margin:5px 0;"></div><div style="font-family:'JetBrains Mono'; font-size:7.5px; color:#BD93F9;">▯ Split pane right</div></div>
+          </div>
+          <div style="padding:11px 13px;">
+            <div style="font-size:12.5px; font-weight:600; color:#CDD6F4;">Command palette</div>
+            <div style="font-size:11px; color:#9399B2; margin-top:2px; line-height:1.5;">Centered overlay over the terminal. Runs anything.</div>
+            <div class="mono" style="font-size:10px; color:#BD93F9; margin-top:7px;">open ⌘K · close Esc</div>
+          </div>
+        </div>
+        <!-- surface C: settings -->
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; overflow:hidden;">
+          <div style="height:118px; background:#181825; display:grid; grid-template-columns:44px 1fr;">
+            <div style="background:#1A1826; border-right:1px solid #2E2E44; padding:8px 6px; display:flex; flex-direction:column; gap:4px;"><div style="height:8px; border-radius:3px; background:rgba(189,147,249,0.3);"></div><div style="height:8px; border-radius:3px; background:#313244;"></div><div style="height:8px; border-radius:3px; background:#313244;"></div></div>
+            <div style="padding:9px 10px; font-family:'JetBrains Mono'; font-size:8px; color:#9399B2; line-height:1.9;"><div style="color:#CDD6F4;">Appearance</div><div>theme ◐</div><div>font · size</div></div>
+          </div>
+          <div style="padding:11px 13px;">
+            <div style="font-size:12.5px; font-weight:600; color:#CDD6F4;">Settings view</div>
+            <div style="font-size:11px; color:#9399B2; margin-top:2px; line-height:1.5;">Full in-window; terminal keeps running underneath.</div>
+            <div class="mono" style="font-size:10px; color:#BD93F9; margin-top:7px;">open ⌘, · close Esc</div>
+          </div>
+        </div>
+      </div>
+      <div style="border:1px solid #4A3D6E; border-radius:9px; background:#201C34; padding:12px 16px; font-size:12px; line-height:1.6; color:#BAC2DE;">
+        <b style="color:#D6BBFC;">Rule for the build:</b> docks and overlays are layers, not routes. Opening git diff does not unmount the terminal, focus returns to the exact pane on close, and only one right-dock surface (git <i>or</i> timeline) shows at a time &mdash; toggling the other swaps the dock’s content.
+      </div>
+
+      <!-- SIDEBAR MODES -->
+      <h3 style="font-size:16px; font-weight:600; margin:34px 0 6px; color:#CDD6F4;">Sidebar modes</h3>
+      <p style="font-size:13.5px; line-height:1.6; color:#9399B2; max-width:74ch; margin:0 0 18px;">The sidebar is fully toggle-able to reclaim screen real estate. <code style="color:#BD93F9;">⌘B</code> shows/hides it; <code style="color:#BD93F9;">⇧⌘B</code> cycles between the full panel and a slim icon rail. The chosen mode persists per workspace.</p>
+      <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:14px;">
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; overflow:hidden;">
+          <div style="height:104px; background:#181825; display:grid; grid-template-columns:64px 1fr;"><div style="background:#1E1E2E; border-right:1px solid #2E2E44; padding:8px 7px; display:flex; flex-direction:column; gap:4px;"><div style="height:9px; border-radius:3px; background:rgba(189,147,249,0.3);"></div><div style="height:9px; border-radius:3px; background:#313244;"></div><div style="height:9px; border-radius:3px; background:#313244;"></div></div><div style="padding:9px; font-family:'JetBrains Mono'; font-size:8.5px; color:#585B70;">~/skelly ❯</div></div>
+          <div style="padding:10px 13px;"><div style="font-size:12.5px; font-weight:600; color:#CDD6F4;">Fixed</div><div class="mono" style="font-size:10px; color:#BD93F9; margin-top:3px;">default · pinned open</div></div>
+        </div>
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; overflow:hidden;">
+          <div style="height:104px; background:#181825; display:grid; grid-template-columns:22px 1fr;"><div style="background:#1E1E2E; border-right:1px solid #2E2E44; padding:8px 5px; display:flex; flex-direction:column; gap:5px; align-items:center;"><div style="width:9px; height:9px; border-radius:3px; background:rgba(189,147,249,0.4);"></div><div style="width:9px; height:9px; border-radius:3px; background:#313244;"></div><div style="width:9px; height:9px; border-radius:3px; background:#313244;"></div></div><div style="padding:9px; font-family:'JetBrains Mono'; font-size:8.5px; color:#585B70;">~/skelly ❯ more room</div></div>
+          <div style="padding:10px 13px;"><div style="font-size:12.5px; font-weight:600; color:#CDD6F4;">Icon rail</div><div class="mono" style="font-size:10px; color:#BD93F9; margin-top:3px;">56px · hover to expand</div></div>
+        </div>
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; overflow:hidden;">
+          <div style="height:104px; background:#181825; padding:9px 11px; font-family:'JetBrains Mono'; font-size:8.5px; color:#585B70;">~/skelly ❯ full-width terminal</div>
+          <div style="padding:10px 13px;"><div style="font-size:12.5px; font-weight:600; color:#CDD6F4;">Hidden</div><div class="mono" style="font-size:10px; color:#BD93F9; margin-top:3px;">⌘B · edge-swipe / ⌘B to recall</div></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== COMPONENTS ===== -->
+    <section id="components" style="padding:52px 0; border-bottom:1px solid #2A2A3E;">
+      <div class="mono" style="font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">09 &mdash; Components</div>
+      <h2 style="font-size:34px; font-weight:600; letter-spacing:-1px; margin-bottom:12px;">Component library</h2>
+      <p style="font-size:15px; line-height:1.6; color:#A6ADC8; max-width:70ch; margin:0 0 30px;">Every interactive primitive with its states. Focus ring is always <code style="color:#BD93F9;">accent</code>, 2px, offset 2px &mdash; visible for keyboard nav on every control.</p>
+
+      <!-- BUTTONS -->
+      <div style="border:1px solid #383A54; border-radius:12px; background:#232338; padding:22px 24px; margin-bottom:16px;">
+        <div style="font-size:15px; font-weight:600; color:#CDD6F4; margin-bottom:4px;">Buttons</div>
+        <div style="font-size:12.5px; color:#9399B2; margin-bottom:18px;">Height 32 (sm 26 / lg 38) · radius sm · label type.label 600</div>
+        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin-bottom:18px;">
+          <button style="height:32px; padding:0 16px; border:none; border-radius:6px; background:#BD93F9; color:#181825; font-family:'IBM Plex Sans'; font-size:13px; font-weight:600; cursor:pointer;">Primary</button>
+          <button style="height:32px; padding:0 16px; border:1px solid #3A3A54; border-radius:6px; background:#313244; color:#CDD6F4; font-family:'IBM Plex Sans'; font-size:13px; font-weight:500; cursor:pointer;">Secondary</button>
+          <button style="height:32px; padding:0 16px; border:none; border-radius:6px; background:transparent; color:#BAC2DE; font-family:'IBM Plex Sans'; font-size:13px; font-weight:500; cursor:pointer;">Ghost</button>
+          <button style="height:32px; padding:0 16px; border:1px solid rgba(243,139,168,0.4); border-radius:6px; background:rgba(243,139,168,0.12); color:#F38BA8; font-family:'IBM Plex Sans'; font-size:13px; font-weight:500; cursor:pointer;">Danger</button>
+          <button style="height:32px; width:32px; padding:0; border:1px solid #3A3A54; border-radius:6px; background:#313244; color:#BAC2DE; font-size:16px; cursor:pointer;">+</button>
+        </div>
+        <div style="display:flex; flex-wrap:wrap; gap:12px; align-items:center;">
+          <div style="height:32px; padding:0 16px; border-radius:6px; background:#D6BBFC; color:#181825; font-size:13px; font-weight:600; display:flex; align-items:center;">Hover</div>
+          <div style="height:32px; padding:0 16px; border-radius:6px; background:#A87FE0; color:#181825; font-size:13px; font-weight:600; display:flex; align-items:center;">Pressed</div>
+          <div style="height:32px; padding:0 16px; border-radius:6px; background:#BD93F9; color:#181825; font-size:13px; font-weight:600; display:flex; align-items:center; outline:2px solid #BD93F9; outline-offset:2px;">Focus</div>
+          <div style="height:32px; padding:0 16px; border-radius:6px; background:#2A2A3E; color:#52526A; font-size:13px; font-weight:600; display:flex; align-items:center;">Disabled</div>
+        </div>
+      </div>
+
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+        <!-- INPUTS -->
+        <div style="border:1px solid #383A54; border-radius:12px; background:#232338; padding:22px 24px;">
+          <div style="font-size:15px; font-weight:600; color:#CDD6F4; margin-bottom:4px;">Inputs</div>
+          <div style="font-size:12.5px; color:#9399B2; margin-bottom:18px;">Height 32 · bg.inset · focus = border.strong + ring</div>
+          <div style="display:flex; flex-direction:column; gap:11px;">
+            <div style="display:flex; align-items:center; gap:8px; height:32px; padding:0 12px; border-radius:6px; background:#1A1A2B; border:1px solid #34344E;"><span style="color:#7F849C;">⌕</span><span style="font-size:13px; color:#7F849C;">Placeholder</span></div>
+            <div style="display:flex; align-items:center; gap:8px; height:32px; padding:0 12px; border-radius:6px; background:#1A1A2B; border:1px solid #6C6F93; outline:2px solid rgba(189,147,249,0.5); outline-offset:1px;"><span style="font-size:13px; color:#CDD6F4;">Typing…</span><span style="width:2px; height:15px; background:#BD93F9; animation:skcaret 1.1s steps(1) infinite;"></span></div>
+            <div style="display:flex; align-items:center; gap:8px; height:32px; padding:0 12px; border-radius:6px; background:#1A1A2B; border:1px solid rgba(243,139,168,0.55);"><span style="font-size:13px; color:#F38BA8;">invalid value</span></div>
+          </div>
+        </div>
+        <!-- TOGGLES + SEGMENTED -->
+        <div style="border:1px solid #383A54; border-radius:12px; background:#232338; padding:22px 24px;">
+          <div style="font-size:15px; font-weight:600; color:#CDD6F4; margin-bottom:18px;">Toggle · Segmented · Select</div>
+          <div style="display:flex; align-items:center; gap:14px; margin-bottom:16px;">
+            <div style="width:38px; height:22px; border-radius:999px; background:#BD93F9; position:relative;"><div style="position:absolute; right:2px; top:2px; width:18px; height:18px; border-radius:999px; background:#181825;"></div></div>
+            <div style="width:38px; height:22px; border-radius:999px; background:#34344E; position:relative;"><div style="position:absolute; left:2px; top:2px; width:18px; height:18px; border-radius:999px; background:#7F849C;"></div></div>
+            <span style="font-size:12.5px; color:#9399B2;">on / off</span>
+          </div>
+          <div style="display:inline-flex; padding:3px; border-radius:8px; background:#1A1A2B; border:1px solid #34344E; margin-bottom:16px;">
+            <div style="padding:5px 14px; border-radius:6px; background:#383A54; color:#CDD6F4; font-size:12px; font-weight:600;">Dark</div>
+            <div style="padding:5px 14px; border-radius:6px; color:#9399B2; font-size:12px;">Light</div>
+            <div style="padding:5px 14px; border-radius:6px; color:#9399B2; font-size:12px;">Auto</div>
+          </div>
+          <div style="display:flex; align-items:center; justify-content:space-between; height:32px; padding:0 12px; border-radius:6px; background:#1A1A2B; border:1px solid #34344E;"><span style="font-size:13px; color:#CDD6F4;">Kanagawa Wave</span><span style="color:#7F849C;">▾</span></div>
+        </div>
+      </div>
+
+      <!-- SIDEBAR TAB ITEM STATES -->
+      <div style="border:1px solid #383A54; border-radius:12px; background:#232338; padding:22px 24px; margin-bottom:16px;">
+        <div style="font-size:15px; font-weight:600; color:#CDD6F4; margin-bottom:4px;">Sidebar tab item</div>
+        <div style="font-size:12.5px; color:#9399B2; margin-bottom:18px;">Height 30 · radius sm · active = accent bar + accent.subtle fill · running = pulsing dot</div>
+        <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:10px;">
+          <div>
+            <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px;"><span style="width:3px; height:14px; border-radius:2px; background:transparent;"></span><span style="color:#94E2D5; font-family:'JetBrains Mono'; font-size:11px;">❯</span><span style="font-size:12.5px; color:#BAC2DE;">docker logs</span></div>
+            <div class="mono" style="font-size:10px; color:#585B70; margin-top:5px; margin-left:10px;">default</div>
+          </div>
+          <div>
+            <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px; background:#313244;"><span style="width:3px; height:14px; border-radius:2px; background:transparent;"></span><span style="color:#94E2D5; font-family:'JetBrains Mono'; font-size:11px;">❯</span><span style="font-size:12.5px; color:#CDD6F4;">nvim src/</span></div>
+            <div class="mono" style="font-size:10px; color:#585B70; margin-top:5px; margin-left:10px;">hover</div>
+          </div>
+          <div>
+            <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px; background:rgba(189,147,249,0.14); border:1px solid rgba(189,147,249,0.28);"><span style="width:3px; height:14px; border-radius:2px; background:#BD93F9;"></span><span style="color:#BD93F9; font-family:'JetBrains Mono'; font-size:11px;">❯</span><span style="font-size:12.5px; color:#CDD6F4; font-weight:500;">cargo build</span></div>
+            <div class="mono" style="font-size:10px; color:#585B70; margin-top:5px; margin-left:10px;">active</div>
+          </div>
+          <div>
+            <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px; background:#313244;"><span style="width:3px; height:14px; border-radius:2px; background:transparent;"></span><span style="width:6px; height:6px; border-radius:999px; background:#A6E3A1;"></span><span style="font-size:12.5px; color:#CDD6F4;">dev server</span><span style="margin-left:auto; font-size:10px; color:#A6E3A1; font-family:'JetBrains Mono';">▶</span></div>
+            <div class="mono" style="font-size:10px; color:#585B70; margin-top:5px; margin-left:10px;">running</div>
+          </div>
+          <div>
+            <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px;"><span style="width:3px; height:14px; border-radius:2px; background:transparent;"></span><span style="color:#7F849C; font-family:'JetBrains Mono'; font-size:11px;">◆</span><span style="font-size:12.5px; color:#BAC2DE;">deploy.sh</span><span style="margin-left:auto; font-size:11px; color:#585B70;">✕</span></div>
+            <div class="mono" style="font-size:10px; color:#585B70; margin-top:5px; margin-left:10px;">pinned + close on hover</div>
+          </div>
+          <div>
+            <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px;"><span style="width:3px; height:14px; border-radius:2px; background:transparent;"></span><span style="color:#F38BA8; font-family:'JetBrains Mono'; font-size:11px;">❯</span><span style="font-size:12.5px; color:#BAC2DE;">build (exit 1)</span></div>
+            <div class="mono" style="font-size:10px; color:#585B70; margin-top:5px; margin-left:10px;">error exit</div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:16px;">
+        <!-- CONTEXT MENU -->
+        <div style="border:1px solid #383A54; border-radius:12px; background:#232338; padding:22px 24px;">
+          <div style="font-size:15px; font-weight:600; color:#CDD6F4; margin-bottom:18px;">Context menu · e3</div>
+          <div style="width:210px; border-radius:10px; background:#383A54; border:1px solid #44445E; box-shadow:0 8px 24px rgba(0,0,0,0.42); padding:5px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:7px 10px; border-radius:6px; background:rgba(189,147,249,0.14); color:#CDD6F4; font-size:12.5px;">Split right <span class="mono" style="font-size:10px; color:#A6ADC8;">⌥|</span></div>
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:7px 10px; border-radius:6px; color:#BAC2DE; font-size:12.5px;">Split down <span class="mono" style="font-size:10px; color:#7F849C;">⌥-</span></div>
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:7px 10px; border-radius:6px; color:#BAC2DE; font-size:12.5px;">Pin tab <span class="mono" style="font-size:10px; color:#7F849C;">⇧⌘P</span></div>
+            <div style="height:1px; background:#44445E; margin:5px 8px;"></div>
+            <div style="display:flex; justify-content:space-between; align-items:center; padding:7px 10px; border-radius:6px; color:#F38BA8; font-size:12.5px;">Close pane <span class="mono" style="font-size:10px; color:#A5677E;">⌘W</span></div>
+          </div>
+        </div>
+        <!-- OVERLAYS: tooltip, badge, keycap, toast -->
+        <div style="border:1px solid #383A54; border-radius:12px; background:#232338; padding:22px 24px;">
+          <div style="font-size:15px; font-weight:600; color:#CDD6F4; margin-bottom:18px;">Primitives</div>
+          <div style="display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:16px;">
+            <span style="padding:5px 9px; border-radius:6px; background:#383A54; border:1px solid #44445E; box-shadow:0 4px 12px rgba(0,0,0,0.35); font-size:11.5px; color:#CDD6F4;">Tooltip</span>
+            <span style="padding:3px 8px; border-radius:999px; background:rgba(189,147,249,0.16); color:#BD93F9; font-size:10.5px; font-weight:600;">3 panes</span>
+            <span style="width:8px; height:8px; border-radius:999px; background:#A6E3A1;"></span>
+            <span style="width:8px; height:8px; border-radius:999px; background:#F38BA8;"></span>
+          </div>
+          <div style="display:flex; gap:5px; align-items:center; margin-bottom:16px;">
+            <kbd style="font-family:'JetBrains Mono'; font-size:11px; color:#CDD6F4; background:#313244; border:1px solid #3A3A54; border-bottom-width:2px; border-radius:5px; padding:3px 8px;">⌘</kbd>
+            <kbd style="font-family:'JetBrains Mono'; font-size:11px; color:#CDD6F4; background:#313244; border:1px solid #3A3A54; border-bottom-width:2px; border-radius:5px; padding:3px 8px;">K</kbd>
+            <span style="font-size:12px; color:#9399B2; margin-left:4px;">keycaps</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:8px; background:#383A54; border:1px solid #44445E; box-shadow:0 8px 24px rgba(0,0,0,0.42);">
+            <span style="width:6px; height:6px; border-radius:999px; background:#A6E3A1;"></span>
+            <span style="font-size:12px; color:#CDD6F4;">Theme applied</span>
+            <span style="margin-left:auto; font-size:11px; color:#BD93F9;">Undo</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- COMMAND PALETTE ROWS -->
+      <div style="border:1px solid #383A54; border-radius:12px; background:#232338; padding:22px 24px;">
+        <div style="font-size:15px; font-weight:600; color:#CDD6F4; margin-bottom:4px;">Command palette row</div>
+        <div style="font-size:12.5px; color:#9399B2; margin-bottom:18px;">Icon · label · matched chars in accent · keybind hint right · selected = accent.subtle</div>
+        <div style="max-width:460px; border-radius:10px; background:#1A1A2B; border:1px solid #34344E; padding:5px;">
+          <div style="display:flex; align-items:center; gap:11px; padding:9px 12px; border-radius:7px; background:rgba(189,147,249,0.14);"><span style="color:#BD93F9;">▯</span><span style="font-size:13px; color:#CDD6F4;">Split pane <span style="color:#BD93F9;">ri</span>ght</span><span class="mono" style="margin-left:auto; font-size:10px; color:#A6ADC8;">⌥ |</span></div>
+          <div style="display:flex; align-items:center; gap:11px; padding:9px 12px; border-radius:7px;"><span style="color:#7F849C;">⑂</span><span style="font-size:13px; color:#BAC2DE;">Show git diff</span><span class="mono" style="margin-left:auto; font-size:10px; color:#7F849C;">⇧⌘G</span></div>
+          <div style="display:flex; align-items:center; gap:11px; padding:9px 12px; border-radius:7px;"><span style="color:#7F849C;">◐</span><span style="font-size:13px; color:#BAC2DE;">Change theme…</span><span class="mono" style="margin-left:auto; font-size:10px; color:#7F849C;">⇧⌘T</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== SCREENS ===== -->
+    <section id="screens" style="padding:52px 0 20px;">
+      <div class="mono" style="font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">10 &mdash; Screens</div>
+      <h2 style="font-size:34px; font-weight:600; letter-spacing:-1px; margin-bottom:12px;">Screen mockups</h2>
+      <p style="font-size:15px; line-height:1.6; color:#A6ADC8; max-width:72ch; margin:0 0 8px;">Every core state, rendered at spec. Each is a static reference &mdash; reproduce the layout, tokens, and behavior in native code.</p>
+    </section>
+
+    <!-- SCREEN: FIRST RUN -->
+    <section data-screen-label="First run" style="padding:20px 0 44px; border-top:1px solid #2A2A3E;">
+      <div style="display:flex; align-items:baseline; gap:12px; margin-bottom:6px;">
+        <span class="mono" style="font-size:12px; color:#BD93F9;">10.1</span>
+        <h3 style="font-size:20px; font-weight:600; color:#CDD6F4;">First run</h3>
+      </div>
+      <p style="font-size:13.5px; line-height:1.6; color:#9399B2; max-width:66ch; margin:0 0 20px;">One-time welcome. Pick shell + theme, see the three keys that matter. Everything is changeable later; “Skip” accepts defaults (login shell, Ossein Dark).</p>
+      <div style="border-radius:12px; overflow:hidden; border:1px solid #3A3A54; box-shadow:0 16px 48px rgba(0,0,0,0.52); background:#181825; position:relative; min-height:420px;">
+        <div style="position:absolute; inset:0; background:radial-gradient(120% 90% at 50% -10%, #2A2142, #181825 70%);"></div>
+        <div style="position:relative; height:38px; display:flex; align-items:center; gap:7px; padding:0 13px;">
+          <div style="width:11px; height:11px; border-radius:999px; background:#44445E;"></div><div style="width:11px; height:11px; border-radius:999px; background:#44445E;"></div><div style="width:11px; height:11px; border-radius:999px; background:#44445E;"></div>
+        </div>
+        <div style="position:relative; display:flex; align-items:center; justify-content:center; padding:22px 20px 44px;">
+          <div style="width:460px; max-width:100%; border:1px solid #34344E; border-radius:14px; background:#232338; box-shadow:0 16px 48px rgba(0,0,0,0.5); padding:30px 32px 26px;">
+            <div style="display:flex; align-items:center; gap:13px; margin-bottom:22px;">
+              <div style="position:relative; width:38px; height:38px; flex:0 0 auto;"><div style="position:absolute; left:50%; top:9%; transform:translateX(-50%); width:6%; height:82%; border-radius:999px; background:#BD93F9; opacity:0.3;"></div><div style="position:absolute; left:37%; top:3%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div><div style="position:absolute; left:29%; top:29%; width:42%; height:42%; transform:rotate(45deg); border-radius:22%; background:#BD93F9;"></div><div style="position:absolute; left:37%; top:71%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div></div>
+              <div>
+                <div style="font-family:'Space Grotesk'; font-size:19px; font-weight:600; color:#CDD6F4;">Welcome to skelly</div>
+                <div style="font-size:12px; color:#9399B2;">Barebones. Let’s set two things.</div>
+              </div>
+            </div>
+            <div class="mono" style="font-size:10px; letter-spacing:1px; text-transform:uppercase; color:#7F849C; margin-bottom:8px;">Shell</div>
+            <div style="display:flex; gap:8px; margin-bottom:18px;">
+              <div style="flex:1; text-align:center; padding:9px; border-radius:8px; background:rgba(189,147,249,0.14); border:1px solid rgba(189,147,249,0.4); font-family:'JetBrains Mono'; font-size:12px; color:#CDD6F4;">zsh</div>
+              <div style="flex:1; text-align:center; padding:9px; border-radius:8px; background:#313244; border:1px solid #34344E; font-family:'JetBrains Mono'; font-size:12px; color:#BAC2DE;">bash</div>
+              <div style="flex:1; text-align:center; padding:9px; border-radius:8px; background:#313244; border:1px solid #34344E; font-family:'JetBrains Mono'; font-size:12px; color:#BAC2DE;">fish</div>
+            </div>
+            <div class="mono" style="font-size:10px; letter-spacing:1px; text-transform:uppercase; color:#7F849C; margin-bottom:8px;">Theme</div>
+            <div style="display:flex; gap:8px; margin-bottom:22px;">
+              <div style="flex:1; border-radius:8px; overflow:hidden; border:1px solid rgba(189,147,249,0.4);"><div style="height:32px; background:#181825; display:flex; align-items:center; padding:0 9px;"><span style="font-family:'JetBrains Mono'; font-size:10px; color:#BD93F9;">❯ ossein</span></div><div style="padding:5px 9px; font-size:10.5px; color:#CDD6F4; background:#313244;">Ossein Dark</div></div>
+              <div style="flex:1; border-radius:8px; overflow:hidden; border:1px solid #34344E;"><div style="height:32px; background:#EFF1F5; display:flex; align-items:center; padding:0 9px;"><span style="font-family:'JetBrains Mono'; font-size:10px; color:#8839EF;">❯ ossein</span></div><div style="padding:5px 9px; font-size:10.5px; color:#BAC2DE; background:#313244;">Ossein Light</div></div>
+              <div style="flex:1; border-radius:8px; overflow:hidden; border:1px solid #34344E;"><div style="height:32px; background:#1F1F28; display:flex; align-items:center; padding:0 9px;"><span style="font-family:'JetBrains Mono'; font-size:10px; color:#7E9CD8;">❯ kana</span></div><div style="padding:5px 9px; font-size:10.5px; color:#BAC2DE; background:#313244;">+ 8 presets</div></div>
+            </div>
+            <div style="display:flex; gap:16px; justify-content:center; margin-bottom:22px; font-size:11.5px; color:#9399B2;">
+              <span><kbd style="font-family:'JetBrains Mono'; font-size:10px; color:#CDD6F4; background:#313244; border:1px solid #3A3A54; border-radius:4px; padding:2px 6px;">⌘K</kbd> palette</span>
+              <span><kbd style="font-family:'JetBrains Mono'; font-size:10px; color:#CDD6F4; background:#313244; border:1px solid #3A3A54; border-radius:4px; padding:2px 6px;">⌘T</kbd> new tab</span>
+              <span><kbd style="font-family:'JetBrains Mono'; font-size:10px; color:#CDD6F4; background:#313244; border:1px solid #3A3A54; border-radius:4px; padding:2px 6px;">⌥|</kbd> split</span>
+            </div>
+            <div style="display:flex; gap:10px;">
+              <button style="flex:1; height:36px; border:1px solid #3A3A54; border-radius:8px; background:transparent; color:#BAC2DE; font-family:'IBM Plex Sans'; font-size:13px; cursor:pointer;">Skip</button>
+              <button style="flex:2; height:36px; border:none; border-radius:8px; background:#BD93F9; color:#181825; font-family:'IBM Plex Sans'; font-size:13px; font-weight:600; cursor:pointer;">Start &nbsp;❯</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SCREEN: EMPTY STATE -->
+    <section data-screen-label="Empty state" style="padding:20px 0 44px; border-top:1px solid #2A2A3E;">
+      <div style="display:flex; align-items:baseline; gap:12px; margin-bottom:6px;">
+        <span class="mono" style="font-size:12px; color:#BD93F9;">10.2</span>
+        <h3 style="font-size:20px; font-weight:600; color:#CDD6F4;">Empty state</h3>
+      </div>
+      <p style="font-size:13.5px; line-height:1.6; color:#9399B2; max-width:66ch; margin:0 0 20px;">A fresh tab with no history. Faint mark, a live prompt, and dismissible hint chips. Chips fade the first time the user runs a command.</p>
+      <div style="border-radius:12px; overflow:hidden; border:1px solid #3A3A54; box-shadow:0 16px 48px rgba(0,0,0,0.52); background:#181825;">
+        <div style="display:grid; grid-template-columns:200px 1fr; min-height:380px;">
+          <div style="background:#1E1E2E; border-right:1px solid #2E2E44; display:flex; flex-direction:column;">
+            <div style="height:38px; display:flex; align-items:center; gap:7px; padding:0 13px;"><div style="width:10px; height:10px; border-radius:999px; background:#FF5555;"></div><div style="width:10px; height:10px; border-radius:999px; background:#BD93F9;"></div><div style="width:10px; height:10px; border-radius:999px; background:#A6E3A1;"></div></div>
+            <div style="padding:2px 12px 12px;"><div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:8px; background:#313244; border:1px solid #34344E;"><span style="color:#7F849C; font-size:12px;">⌕</span><span style="font-size:11.5px; color:#7F849C;">Search or run…</span></div></div>
+            <div style="padding:0 9px;">
+              <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px; background:rgba(189,147,249,0.14); border:1px solid rgba(189,147,249,0.28);"><span style="width:3px; height:14px; border-radius:2px; background:#BD93F9;"></span><span style="color:#BD93F9; font-family:'JetBrains Mono'; font-size:11px;">❯</span><span style="font-size:12.5px; color:#CDD6F4;">~/skelly</span></div>
+            </div>
+            <div style="padding:8px 13px; color:#7F849C; font-size:12.5px; display:flex; align-items:center; gap:8px;"><span style="font-size:14px;">+</span> New tab</div>
+            <div style="margin-top:auto; height:40px; border-top:1px solid #2E2E44; display:flex; align-items:center; gap:16px; padding:0 15px; color:#7F849C; font-size:14px;"><span>⚙</span><span>◐</span><span>⟲</span><span>⑂</span></div>
+          </div>
+          <div style="position:relative; display:flex; align-items:center; justify-content:center;">
+            <div style="text-align:center;">
+              <div style="position:relative; width:56px; height:56px; margin:0 auto 20px; opacity:0.32;"><div style="position:absolute; left:50%; top:9%; transform:translateX(-50%); width:6%; height:82%; border-radius:999px; background:#BD93F9; opacity:0.3;"></div><div style="position:absolute; left:37%; top:3%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div><div style="position:absolute; left:29%; top:29%; width:42%; height:42%; transform:rotate(45deg); border-radius:22%; background:#BD93F9;"></div><div style="position:absolute; left:37%; top:71%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div></div>
+              <div style="font-family:'JetBrains Mono'; font-size:14px; color:#BAC2DE; margin-bottom:24px;"><span style="color:#A6E3A1;">~</span> <span style="color:#BD93F9;">❯</span> <span style="display:inline-block;width:8px;height:16px;background:#BD93F9;transform:translateY(3px);animation:skcaret 1.1s steps(1) infinite;"></span></div>
+              <div style="display:flex; gap:8px; justify-content:center; flex-wrap:wrap; max-width:360px;">
+                <span style="padding:6px 11px; border-radius:999px; border:1px solid #34344E; background:#232338; font-size:11.5px; color:#A6ADC8;"><kbd style="font-family:'JetBrains Mono'; color:#CDD6F4;">⌘K</kbd> commands</span>
+                <span style="padding:6px 11px; border-radius:999px; border:1px solid #34344E; background:#232338; font-size:11.5px; color:#A6ADC8;"><kbd style="font-family:'JetBrains Mono'; color:#CDD6F4;">⌥|</kbd> split right</span>
+                <span style="padding:6px 11px; border-radius:999px; border:1px solid #34344E; background:#232338; font-size:11.5px; color:#A6ADC8;"><kbd style="font-family:'JetBrains Mono'; color:#CDD6F4;">⇧⌘G</kbd> git diff</span>
+                <span style="padding:6px 11px; border-radius:999px; border:1px solid #34344E; background:#232338; font-size:11.5px; color:#A6ADC8;"><kbd style="font-family:'JetBrains Mono'; color:#CDD6F4;">⌘,</kbd> settings</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SCREEN: SINGLE PANE -->
+    <section data-screen-label="Single pane" style="padding:20px 0 44px; border-top:1px solid #2A2A3E;">
+      <div style="display:flex; align-items:baseline; gap:12px; margin-bottom:6px;">
+        <span class="mono" style="font-size:12px; color:#BD93F9;">10.3</span>
+        <h3 style="font-size:20px; font-weight:600; color:#CDD6F4;">Default terminal &mdash; single pane</h3>
+      </div>
+      <p style="font-size:13.5px; line-height:1.6; color:#9399B2; max-width:66ch; margin:0 0 20px;">The resting state. Sidebar with pinned grid + tab list, one full-height pane, one status line. Chrome is silent; the grid is the interface.</p>
+      <div style="border-radius:12px; overflow:hidden; border:1px solid #3A3A54; box-shadow:0 16px 48px rgba(0,0,0,0.52); background:#181825;">
+        <div style="display:grid; grid-template-columns:212px 1fr; min-height:440px;">
+          <!-- sidebar -->
+          <div style="background:#1E1E2E; border-right:1px solid #2E2E44; display:flex; flex-direction:column;">
+            <div style="height:38px; display:flex; align-items:center; gap:7px; padding:0 13px;"><div style="width:10px; height:10px; border-radius:999px; background:#FF5555;"></div><div style="width:10px; height:10px; border-radius:999px; background:#BD93F9;"></div><div style="width:10px; height:10px; border-radius:999px; background:#A6E3A1;"></div></div>
+            <div style="padding:2px 12px 6px; display:flex; gap:7px;">
+              <div style="width:24px; height:24px; border-radius:7px; background:rgba(189,147,249,0.16); border:1px solid rgba(189,147,249,0.4); display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono'; font-size:10px; color:#BD93F9;">P</div>
+              <div style="width:24px; height:24px; border-radius:7px; background:#313244; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono'; font-size:10px; color:#7F849C;">W</div>
+            </div>
+            <div style="padding:6px 12px 10px;"><div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:8px; background:#313244; border:1px solid #34344E;"><span style="color:#7F849C; font-size:12px;">⌕</span><span style="font-size:11.5px; color:#7F849C;">Search or run…</span></div></div>
+            <div style="padding:0 12px 12px;">
+              <div class="mono" style="font-size:9px; letter-spacing:1px; text-transform:uppercase; color:#585B70; margin-bottom:7px;">Pinned</div>
+              <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px;">
+                <div style="aspect-ratio:1; border-radius:8px; background:#313244; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono'; font-size:11px; color:#94E2D5;">✳</div>
+                <div style="aspect-ratio:1; border-radius:8px; background:#313244; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono'; font-size:11px; color:#F5C2E7;">⑂</div>
+                <div style="aspect-ratio:1; border-radius:8px; background:#313244; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono'; font-size:11px; color:#89B4FA;">◈</div>
+              </div>
+            </div>
+            <div style="padding:0 9px; flex:1 1 auto;">
+              <div class="mono" style="font-size:9px; letter-spacing:1px; text-transform:uppercase; color:#585B70; margin:0 4px 6px;">skelly · main</div>
+              <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px; background:rgba(189,147,249,0.14); border:1px solid rgba(189,147,249,0.28); margin-bottom:3px;"><span style="width:3px; height:14px; border-radius:2px; background:#BD93F9;"></span><span style="color:#BD93F9; font-family:'JetBrains Mono'; font-size:11px;">❯</span><span style="font-size:12.5px; color:#CDD6F4; font-weight:500;">git status</span></div>
+              <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px; margin-bottom:3px;"><span style="width:3px; border-radius:2px; background:transparent;"></span><span style="width:6px; height:6px; border-radius:999px; background:#A6E3A1;"></span><span style="font-size:12.5px; color:#BAC2DE;">dev server</span></div>
+              <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px;"><span style="width:3px; border-radius:2px; background:transparent;"></span><span style="color:#F5C2E7; font-family:'JetBrains Mono'; font-size:11px;">❯</span><span style="font-size:12.5px; color:#BAC2DE;">nvim src/</span></div>
+            </div>
+            <div style="padding:6px 13px; color:#7F849C; font-size:12.5px; display:flex; align-items:center; gap:8px;"><span style="font-size:14px;">+</span> New tab</div>
+            <div style="height:40px; border-top:1px solid #2E2E44; display:flex; align-items:center; gap:16px; padding:0 15px; color:#7F849C; font-size:14px;"><span>⚙</span><span>◐</span><span>⟲</span><span>⑂</span></div>
+          </div>
+          <!-- content -->
+          <div style="display:flex; flex-direction:column;">
+            <div style="flex:1 1 auto; padding:16px 18px; font-family:'JetBrains Mono'; font-size:12.5px; line-height:1.75;">
+              <div><span style="color:#A6E3A1;">~/skelly</span> <span style="color:#89B4FA;">⑂ main</span> <span style="color:#BD93F9;">❯</span> <span style="color:#CDD6F4;">git status</span></div>
+              <div style="color:#BAC2DE;">On branch <span style="color:#89B4FA;">main</span></div>
+              <div style="color:#BAC2DE;">Changes to be committed:</div>
+              <div style="color:#A6E3A1;">  modified:   src/pane/tree.rs</div>
+              <div style="color:#A6E3A1;">  new file:   src/session/timeline.rs</div>
+              <div style="color:#BAC2DE; margin-top:4px;">Changes not staged:</div>
+              <div style="color:#F38BA8;">  modified:   src/main.rs</div>
+              <div style="margin-top:8px;"><span style="color:#A6E3A1;">~/skelly</span> <span style="color:#89B4FA;">⑂ main</span> <span style="color:#BD93F9;">❯</span> <span style="color:#CDD6F4;">cargo test</span></div>
+              <div style="color:#7F849C;">   Compiling skelly v0.1.0</div>
+              <div style="color:#A6E3A1;">test result: ok. 48 passed; 0 failed</div>
+              <div style="margin-top:8px;"><span style="color:#A6E3A1;">~/skelly</span> <span style="color:#89B4FA;">⑂ main</span> <span style="color:#BD93F9;">❯</span> <span style="display:inline-block;width:8px;height:15px;background:#BD93F9;transform:translateY(2px);animation:skcaret 1.1s steps(1) infinite;"></span></div>
+            </div>
+            <div style="height:24px; border-top:1px solid #2E2E44; background:#1A1826; display:flex; align-items:center; gap:14px; padding:0 14px; font-family:'JetBrains Mono'; font-size:10.5px; color:#7F849C;"><span style="color:#A6E3A1;">~/skelly</span><span style="color:#89B4FA;">⑂ main</span><span style="color:#BD93F9;">●+2 −1</span><span>zsh</span><span style="margin-left:auto;">◐ Ossein Dark</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SCREEN: MULTI-PANE -->
+    <section data-screen-label="Multi-pane" style="padding:20px 0 44px; border-top:1px solid #2A2A3E;">
+      <div style="display:flex; align-items:baseline; gap:12px; margin-bottom:6px;">
+        <span class="mono" style="font-size:12px; color:#BD93F9;">10.4</span>
+        <h3 style="font-size:20px; font-weight:600; color:#CDD6F4;">Multi-pane splits</h3>
+      </div>
+      <p style="font-size:13.5px; line-height:1.6; color:#9399B2; max-width:70ch; margin:0 0 20px;">Tile as many panes as you need inside one tab &mdash; split horizontally or vertically, and <b style="color:#CDD6F4;">nest splits so they need not be even</b> (below: a full-height editor beside a stacked terminal + logs). Up to <b style="color:#CDD6F4;">8 panes</b>. The focused pane gets a <code style="color:#BD93F9;">border.strong</code> ring; drag any divider (1px line, 6px hit area) to resize. <code style="color:#BD93F9;">⌥Z</code> zooms the focused pane to full, again to restore.</p>
+      <div style="border-radius:12px; overflow:hidden; border:1px solid #3A3A54; box-shadow:0 16px 48px rgba(0,0,0,0.52); background:#181825; margin-bottom:18px;">
+        <div style="height:38px; display:flex; align-items:center; gap:7px; padding:0 13px; background:#1E1E2E; border-bottom:1px solid #2E2E44;"><div style="width:10px; height:10px; border-radius:999px; background:#FF5555;"></div><div style="width:10px; height:10px; border-radius:999px; background:#BD93F9;"></div><div style="width:10px; height:10px; border-radius:999px; background:#A6E3A1;"></div><span style="margin-left:12px; font-family:'JetBrains Mono'; font-size:11px; color:#BAC2DE;">skelly · dev — 3 panes · uneven</span></div>
+        <div style="position:relative; display:grid; grid-template-columns:1.55fr 1fr; grid-template-rows:1fr 1fr; gap:5px; height:360px; background:#3A3A54;">
+          <!-- left: focused editor, spans both rows -->
+          <div style="grid-row:1 / span 2; background:#181825; padding:12px 14px; font-family:'JetBrains Mono'; font-size:11px; line-height:1.7; box-shadow:inset 0 0 0 1.5px #BD93F9; position:relative;">
+            <div style="color:#F5C2E7;">nvim src/pane/tree.rs</div>
+            <div style="color:#7F849C;"> 1 <span style="color:#F5C2E7;">pub fn</span> <span style="color:#89B4FA;">split</span>(dir, ratio) &#123;</div>
+            <div style="color:#7F849C;"> 2   <span style="color:#A6E3A1;">self</span>.insert(dir, ratio);</div>
+            <div style="color:#7F849C;"> 3   <span style="color:#A6E3A1;">self</span>.focus_last();</div>
+            <div style="color:#7F849C;"> 4 &#125;</div>
+            <div style="color:#585B70;"> ~</div>
+            <div style="color:#585B70;"> ~</div>
+            <span style="position:absolute; bottom:7px; left:14px; font-size:8.5px; color:#BD93F9; font-family:'JetBrains Mono';">● focus · NORMAL</span>
+          </div>
+          <!-- right-top terminal -->
+          <div style="background:#181825; padding:12px 14px; font-family:'JetBrains Mono'; font-size:11px; line-height:1.7;">
+            <div><span style="color:#A6E3A1;">~/skelly</span> <span style="color:#BD93F9;">❯</span> <span style="color:#CDD6F4;">cargo run</span></div>
+            <div style="color:#7F849C;">   Running skelly…</div>
+            <div style="color:#A6E3A1;">   listening :4390</div>
+            <div style="color:#BD93F9;">❯ <span style="display:inline-block;width:6px;height:12px;background:#BD93F9;transform:translateY(1px);animation:skcaret 1.1s steps(1) infinite;"></span></div>
+          </div>
+          <!-- right-bottom logs -->
+          <div style="background:#181825; padding:12px 14px; font-family:'JetBrains Mono'; font-size:11px; line-height:1.7;">
+            <div style="color:#89B4FA;">[dev] watching…</div>
+            <div style="color:#A6E3A1;">✓ rebuilt in 210ms</div>
+            <div style="color:#F9E2AF;">⚠ 2 warnings</div>
+          </div>
+          <!-- drag handles on dividers -->
+          <div style="position:absolute; left:60.8%; top:50%; width:5px; height:34px; transform:translate(-50%,-50%); border-radius:999px; background:#6C6F93;"></div>
+          <div style="position:absolute; left:80.4%; top:50%; width:34px; height:5px; transform:translate(-50%,-50%); border-radius:999px; background:#6C6F93;"></div>
+        </div>
+      </div>
+      <!-- layout diagrams -->
+      <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(120px,1fr)); gap:12px;">
+        <sc-for list="{{ layouts }}" as="lo" hint-placeholder-count="6">
+          <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:14px;">
+            <div style="height:56px; border-radius:6px; overflow:hidden; display:grid; gap:2px; background:#383A54; {{ lo.grid }}">
+              <sc-for list="{{ lo.cells }}" as="c" hint-placeholder-count="4">
+                <div style="background:#181825; {{ c.cs }}"></div>
+              </sc-for>
+            </div>
+            <div style="font-size:12px; font-weight:600; color:#CDD6F4; margin-top:10px;">{{ lo.name }}</div>
+            <div class="mono" style="font-size:10px; color:#BD93F9; margin-top:2px;">{{ lo.key }}</div>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+
+    <!-- SCREEN: TAB MANAGEMENT -->
+    <section data-screen-label="Tab management" style="padding:20px 0 44px; border-top:1px solid #2A2A3E;">
+      <div style="display:flex; align-items:baseline; gap:12px; margin-bottom:6px;">
+        <span class="mono" style="font-size:12px; color:#BD93F9;">10.5</span>
+        <h3 style="font-size:20px; font-weight:600; color:#CDD6F4;">Sidebar tabs, groups &amp; pinning</h3>
+      </div>
+      <p style="font-size:13.5px; line-height:1.6; color:#9399B2; max-width:70ch; margin:0 0 20px;">Vertical tabs down the side. Collapsible <b style="color:#CDD6F4;">groups</b>, drag to reorder (insertion line), and a <b style="color:#CDD6F4;">pinned grid</b> that survives restarts. Right-click any tab for the full action menu.</p>
+      <div style="display:grid; grid-template-columns:280px 1fr; gap:20px; align-items:start;">
+        <!-- enlarged sidebar -->
+        <div style="border-radius:12px; overflow:hidden; border:1px solid #3A3A54; background:#1E1E2E; box-shadow:0 16px 48px rgba(0,0,0,0.52); position:relative;">
+          <div style="height:38px; display:flex; align-items:center; gap:7px; padding:0 13px;"><div style="width:10px; height:10px; border-radius:999px; background:#FF5555;"></div><div style="width:10px; height:10px; border-radius:999px; background:#BD93F9;"></div><div style="width:10px; height:10px; border-radius:999px; background:#A6E3A1;"></div></div>
+          <div style="padding:2px 12px 8px; display:flex; gap:7px;">
+            <div style="width:26px; height:26px; border-radius:7px; background:rgba(189,147,249,0.16); border:1px solid rgba(189,147,249,0.4); display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono'; font-size:11px; color:#BD93F9;">P</div>
+            <div style="width:26px; height:26px; border-radius:7px; background:#313244; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono'; font-size:11px; color:#7F849C;">W</div>
+            <div style="width:26px; height:26px; border-radius:7px; background:#313244; display:flex; align-items:center; justify-content:center; color:#7F849C; font-size:14px;">+</div>
+          </div>
+          <!-- pinned grid with hover state -->
+          <div style="padding:0 12px 12px;">
+            <div class="mono" style="font-size:9px; letter-spacing:1px; text-transform:uppercase; color:#585B70; margin-bottom:7px;">Pinned</div>
+            <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:6px;">
+              <div style="aspect-ratio:1; border-radius:8px; background:#313244; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono'; font-size:12px; color:#94E2D5; position:relative;">✳<span style="position:absolute; top:2px; right:3px; font-size:9px; color:#7F849C;">✕</span></div>
+              <div style="aspect-ratio:1; border-radius:8px; background:#313244; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono'; font-size:12px; color:#F5C2E7;">⑂</div>
+              <div style="aspect-ratio:1; border-radius:8px; background:#313244; display:flex; align-items:center; justify-content:center; font-family:'JetBrains Mono'; font-size:12px; color:#89B4FA;">◈</div>
+            </div>
+          </div>
+          <!-- group: main (expanded) -->
+          <div style="padding:0 9px;">
+            <div style="display:flex; align-items:center; gap:6px; padding:4px 6px; color:#9399B2; font-size:11px;"><span style="color:#BD93F9;">▾</span><span class="mono" style="letter-spacing:0.5px;">skelly · main</span><span style="margin-left:auto; font-size:10px; color:#585B70;">3</span></div>
+            <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px; background:rgba(189,147,249,0.14); border:1px solid rgba(189,147,249,0.28); margin-bottom:2px;"><span style="width:3px; height:14px; border-radius:2px; background:#BD93F9;"></span><span style="color:#BD93F9; font-family:'JetBrains Mono'; font-size:11px;">❯</span><span style="font-size:12.5px; color:#CDD6F4;">cargo build</span></div>
+            <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px; margin-bottom:2px;"><span style="width:3px; border-radius:2px; background:transparent;"></span><span style="width:6px; height:6px; border-radius:999px; background:#A6E3A1;"></span><span style="font-size:12.5px; color:#BAC2DE;">dev server</span></div>
+            <!-- insertion line + dragged tab -->
+            <div style="height:2px; background:#BD93F9; border-radius:2px; margin:2px 8px;"></div>
+            <div style="display:flex; align-items:center; gap:8px; height:30px; padding:0 10px; border-radius:7px; background:#313244; border:1px solid #44445E; box-shadow:0 6px 16px rgba(0,0,0,0.4); opacity:0.95; margin-bottom:2px;"><span style="width:3px; border-radius:2px; background:transparent;"></span><span style="color:#F5C2E7; font-family:'JetBrains Mono'; font-size:11px;">❯</span><span style="font-size:12.5px; color:#CDD6F4;">nvim src/ &nbsp;⠿</span></div>
+          </div>
+          <!-- group: infra (collapsed) -->
+          <div style="padding:6px 9px 0;">
+            <div style="display:flex; align-items:center; gap:6px; padding:4px 6px; color:#9399B2; font-size:11px;"><span style="color:#7F849C;">▸</span><span class="mono" style="letter-spacing:0.5px;">infra</span><span style="margin-left:auto; font-size:10px; color:#585B70;">2</span></div>
+          </div>
+          <div style="padding:8px 13px 12px; color:#7F849C; font-size:12.5px; display:flex; align-items:center; gap:8px;"><span style="font-size:14px;">+</span> New tab</div>
+          <!-- context menu overlay -->
+          <div style="position:absolute; right:-8px; top:214px; width:190px; border-radius:10px; background:#383A54; border:1px solid #44445E; box-shadow:0 8px 24px rgba(0,0,0,0.5); padding:5px; z-index:5;">
+            <div style="display:flex; justify-content:space-between; padding:6px 9px; border-radius:6px; background:rgba(189,147,249,0.14); color:#CDD6F4; font-size:12px;">Pin tab <span class="mono" style="font-size:10px; color:#A6ADC8;">⇧⌘P</span></div>
+            <div style="display:flex; justify-content:space-between; padding:6px 9px; border-radius:6px; color:#BAC2DE; font-size:12px;">Rename… <span class="mono" style="font-size:10px; color:#7F849C;">F2</span></div>
+            <div style="padding:6px 9px; border-radius:6px; color:#BAC2DE; font-size:12px;">Move to group ›</div>
+            <div style="padding:6px 9px; border-radius:6px; color:#BAC2DE; font-size:12px;">Duplicate</div>
+            <div style="height:1px; background:#44445E; margin:5px 8px;"></div>
+            <div style="display:flex; justify-content:space-between; padding:6px 9px; border-radius:6px; color:#F38BA8; font-size:12px;">Close <span class="mono" style="font-size:10px; color:#A5677E;">⌘W</span></div>
+          </div>
+        </div>
+        <!-- behaviors -->
+        <div style="display:flex; flex-direction:column; gap:10px;">
+          <sc-for list="{{ tabBehaviors }}" as="b" hint-placeholder-count="6">
+            <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:14px 16px;">
+              <div style="display:flex; justify-content:space-between; align-items:baseline; gap:10px; margin-bottom:3px;">
+                <span style="font-size:13px; font-weight:600; color:#CDD6F4;">{{ b.t }}</span>
+                <span class="mono" style="font-size:10.5px; color:#BD93F9; white-space:nowrap;">{{ b.k }}</span>
+              </div>
+              <div style="font-size:12px; line-height:1.55; color:#9399B2;">{{ b.d }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </section>
+
+    <!-- SCREEN: GIT DIFF -->
+    <section data-screen-label="Git diff" style="padding:20px 0 44px; border-top:1px solid #2A2A3E;">
+      <div style="display:flex; align-items:baseline; gap:12px; margin-bottom:6px;">
+        <span class="mono" style="font-size:12px; color:#BD93F9;">10.6</span>
+        <h3 style="font-size:20px; font-weight:600; color:#CDD6F4;">Git diff panel</h3>
+      </div>
+      <p style="font-size:13.5px; line-height:1.6; color:#9399B2; max-width:70ch; margin:0 0 20px;">Scoped to the active tab’s repo. Changed-file list with per-file stage toggles + stats, hunk-level staging, and a commit box. Opens as a dock (<code style="color:#BD93F9;">⇧⌘G</code>) or full view. Added lines use <code style="color:#A6E3A1;">diff.add</code>, removed <code style="color:#F38BA8;">diff.del</code>, hunk headers <code style="color:#89B4FA;">diff.hunk</code>.</p>
+      <div style="border-radius:12px; overflow:hidden; border:1px solid #3A3A54; box-shadow:0 16px 48px rgba(0,0,0,0.52); background:#181825;">
+        <!-- top bar -->
+        <div style="height:44px; display:flex; align-items:center; gap:12px; padding:0 14px; background:#1E1E2E; border-bottom:1px solid #2E2E44;">
+          <span style="font-family:'JetBrains Mono'; font-size:12px; color:#89B4FA;">⑂ main</span>
+          <span style="font-family:'JetBrains Mono'; font-size:11px; color:#7F849C;">↑2 ↓0</span>
+          <span style="font-family:'JetBrains Mono'; font-size:11px; color:#A6E3A1;">+221</span>
+          <span style="font-family:'JetBrains Mono'; font-size:11px; color:#F38BA8;">−107</span>
+          <div style="margin-left:auto; display:flex; gap:8px;">
+            <button style="height:28px; padding:0 12px; border:1px solid #3A3A54; border-radius:6px; background:#313244; color:#BAC2DE; font-family:'IBM Plex Sans'; font-size:12px; cursor:pointer;">Stage all</button>
+            <button style="height:28px; padding:0 14px; border:none; border-radius:6px; background:#BD93F9; color:#181825; font-family:'IBM Plex Sans'; font-size:12px; font-weight:600; cursor:pointer;">Commit</button>
+          </div>
+        </div>
+        <div style="display:grid; grid-template-columns:250px 1fr; min-height:430px;">
+          <!-- file list -->
+          <div style="border-right:1px solid #2E2E44; background:#1A1826; display:flex; flex-direction:column;">
+            <div class="mono" style="font-size:9px; letter-spacing:1px; text-transform:uppercase; color:#7F849C; padding:11px 14px 6px;">Staged &amp; changed — 6</div>
+            <div style="flex:1 1 auto;">
+              <sc-for list="{{ diffFiles }}" as="f" hint-placeholder-count="6">
+                <div style="display:flex; align-items:center; gap:9px; padding:7px 14px; border-radius:0; background:{{ f.rowbg }};" style-hover="background:#232338;">
+                  <span style="width:14px; height:14px; border-radius:4px; border:1px solid #4A4A66; background:{{ f.chk }}; flex:0 0 auto; display:flex; align-items:center; justify-content:center; font-size:9px; color:#181825;">{{ f.tick }}</span>
+                  <span style="font-family:'JetBrains Mono'; font-size:11px; font-weight:700; color:{{ f.sc }}; width:10px;">{{ f.s }}</span>
+                  <span style="min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"><span style="font-size:12px; color:#7F849C;">{{ f.p }}</span><span style="font-size:12px; color:{{ f.nameColor }};">{{ f.n }}</span></span>
+                  <span style="font-family:'JetBrains Mono'; font-size:10px; color:#A6E3A1;">{{ f.add }}</span>
+                  <span style="font-family:'JetBrains Mono'; font-size:10px; color:#F38BA8;">{{ f.del }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <!-- commit box -->
+            <div style="border-top:1px solid #2E2E44; padding:11px 14px;">
+              <div style="border:1px solid #34344E; border-radius:8px; background:#1A1A2B; padding:9px 11px; min-height:52px;"><span style="font-size:12px; color:#CDD6F4;">feat: rewindable session timeline</span><span style="width:2px; height:14px; background:#BD93F9; display:inline-block; transform:translateY(2px); animation:skcaret 1.1s steps(1) infinite;"></span></div>
+              <div style="display:flex; justify-content:space-between; margin-top:7px; font-family:'JetBrains Mono'; font-size:9.5px; color:#7F849C;"><span>2 files staged</span><span style="color:#A6E3A1;">✓ 34 chars</span></div>
+            </div>
+          </div>
+          <!-- diff view -->
+          <div style="display:flex; flex-direction:column; min-width:0;">
+            <div style="display:flex; align-items:center; gap:10px; padding:9px 14px; border-bottom:1px solid #2E2E44;">
+              <span style="font-family:'JetBrains Mono'; font-size:12px; color:#CDD6F4;">src/pane/<b style="color:#89B4FA;">tree.rs</b></span>
+              <span style="font-family:'JetBrains Mono'; font-size:10px; color:#A6E3A1;">+42</span><span style="font-family:'JetBrains Mono'; font-size:10px; color:#F38BA8;">−11</span>
+              <div style="margin-left:auto; display:inline-flex; padding:2px; border-radius:7px; background:#1A1A2B; border:1px solid #34344E;">
+                <span style="padding:3px 10px; border-radius:5px; background:#383A54; color:#CDD6F4; font-size:11px;">Unified</span>
+                <span style="padding:3px 10px; border-radius:5px; color:#9399B2; font-size:11px;">Split</span>
+              </div>
+            </div>
+            <div style="flex:1 1 auto; font-family:'JetBrains Mono'; font-size:11.5px; line-height:1.75; overflow:hidden;">
+              <!-- hunk header -->
+              <div style="display:flex; align-items:center; justify-content:space-between; padding:4px 14px; background:rgba(137,180,250,0.08); color:#89B4FA;"><span>@@ -18,7 +18,9 @@ impl PaneTree</span><span style="font-size:10px; color:#7F849C; cursor:pointer;">Stage hunk ⌘↵</span></div>
+              <div style="padding-left:14px; color:#7F849C;"><span style="display:inline-block; width:34px; color:#585B70;">18</span> <span style="color:#BAC2DE;">fn split(&mut self, dir: Dir) {</span></div>
+              <div style="padding-left:14px; color:#7F849C;"><span style="display:inline-block; width:34px; color:#585B70;">19</span> <span style="color:#BAC2DE;">    let node = self.focused();</span></div>
+              <div style="padding-left:14px; background:rgba(243,139,168,0.14); color:#F38BA8;"><span style="display:inline-block; width:34px; color:#A5677E;">20</span>−    node.grow(dir);</div>
+              <div style="padding-left:14px; background:rgba(166,227,161,0.14); color:#A6E3A1;"><span style="display:inline-block; width:34px; color:#6E9A6A;">20</span>+    if self.count() >= 8 { return Err(Full); }</div>
+              <div style="padding-left:14px; background:rgba(166,227,161,0.14); color:#A6E3A1;"><span style="display:inline-block; width:34px; color:#6E9A6A;">21</span>+    node.grow(dir);</div>
+              <div style="padding-left:14px; color:#7F849C;"><span style="display:inline-block; width:34px; color:#585B70;">22</span> <span style="color:#BAC2DE;">    self.rebalance();</span></div>
+              <div style="padding-left:14px; color:#7F849C;"><span style="display:inline-block; width:34px; color:#585B70;">23</span> <span style="color:#BAC2DE;">}</span></div>
+              <div style="display:flex; align-items:center; justify-content:space-between; padding:4px 14px; background:rgba(137,180,250,0.08); color:#89B4FA; margin-top:4px;"><span>@@ -51,3 +53,4 @@ impl PaneTree</span><span style="font-size:10px; color:#7F849C; cursor:pointer;">Stage hunk ⌘↵</span></div>
+              <div style="padding-left:14px; color:#7F849C;"><span style="display:inline-block; width:34px; color:#585B70;">51</span> <span style="color:#BAC2DE;">    pub fn focused(&self) -> &Pane {</span></div>
+              <div style="padding-left:14px; background:rgba(166,227,161,0.14); color:#A6E3A1;"><span style="display:inline-block; width:34px; color:#6E9A6A;">54</span>+    debug_assert!(self.panes.len() <= 8);</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SCREEN: SESSION TIMELINE -->
+    <section data-screen-label="Session timeline" style="padding:20px 0 44px; border-top:1px solid #2A2A3E;">
+      <div style="display:flex; align-items:baseline; gap:12px; margin-bottom:6px;">
+        <span class="mono" style="font-size:12px; color:#BD93F9;">10.7</span>
+        <h3 style="font-size:20px; font-weight:600; color:#CDD6F4;">Session timeline &mdash; rewind &amp; fast-forward</h3>
+      </div>
+      <p style="font-size:13.5px; line-height:1.6; color:#9399B2; max-width:72ch; margin:0 0 20px;">A clickable record of everything done this session &mdash; <span style="color:#89B4FA;">human</span> and <span style="color:#F5C2E7;">agent</span> actions, plus <span style="color:#7F849C;">system</span> events. Scrub the track (or click any entry) to <b style="color:#CDD6F4;">restore the codebase to that moment</b>; later events dim to show they’re in the “future.” Fast-forward or hit <b style="color:#CDD6F4;">Return to now</b> to jump back to HEAD. Restoring is non-destructive &mdash; it checks out a shadow worktree, never rewriting history.</p>
+      <div style="border-radius:12px; overflow:hidden; border:1px solid #3A3A54; box-shadow:0 16px 48px rgba(0,0,0,0.52); background:#181825;">
+        <!-- rewind banner -->
+        <div style="display:flex; align-items:center; gap:12px; padding:9px 16px; background:rgba(189,147,249,0.12); border-bottom:1px solid rgba(189,147,249,0.3);">
+          <span style="font-size:12.5px; color:#D6BBFC;">⟲ Viewing state at <b>13:44</b> &mdash; codebase restored to this point.</span>
+          <div style="margin-left:auto; display:flex; gap:8px;">
+            <button style="height:26px; padding:0 11px; border:1px solid #4A3D6E; border-radius:6px; background:transparent; color:#D6BBFC; font-family:'IBM Plex Sans'; font-size:11.5px; cursor:pointer;">⏵ Fast-forward</button>
+            <button style="height:26px; padding:0 12px; border:none; border-radius:6px; background:#BD93F9; color:#181825; font-family:'IBM Plex Sans'; font-size:11.5px; font-weight:600; cursor:pointer;">Return to now</button>
+          </div>
+        </div>
+        <!-- scrubber -->
+        <div style="padding:16px 20px 14px; border-bottom:1px solid #2E2E44; background:#1A1826;">
+          <div style="display:flex; align-items:center; gap:12px; margin-bottom:14px; font-family:'JetBrains Mono'; font-size:11px; color:#7F849C;">
+            <span>⏮</span><span style="color:#BD93F9;">⏸</span><span>⏭</span>
+            <span style="margin-left:6px;">Session · 2h 28m · 34 events · <span style="color:#89B4FA;">main</span></span>
+          </div>
+          <div style="position:relative; height:8px; border-radius:999px; background:#2A2A3E;">
+            <div style="position:absolute; left:0; top:0; bottom:0; width:62%; border-radius:999px; background:linear-gradient(90deg,#BD93F9,#D6BBFC);"></div>
+            <!-- nodes -->
+            <div style="position:absolute; left:4%; top:50%; transform:translate(-50%,-50%); width:8px; height:8px; border-radius:999px; background:#7F849C;"></div>
+            <div style="position:absolute; left:18%; top:50%; transform:translate(-50%,-50%); width:8px; height:8px; border-radius:999px; background:#89B4FA;"></div>
+            <div style="position:absolute; left:30%; top:50%; transform:translate(-50%,-50%); width:8px; height:8px; border-radius:999px; background:#F5C2E7;"></div>
+            <div style="position:absolute; left:42%; top:50%; transform:translate(-50%,-50%); width:8px; height:8px; border-radius:999px; background:#89B4FA;"></div>
+            <div style="position:absolute; left:52%; top:50%; transform:translate(-50%,-50%); width:8px; height:8px; border-radius:999px; background:#F5C2E7;"></div>
+            <!-- playhead at viewing -->
+            <div style="position:absolute; left:62%; top:50%; transform:translate(-50%,-50%); width:18px; height:18px; border-radius:999px; background:#BD93F9; border:3px solid #181825; box-shadow:0 2px 8px rgba(0,0,0,0.5);"></div>
+            <div style="position:absolute; left:82%; top:50%; transform:translate(-50%,-50%); width:8px; height:8px; border-radius:999px; background:#585B70;"></div>
+            <!-- HEAD -->
+            <div style="position:absolute; left:100%; top:50%; transform:translate(-50%,-50%); width:11px; height:11px; border-radius:999px; background:#181825; border:2px solid #BD93F9;"></div>
+          </div>
+          <div style="display:flex; justify-content:space-between; margin-top:7px; font-family:'JetBrains Mono'; font-size:9.5px; color:#585B70;"><span>12:04 start</span><span style="color:#BD93F9;">13:44 viewing</span><span>14:32 HEAD (now)</span></div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 258px; min-height:340px;">
+          <!-- event list -->
+          <div style="padding:8px 0; border-right:1px solid #2E2E44;">
+            <sc-for list="{{ timelineEvents }}" as="e" hint-placeholder-count="8">
+              <div style="display:flex; gap:12px; padding:9px 18px; align-items:flex-start; opacity:{{ e.op }}; background:{{ e.rowbg }}; box-shadow:inset 3px 0 0 {{ e.ring }};" style-hover="background:#26263C;">
+                <span style="font-family:'JetBrains Mono'; font-size:10.5px; color:#7F849C; width:34px; flex:0 0 auto; padding-top:2px;">{{ e.time }}</span>
+                <span style="width:9px; height:9px; border-radius:999px; background:{{ e.ac }}; flex:0 0 auto; margin-top:4px;"></span>
+                <div style="min-width:0; flex:1;">
+                  <div style="display:flex; align-items:center; gap:8px;">
+                    <span style="font-size:13px; color:#CDD6F4;">{{ e.title }}</span>
+                    <sc-if value="{{ e.badge }}" hint-placeholder-val="">
+                      <span class="mono" style="font-size:8.5px; letter-spacing:0.5px; text-transform:uppercase; color:#BD93F9; border:1px solid #4A3D6E; border-radius:4px; padding:1px 5px;">{{ e.badge }}</span>
+                    </sc-if>
+                  </div>
+                  <div style="font-family:'JetBrains Mono'; font-size:10.5px; color:#9399B2; margin-top:2px;"><span style="color:{{ e.ac }};">{{ e.who }}</span> · {{ e.detail }}</div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+          <!-- branch summary -->
+          <div style="background:#1A1826; padding:16px 16px;">
+            <div class="mono" style="font-size:9px; letter-spacing:1px; text-transform:uppercase; color:#7F849C; margin-bottom:12px;">Files changed · branch main</div>
+            <div style="display:flex; flex-direction:column; gap:9px; margin-bottom:20px;">
+              <sc-for list="{{ branchFiles }}" as="f" hint-placeholder-count="4">
+                <div style="display:flex; align-items:center; gap:8px; font-family:'JetBrains Mono'; font-size:11px;">
+                  <span style="min-width:0; flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#BAC2DE;">{{ f.n }}</span>
+                  <span style="color:#A6E3A1;">{{ f.add }}</span><span style="color:#F38BA8;">{{ f.del }}</span>
+                </div>
+              </sc-for>
+            </div>
+            <div style="border-top:1px solid #2E2E44; padding-top:14px;">
+              <div style="display:flex; justify-content:space-between; font-size:11.5px; color:#9399B2; margin-bottom:6px;"><span><span style="color:#89B4FA;">●</span> Human</span><span>18</span></div>
+              <div style="display:flex; justify-content:space-between; font-size:11.5px; color:#9399B2; margin-bottom:6px;"><span><span style="color:#F5C2E7;">●</span> Agent</span><span>12</span></div>
+              <div style="display:flex; justify-content:space-between; font-size:11.5px; color:#9399B2;"><span><span style="color:#7F849C;">●</span> System</span><span>4</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SCREEN: COMMAND PALETTE -->
+    <section data-screen-label="Command palette" style="padding:20px 0 44px; border-top:1px solid #2A2A3E;">
+      <div style="display:flex; align-items:baseline; gap:12px; margin-bottom:6px;">
+        <span class="mono" style="font-size:12px; color:#BD93F9;">10.8</span>
+        <h3 style="font-size:20px; font-weight:600; color:#CDD6F4;">Command palette</h3>
+      </div>
+      <p style="font-size:13.5px; line-height:1.6; color:#9399B2; max-width:70ch; margin:0 0 20px;">The universal entry point (<code style="color:#BD93F9;">⌘K</code>). Fuzzy-matches commands, tabs, themes, and files; matched characters render in <code style="color:#BD93F9;">accent</code>. Mode prefixes: <code style="color:#BD93F9;">&gt;</code> commands · <code style="color:#BD93F9;">/</code> files · <code style="color:#BD93F9;">?</code> help · plain text searches scrollback.</p>
+      <div style="border-radius:12px; overflow:hidden; border:1px solid #3A3A54; box-shadow:0 16px 48px rgba(0,0,0,0.52); background:#181825; position:relative; min-height:430px;">
+        <!-- dimmed backdrop terminal -->
+        <div style="position:absolute; inset:0; opacity:0.35; filter:blur(1px);">
+          <div style="height:38px; display:flex; align-items:center; gap:7px; padding:0 13px; background:#1E1E2E;"><div style="width:10px; height:10px; border-radius:999px; background:#44445E;"></div><div style="width:10px; height:10px; border-radius:999px; background:#44445E;"></div><div style="width:10px; height:10px; border-radius:999px; background:#44445E;"></div></div>
+          <div style="padding:16px; font-family:'JetBrains Mono'; font-size:12px; color:#7F849C; line-height:1.8;"><div>~/skelly ❯ cargo build</div><div>   Finished in 2.14s</div></div>
+        </div>
+        <div style="position:absolute; inset:0; background:rgba(10,8,6,0.55);"></div>
+        <!-- palette -->
+        <div style="position:relative; display:flex; justify-content:center; padding-top:56px;">
+          <div style="width:540px; max-width:92%; border-radius:14px; background:#232338; border:1px solid #44445E; box-shadow:0 24px 64px rgba(0,0,0,0.6); overflow:hidden;">
+            <div style="display:flex; align-items:center; gap:11px; padding:15px 18px; border-bottom:1px solid #383A54;">
+              <span style="color:#BD93F9; font-family:'JetBrains Mono'; font-size:15px;">&gt;</span>
+              <span style="font-size:15px; color:#CDD6F4;">split</span>
+              <span style="width:2px; height:17px; background:#BD93F9; animation:skcaret 1.1s steps(1) infinite;"></span>
+              <span style="margin-left:auto; font-family:'JetBrains Mono'; font-size:10px; color:#7F849C;">4 results</span>
+            </div>
+            <div style="padding:6px;">
+              <div class="mono" style="font-size:9px; letter-spacing:1px; text-transform:uppercase; color:#585B70; padding:6px 12px 4px;">Panes</div>
+              <div style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:8px; background:rgba(189,147,249,0.14);"><span style="color:#BD93F9;">▯</span><span style="font-size:13.5px; color:#CDD6F4;"><span style="color:#BD93F9;">Split</span> pane right</span><span class="mono" style="margin-left:auto; font-size:10.5px; color:#A6ADC8;">⌥ |</span></div>
+              <div style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:8px;"><span style="color:#7F849C;">▭</span><span style="font-size:13.5px; color:#BAC2DE;"><span style="color:#BD93F9;">Split</span> pane down</span><span class="mono" style="margin-left:auto; font-size:10.5px; color:#7F849C;">⌥ -</span></div>
+              <div style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:8px;"><span style="color:#7F849C;">⤢</span><span style="font-size:13.5px; color:#BAC2DE;">Zoom / unzoom active pane</span><span class="mono" style="margin-left:auto; font-size:10.5px; color:#7F849C;">⌥ Z</span></div>
+              <div class="mono" style="font-size:9px; letter-spacing:1px; text-transform:uppercase; color:#585B70; padding:8px 12px 4px;">Layout</div>
+              <div style="display:flex; align-items:center; gap:12px; padding:9px 12px; border-radius:8px;"><span style="color:#7F849C;">⊞</span><span style="font-size:13.5px; color:#BAC2DE;">Even out <span style="color:#BD93F9;">split</span>s</span><span class="mono" style="margin-left:auto; font-size:10.5px; color:#7F849C;">⌥ =</span></div>
+            </div>
+            <div style="display:flex; align-items:center; gap:16px; padding:9px 16px; border-top:1px solid #383A54; background:#1A1A2B; font-family:'JetBrains Mono'; font-size:10px; color:#7F849C;">
+              <span><span style="color:#BAC2DE;">↑↓</span> navigate</span><span><span style="color:#BAC2DE;">↵</span> run</span><span><span style="color:#BAC2DE;">⌘↵</span> run in new pane</span><span style="margin-left:auto;"><span style="color:#BAC2DE;">esc</span> close</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- SCREEN: SETTINGS -->
+    <section data-screen-label="Settings" style="padding:20px 0 44px; border-top:1px solid #2A2A3E;">
+      <div style="display:flex; align-items:baseline; gap:12px; margin-bottom:6px;">
+        <span class="mono" style="font-size:12px; color:#BD93F9;">10.9</span>
+        <h3 style="font-size:20px; font-weight:600; color:#CDD6F4;">Settings &amp; theme customization</h3>
+      </div>
+      <p style="font-size:13.5px; line-height:1.6; color:#9399B2; max-width:70ch; margin:0 0 20px;">Opens in-window (<code style="color:#BD93F9;">⌘,</code>), not a modal. Categories left, live-applying controls right. Every setting maps 1:1 to a key in <code style="color:#BD93F9;">~/.config/skelly/config.toml</code> &mdash; the file is the source of truth, the UI is a view over it.</p>
+      <div style="border-radius:12px; overflow:hidden; border:1px solid #3A3A54; box-shadow:0 16px 48px rgba(0,0,0,0.52); background:#181825;">
+        <div style="height:38px; display:flex; align-items:center; gap:7px; padding:0 13px; background:#1E1E2E; border-bottom:1px solid #2E2E44;"><div style="width:10px; height:10px; border-radius:999px; background:#FF5555;"></div><div style="width:10px; height:10px; border-radius:999px; background:#BD93F9;"></div><div style="width:10px; height:10px; border-radius:999px; background:#A6E3A1;"></div><span style="margin-left:12px; font-family:'JetBrains Mono'; font-size:11px; color:#BAC2DE;">Settings</span></div>
+        <div style="display:grid; grid-template-columns:184px 1fr; min-height:440px;">
+          <!-- category nav -->
+          <div style="background:#1A1826; border-right:1px solid #2E2E44; padding:10px 8px;">
+            <sc-for list="{{ settingsNav }}" as="s" hint-placeholder-count="7">
+              <div style="display:flex; align-items:center; gap:9px; padding:8px 11px; border-radius:7px; margin-bottom:2px; background:{{ s.bg }};">
+                <span style="color:{{ s.ic }}; font-size:13px; width:16px;">{{ s.i }}</span>
+                <span style="font-size:12.5px; color:{{ s.fg }};">{{ s.label }}</span>
+              </div>
+            </sc-for>
+          </div>
+          <!-- content: Appearance -->
+          <div style="padding:22px 26px; overflow:hidden;">
+            <div style="font-family:'Space Grotesk'; font-size:17px; font-weight:600; color:#CDD6F4; margin-bottom:18px;">Appearance</div>
+            <div class="mono" style="font-size:9.5px; letter-spacing:1px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">Theme</div>
+            <div style="display:grid; grid-template-columns:repeat(4,1fr); gap:9px; margin-bottom:22px;">
+              <div style="border-radius:9px; overflow:hidden; border:1px solid rgba(189,147,249,0.5);"><div style="height:40px; background:#181825; display:flex; align-items:center; padding:0 10px; gap:4px;"><span style="width:8px;height:8px;border-radius:2px;background:#F38BA8;"></span><span style="width:8px;height:8px;border-radius:2px;background:#A6E3A1;"></span><span style="width:8px;height:8px;border-radius:2px;background:#89B4FA;"></span></div><div style="padding:6px 9px; background:#313244; display:flex; justify-content:space-between; align-items:center;"><span style="font-size:10.5px; color:#CDD6F4;">Ossein Dark</span><span style="color:#BD93F9; font-size:10px;">✓</span></div></div>
+              <div style="border-radius:9px; overflow:hidden; border:1px solid #34344E;"><div style="height:40px; background:#EFF1F5; display:flex; align-items:center; padding:0 10px; gap:4px;"><span style="width:8px;height:8px;border-radius:2px;background:#D20F39;"></span><span style="width:8px;height:8px;border-radius:2px;background:#40A02B;"></span><span style="width:8px;height:8px;border-radius:2px;background:#1E66F5;"></span></div><div style="padding:6px 9px; background:#313244;"><span style="font-size:10.5px; color:#BAC2DE;">Ossein Light</span></div></div>
+              <div style="border-radius:9px; overflow:hidden; border:1px solid #34344E;"><div style="height:40px; background:#1F1F28; display:flex; align-items:center; padding:0 10px; gap:4px;"><span style="width:8px;height:8px;border-radius:2px;background:#E82424;"></span><span style="width:8px;height:8px;border-radius:2px;background:#98BB6C;"></span><span style="width:8px;height:8px;border-radius:2px;background:#7E9CD8;"></span></div><div style="padding:6px 9px; background:#313244;"><span style="font-size:10.5px; color:#BAC2DE;">Kanagawa</span></div></div>
+              <div style="border-radius:9px; overflow:hidden; border:1px solid #34344E;"><div style="height:40px; background:#1A1B26; display:flex; align-items:center; padding:0 10px; gap:4px;"><span style="width:8px;height:8px;border-radius:2px;background:#F7768E;"></span><span style="width:8px;height:8px;border-radius:2px;background:#9ECE6A;"></span><span style="width:8px;height:8px;border-radius:2px;background:#7AA2F7;"></span></div><div style="padding:6px 9px; background:#313244; display:flex; justify-content:space-between; align-items:center;"><span style="font-size:10.5px; color:#BAC2DE;">Tokyo Night</span><span style="font-size:10px; color:#7F849C;">＋</span></div></div>
+            </div>
+            <!-- controls -->
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:14px 28px;">
+              <div>
+                <div style="font-size:12px; color:#BAC2DE; margin-bottom:6px;">Font family</div>
+                <div style="display:flex; align-items:center; justify-content:space-between; height:32px; padding:0 12px; border-radius:6px; background:#1A1A2B; border:1px solid #34344E;"><span style="font-family:'JetBrains Mono'; font-size:12px; color:#CDD6F4;">JetBrains Mono</span><span style="color:#7F849C;">▾</span></div>
+              </div>
+              <div>
+                <div style="font-size:12px; color:#BAC2DE; margin-bottom:6px;">Cursor style</div>
+                <div style="display:inline-flex; padding:3px; border-radius:7px; background:#1A1A2B; border:1px solid #34344E;"><span style="padding:4px 12px; border-radius:5px; background:#383A54; color:#CDD6F4; font-size:11px;">Block</span><span style="padding:4px 12px; border-radius:5px; color:#9399B2; font-size:11px;">Bar</span><span style="padding:4px 12px; border-radius:5px; color:#9399B2; font-size:11px;">Underline</span></div>
+              </div>
+              <div>
+                <div style="font-size:12px; color:#BAC2DE; margin-bottom:6px;">Sidebar</div>
+                <div style="display:inline-flex; padding:3px; border-radius:7px; background:#1A1A2B; border:1px solid #34344E;"><span style="padding:4px 11px; border-radius:5px; background:#383A54; color:#CDD6F4; font-size:11px;">Fixed</span><span style="padding:4px 11px; border-radius:5px; color:#9399B2; font-size:11px;">Auto-hide</span><span style="padding:4px 11px; border-radius:5px; color:#9399B2; font-size:11px;">Hidden</span></div>
+              </div>
+              <div>
+                <div style="font-size:12px; color:#BAC2DE; margin-bottom:6px;">Tab title</div>
+                <div style="display:flex; align-items:center; justify-content:space-between; height:32px; padding:0 12px; border-radius:6px; background:#1A1A2B; border:1px solid #34344E;"><span style="font-size:12.5px; color:#CDD6F4;">Current directory</span><span style="color:#7F849C;">▾</span></div>
+              </div>
+              <div>
+                <div style="display:flex; justify-content:space-between; font-size:12px; color:#BAC2DE; margin-bottom:8px;"><span>Cell size</span><span class="mono" style="color:#BD93F9;">14px</span></div>
+                <div style="position:relative; height:6px; border-radius:999px; background:#2A2A3E;"><div style="position:absolute; left:0; width:40%; top:0; bottom:0; border-radius:999px; background:#BD93F9;"></div><div style="position:absolute; left:40%; top:50%; transform:translate(-50%,-50%); width:14px; height:14px; border-radius:999px; background:#CDD6F4;"></div></div>
+              </div>
+              <div>
+                <div style="display:flex; justify-content:space-between; font-size:12px; color:#BAC2DE; margin-bottom:8px;"><span>Background blur</span><span class="mono" style="color:#BD93F9;">18</span></div>
+                <div style="position:relative; height:6px; border-radius:999px; background:#2A2A3E;"><div style="position:absolute; left:0; width:55%; top:0; bottom:0; border-radius:999px; background:#BD93F9;"></div><div style="position:absolute; left:55%; top:50%; transform:translate(-50%,-50%); width:14px; height:14px; border-radius:999px; background:#CDD6F4;"></div></div>
+              </div>
+            </div>
+            <div style="border-top:1px solid #2E2E44; margin-top:20px; padding-top:16px; display:flex; flex-direction:column; gap:12px;">
+              <div style="display:flex; align-items:center; justify-content:space-between;"><span style="font-size:12.5px; color:#CDD6F4;">Font ligatures</span><div style="width:38px; height:22px; border-radius:999px; background:#BD93F9; position:relative;"><div style="position:absolute; right:2px; top:2px; width:18px; height:18px; border-radius:999px; background:#181825;"></div></div></div>
+              <div style="display:flex; align-items:center; justify-content:space-between;"><span style="font-size:12.5px; color:#CDD6F4;">Bold text uses bright colors</span><div style="width:38px; height:22px; border-radius:999px; background:#BD93F9; position:relative;"><div style="position:absolute; right:2px; top:2px; width:18px; height:18px; border-radius:999px; background:#181825;"></div></div></div>
+              <div style="display:flex; align-items:center; justify-content:space-between;"><span style="font-size:12.5px; color:#CDD6F4;">Show pane status line</span><div style="width:38px; height:22px; border-radius:999px; background:#34344E; position:relative;"><div style="position:absolute; left:2px; top:2px; width:18px; height:18px; border-radius:999px; background:#7F849C;"></div></div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===== KEYBINDINGS ===== -->
+    <section id="keys" style="padding:52px 0; border-top:1px solid #2A2A3E; border-bottom:1px solid #2A2A3E;">
+      <div class="mono" style="font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">11 &mdash; Keybindings</div>
+      <h2 style="font-size:34px; font-weight:600; letter-spacing:-1px; margin-bottom:12px;">Keybinding reference</h2>
+      <p style="font-size:15px; line-height:1.6; color:#A6ADC8; max-width:72ch; margin:0 0 12px;">tmux-style pane control with a configurable <b style="color:#CDD6F4;">Leader</b> (default <code style="color:#BD93F9;">Ctrl A</code>), plus direct chords for speed. macOS uses <code style="color:#BD93F9;">⌘/⌥</code>; Linux uses <code style="color:#BD93F9;">Ctrl/Alt</code>. Every binding is remappable in <code style="color:#BD93F9;">config.toml</code>.</p>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px;">
+        <sc-for list="{{ keyGroups }}" as="g" hint-placeholder-count="5">
+          <div style="border:1px solid #383A54; border-radius:10px; background:#232338; overflow:hidden; align-self:start;">
+            <div style="padding:12px 16px; border-bottom:1px solid #2E2E44;">
+              <div style="display:flex; justify-content:space-between; align-items:baseline;">
+                <span style="font-size:13px; font-weight:600; color:#CDD6F4;">{{ g.group }}</span>
+                <span class="mono" style="font-size:9px; letter-spacing:1px; text-transform:uppercase; color:#585B70;">mac · linux</span>
+              </div>
+              <sc-if value="{{ g.note }}" hint-placeholder-val="">
+                <div style="font-size:11px; color:#BD93F9; margin-top:4px;">{{ g.note }}</div>
+              </sc-if>
+            </div>
+            <sc-for list="{{ g.keys }}" as="k" hint-placeholder-count="6">
+              <div style="display:grid; grid-template-columns:1fr auto; gap:10px; align-items:center; padding:9px 16px; border-bottom:1px solid #26263C;">
+                <span style="font-size:12.5px; color:#BAC2DE;">{{ k.a }}</span>
+                <div style="text-align:right;">
+                  <div class="mono" style="font-size:11px; color:#CDD6F4;">{{ k.m }}</div>
+                  <div class="mono" style="font-size:10px; color:#7F849C;">{{ k.l }}</div>
+                </div>
+              </div>
+            </sc-for>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+
+    <!-- ===== FLOWS & STATES ===== -->
+    <section id="flows" style="padding:52px 0; border-bottom:1px solid #2A2A3E;">
+      <div class="mono" style="font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">12 &mdash; Behavior</div>
+      <h2 style="font-size:34px; font-weight:600; letter-spacing:-1px; margin-bottom:12px;">Flows &amp; edge states</h2>
+      <p style="font-size:15px; line-height:1.6; color:#A6ADC8; max-width:70ch; margin:0 0 26px;">The moments where a static mockup isn’t enough. Build these behaviors exactly &mdash; they’re where a terminal earns or loses trust.</p>
+      <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:26px;">
+        <sc-for list="{{ flows }}" as="f" hint-placeholder-count="3">
+          <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:18px 20px;">
+            <div style="display:flex; align-items:center; gap:9px; margin-bottom:14px;">
+              <span class="mono" style="width:22px; height:22px; border-radius:6px; background:rgba(189,147,249,0.14); color:#BD93F9; font-size:11px; font-weight:700; display:flex; align-items:center; justify-content:center;">{{ f.n }}</span>
+              <span style="font-size:14px; font-weight:600; color:#CDD6F4;">{{ f.t }}</span>
+            </div>
+            <div style="display:flex; flex-direction:column; gap:9px;">
+              <sc-for list="{{ f.steps }}" as="st" hint-placeholder-count="4">
+                <div style="display:flex; gap:9px; align-items:flex-start;">
+                  <span style="width:5px; height:5px; border-radius:999px; background:#BD93F9; margin-top:6px; flex:0 0 auto;"></span>
+                  <span style="font-size:12px; line-height:1.5; color:#A6ADC8;">{{ st }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+      <h3 style="font-size:16px; font-weight:600; margin-bottom:14px; color:#CDD6F4;">Edge cases &amp; empty states</h3>
+      <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px 16px;">
+        <sc-for list="{{ edges }}" as="e" hint-placeholder-count="8">
+          <div style="display:flex; gap:11px; align-items:flex-start; border:1px solid #383A54; border-radius:9px; background:#232338; padding:12px 14px;">
+            <span style="width:6px; height:6px; border-radius:999px; background:#F38BA8; margin-top:6px; flex:0 0 auto;"></span>
+            <div><span style="font-size:12.5px; font-weight:600; color:#CDD6F4;">{{ e.s }}</span><div style="font-size:11.5px; line-height:1.55; color:#9399B2; margin-top:2px;">{{ e.b }}</div></div>
+          </div>
+        </sc-for>
+      </div>
+    </section>
+
+    <!-- ===== HANDOFF ===== -->
+    <section id="handoff" style="padding:52px 0 40px;">
+      <div class="mono" style="font-size:11px; letter-spacing:2px; text-transform:uppercase; color:#7F849C; margin-bottom:10px;">13 &mdash; Handoff</div>
+      <h2 style="font-size:34px; font-weight:600; letter-spacing:-1px; margin-bottom:12px;">Notes for Claude Code</h2>
+      <p style="font-size:15px; line-height:1.6; color:#A6ADC8; max-width:72ch; margin:0 0 26px;">Build Skelly natively in Rust from this spec. Reproduce the layout, tokens, and behavior &mdash; not this HTML. Where a decision is genuinely a product call, it’s flagged under <b style="color:#CDD6F4;">Confirm first</b> rather than guessed.</p>
+
+      <!-- config.toml -->
+      <div style="border:1px solid #383A54; border-radius:12px; background:#1A1A2B; overflow:hidden; margin-bottom:20px;">
+        <div style="display:flex; align-items:center; gap:9px; padding:11px 16px; border-bottom:1px solid #2E2E44;">
+          <span style="width:7px; height:7px; border-radius:2px; background:#BD93F9;"></span>
+          <span class="mono" style="font-size:12px; color:#CDD6F4;">~/.config/skelly/config.toml</span>
+          <span style="margin-left:auto; font-size:11px; color:#7F849C;">single source of truth · UI is a view over it</span>
+        </div>
+        <pre style="margin:0; padding:18px 20px; font-family:'JetBrains Mono'; font-size:12px; line-height:1.7; color:#BAC2DE; overflow-x:auto;"><span style="color:#89B4FA;">[appearance]</span>
+theme            = <span style="color:#A6E3A1;">"ossein-dark"</span>   <span style="color:#585B70;"># or ossein-light, kanagawa, tokyonight…</span>
+font_family      = <span style="color:#A6E3A1;">"JetBrainsMono Nerd Font"</span>  <span style="color:#585B70;"># any installed font; Nerd Font for neovim icons</span>
+font_fallback    = <span style="color:#A6E3A1;">["Symbols Nerd Font", "Noto Color Emoji"]</span>
+font_size        = <span style="color:#BD93F9;">14</span>
+line_height      = <span style="color:#BD93F9;">1.2</span>
+ligatures        = <span style="color:#F5C2E7;">true</span>
+cursor           = <span style="color:#A6E3A1;">"block"</span>          <span style="color:#585B70;"># block | bar | underline</span>
+bold_is_bright   = <span style="color:#F5C2E7;">true</span>
+bg_blur          = <span style="color:#BD93F9;">18</span>
+opacity          = <span style="color:#BD93F9;">0.98</span>
+
+<span style="color:#89B4FA;">[sidebar]</span>
+width            = <span style="color:#BD93F9;">240</span>            <span style="color:#585B70;"># 180–360; &lt;180 snaps to 56px rail</span>
+show_pinned      = <span style="color:#F5C2E7;">true</span>
+mode             = <span style="color:#A6E3A1;">"fixed"</span>          <span style="color:#585B70;"># fixed | autohide | hidden · toggle ⌘B</span>
+
+<span style="color:#89B4FA;">[tabs]</span>
+title            = <span style="color:#A6E3A1;">"cwd"</span>            <span style="color:#585B70;"># cwd | command | custom · default = directory name</span>
+follow_cwd       = <span style="color:#F5C2E7;">true</span>           <span style="color:#585B70;"># re-title as you cd unless renamed</span>
+
+<span style="color:#89B4FA;">[panes]</span>
+max              = <span style="color:#BD93F9;">8</span>
+leader           = <span style="color:#A6E3A1;">"ctrl+a"</span>
+split_inherits_cwd = <span style="color:#F5C2E7;">true</span>
+
+<span style="color:#89B4FA;">[session]</span>
+timeline         = <span style="color:#F5C2E7;">true</span>
+persist          = <span style="color:#F5C2E7;">true</span>           <span style="color:#585B70;"># restore tabs + pinned on launch (layout only)</span>
+shadow_worktree  = <span style="color:#F5C2E7;">true</span>           <span style="color:#585B70;"># non-destructive rewind</span>
+
+<span style="color:#89B4FA;">[git]</span>
+diff_view        = <span style="color:#A6E3A1;">"unified"</span>        <span style="color:#585B70;"># unified | split</span>
+
+<span style="color:#89B4FA;">[keys]</span>
+<span style="color:#A6E3A1;">"cmd+k"</span>           = <span style="color:#A6E3A1;">"palette.open"</span>
+<span style="color:#A6E3A1;">"alt+bar"</span>         = <span style="color:#A6E3A1;">"pane.split_right"</span>
+<span style="color:#A6E3A1;">"alt+minus"</span>       = <span style="color:#A6E3A1;">"pane.split_down"</span></pre>
+      </div>
+
+      <div style="display:grid; grid-template-columns:repeat(3,1fr); gap:14px; margin-bottom:20px;">
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:18px 20px;">
+          <div style="font-size:13px; font-weight:600; color:#A6E3A1; margin-bottom:12px;">In scope · v0.1</div>
+          <ul style="margin:0; padding-left:16px; font-size:12px; line-height:1.7; color:#A6ADC8;">
+            <li>Sidebar tabs, groups, pinning</li>
+            <li>Panes: split H/V, focus, resize, zoom (≤8)</li>
+            <li>Themes: Ossein + preset import</li>
+            <li>Git diff panel with hunk staging</li>
+            <li>Session timeline + rewind</li>
+            <li>Command palette · remappable keys</li>
+            <li>Empty / first-run / error states</li>
+          </ul>
+        </div>
+        <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:18px 20px;">
+          <div style="font-size:13px; font-weight:600; color:#F38BA8; margin-bottom:12px;">Out of scope · later</div>
+          <ul style="margin:0; padding-left:16px; font-size:12px; line-height:1.7; color:#A6ADC8;">
+            <li>Plugin / extension system</li>
+            <li>In-app AI agent (timeline only records)</li>
+            <li>SSH / remote host manager</li>
+            <li>Windows build</li>
+            <li>Cross-machine tab sync</li>
+            <li>Inline image protocol (kitty graphics)</li>
+            <li>Broadcast-to-all-panes input</li>
+          </ul>
+        </div>
+        <div style="border:1px solid #4A3D6E; border-radius:10px; background:linear-gradient(180deg,#2A2142,#232338); padding:18px 20px;">
+          <div style="font-size:13px; font-weight:600; color:#D6BBFC; margin-bottom:12px;">Confirm first ⚠</div>
+          <ul style="margin:0; padding-left:16px; font-size:12px; line-height:1.7; color:#BAC2DE;">
+            <li>How does the timeline receive <b>AI actions</b>? Needs an integration hook/contract, not shell heuristics.</li>
+            <li>Multi-window (multiple OS windows) or single-window?</li>
+            <li>Rewind + edit: fork a branch, or block edits while detached?</li>
+            <li>Persist expectation: layout only, or attempt to re-run processes?</li>
+            <li>Scrollback search scope: active pane vs all panes.</li>
+          </ul>
+        </div>
+      </div>
+
+      <div style="border:1px solid #383A54; border-radius:10px; background:#232338; padding:18px 22px;">
+        <div style="font-size:13px; font-weight:600; color:#CDD6F4; margin-bottom:12px;">Definition of done</div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px 24px;">
+          <div style="display:flex; gap:9px; align-items:flex-start;"><span style="color:#A6E3A1;">✓</span><span style="font-size:12px; color:#A6ADC8;">Layout matches the dimension tokens at every breakpoint of the sidebar/dock.</span></div>
+          <div style="display:flex; gap:9px; align-items:flex-start;"><span style="color:#A6E3A1;">✓</span><span style="font-size:12px; color:#A6ADC8;">All UI colors read semantic tokens; switching theme repaints everything live.</span></div>
+          <div style="display:flex; gap:9px; align-items:flex-start;"><span style="color:#A6E3A1;">✓</span><span style="font-size:12px; color:#A6ADC8;">Every action has a remappable binding surfaced in the palette.</span></div>
+          <div style="display:flex; gap:9px; align-items:flex-start;"><span style="color:#A6E3A1;">✓</span><span style="font-size:12px; color:#A6ADC8;">Empty, first-run, error, and detached states are all implemented.</span></div>
+          <div style="display:flex; gap:9px; align-items:flex-start;"><span style="color:#A6E3A1;">✓</span><span style="font-size:12px; color:#A6ADC8;">Timeline rewind is non-destructive (shadow worktree, HEAD untouched).</span></div>
+          <div style="display:flex; gap:9px; align-items:flex-start;"><span style="color:#A6E3A1;">✓</span><span style="font-size:12px; color:#A6ADC8;">Passes visual review in both Ossein Dark and Ossein Light.</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- FOOTER -->
+    <footer style="padding:32px 0 60px; border-top:1px solid #2A2A3E; display:flex; align-items:center; gap:14px;">
+      <div style="position:relative; width:26px; height:26px; flex:0 0 auto;"><div style="position:absolute; left:50%; top:9%; transform:translateX(-50%); width:6%; height:82%; border-radius:999px; background:#BD93F9; opacity:0.3;"></div><div style="position:absolute; left:37%; top:3%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div><div style="position:absolute; left:29%; top:29%; width:42%; height:42%; transform:rotate(45deg); border-radius:22%; background:#BD93F9;"></div><div style="position:absolute; left:37%; top:71%; width:26%; height:26%; transform:rotate(45deg); border-radius:26%; background:#CDD6F4;"></div></div>
+      <div>
+        <div class="mono" style="font-size:13px; font-weight:700; color:#CDD6F4;">skelly <span style="color:#7F849C; font-weight:400;">· design guide v0.1</span></div>
+        <div style="font-size:11.5px; color:#7F849C;">A barebones terminal, built in Rust. Preset themes credited to their vim/neovim authors.</div>
+      </div>
+    </footer>
+
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  renderVals() {
+    return {
+      nav: [
+        { num: '01', label: 'Principles', href: '#principles' },
+        { num: '02', label: 'Brand & logo', href: '#brand' },
+        { num: '03', label: 'Color & themes', href: '#color' },
+        { num: '04', label: 'Terminal palette', href: '#ansi' },
+        { num: '05', label: 'Typography', href: '#type' },
+        { num: '06', label: 'Space · radius · motion', href: '#scale' },
+        { num: '07', label: 'Iconography', href: '#icons' },
+        { num: '08', label: 'Window anatomy', href: '#anatomy' },
+        { num: '09', label: 'Components', href: '#components' },
+        { num: '10', label: 'Screens', href: '#screens' },
+        { num: '11', label: 'Keybindings', href: '#keys' },
+        { num: '12', label: 'Flows & states', href: '#flows' },
+        { num: '13', label: 'Handoff notes', href: '#handoff' },
+      ],
+      coverMeta: [
+        { k: 'PLATFORM', v: 'macOS · Linux' },
+        { k: 'ENGINE', v: 'Rust + GPU' },
+        { k: 'THEMES', v: 'vim-derived' },
+        { k: 'DOC', v: 'v0.1 spec' },
+      ],
+      principles: [
+        { n: '(01)', t: 'Bones, no fat', d: 'Every pixel earns its place. Chrome recedes; the terminal grid is the interface. No decorative gradients, no busywork UI.' },
+        { n: '(02)', t: 'Content is the app', d: 'Text cells dominate; chrome appears on demand (hover, focus, command) then gets out of the way. Tuned for a full-screen neovim / LazyVim editor.' },
+        { n: '(03)', t: 'Keyboard is home', d: 'Anything the mouse can do, a key can do faster. The command palette is the escape hatch for everything else.' },
+        { n: '(04)', t: 'Legible in motion', d: 'Splits, tab switches, and timeline scrubs animate under 200ms with a single easing curve. Never block input.' },
+        { n: '(05)', t: 'Themeable to the metal', d: 'Every color is a token mapped from a vim-style scheme. Users swap the whole surface, ANSI palette included, live.' },
+      ],
+      colorGroups: [
+        { group: 'Surfaces', rows: [
+          { t: 'bg.base', role: 'App & terminal background', d: '#181825', l: '#EFF1F5' },
+          { t: 'bg.sidebar', role: 'Tab sidebar', d: '#1E1E2E', l: '#E6E9EF' },
+          { t: 'bg.surface', role: 'Panels, cards, popovers base', d: '#313244', l: '#F7F8FC' },
+          { t: 'bg.elevated', role: 'Menus, palette, modals', d: '#383A54', l: '#FFFFFF' },
+          { t: 'bg.inset', role: 'Inputs, wells, code blocks', d: '#1A1A2B', l: '#E6E9EF' },
+        ]},
+        { group: 'Borders', rows: [
+          { t: 'border.subtle', role: 'Dividers, hairlines', d: '#2E2E44', l: '#DCE0E8' },
+          { t: 'border.default', role: 'Card & pane edges', d: '#3A3A54', l: '#CCD0DA' },
+          { t: 'border.strong', role: 'Focused pane / active input', d: '#6C6F93', l: '#ACB0BE' },
+        ]},
+        { group: 'Text', rows: [
+          { t: 'fg.primary', role: 'Primary UI text', d: '#CDD6F4', l: '#4C4F69' },
+          { t: 'fg.secondary', role: 'Labels, secondary', d: '#BAC2DE', l: '#5C5F77' },
+          { t: 'fg.muted', role: 'Hints, metadata', d: '#7F849C', l: '#8C8FA1' },
+          { t: 'fg.faint', role: 'Disabled, watermark', d: '#52526A', l: '#BCC0CC' },
+        ]},
+        { group: 'Accent & focus', rows: [
+          { t: 'accent', role: 'Brand, primary action, cursor', d: '#BD93F9', l: '#8839EF' },
+          { t: 'accent.hover', role: 'Hover / pressed accent', d: '#D6BBFC', l: '#9450F0' },
+          { t: 'accent.subtle', role: 'Selected row tint', d: 'rgba(189,147,249,0.14)', l: 'rgba(136,57,239,0.12)' },
+          { t: 'focus.ring', role: 'Keyboard focus outline', d: '#BD93F9', l: '#8839EF' },
+        ]},
+        { group: 'Status', rows: [
+          { t: 'status.success', role: 'Success, git added', d: '#A6E3A1', l: '#40A02B' },
+          { t: 'status.warning', role: 'Warning, dirty state', d: '#BD93F9', l: '#8839EF' },
+          { t: 'status.danger', role: 'Error, git removed, kill', d: '#F38BA8', l: '#D20F39' },
+          { t: 'status.info', role: 'Info, git modified', d: '#89B4FA', l: '#1E66F5' },
+        ]},
+        { group: 'Git diff', rows: [
+          { t: 'diff.add.fg', role: 'Added line text / gutter', d: '#A6E3A1', l: '#40A02B' },
+          { t: 'diff.add.bg', role: 'Added line background', d: 'rgba(166,227,161,0.14)', l: 'rgba(64,160,43,0.13)' },
+          { t: 'diff.del.fg', role: 'Removed line text / gutter', d: '#F38BA8', l: '#D20F39' },
+          { t: 'diff.del.bg', role: 'Removed line background', d: 'rgba(243,139,168,0.14)', l: 'rgba(210,15,57,0.12)' },
+          { t: 'diff.hunk', role: 'Hunk header (@@)', d: '#89B4FA', l: '#1E66F5' },
+        ]},
+        { group: 'Session timeline', rows: [
+          { t: 'session.human', role: 'Human-performed action', d: '#89B4FA', l: '#1E66F5' },
+          { t: 'session.ai', role: 'AI / agent action', d: '#F5C2E7', l: '#EA76CB' },
+          { t: 'session.system', role: 'System / auto event', d: '#7F849C', l: '#8C8FA1' },
+          { t: 'session.head', role: 'Current HEAD marker', d: '#BD93F9', l: '#8839EF' },
+        ]},
+      ],
+      ansiDark: [
+        { i: 0, n: 'black', c: '#181825' }, { i: 1, n: 'red', c: '#F38BA8' }, { i: 2, n: 'green', c: '#A6E3A1' }, { i: 3, n: 'yellow', c: '#BD93F9' },
+        { i: 4, n: 'blue', c: '#89B4FA' }, { i: 5, n: 'magenta', c: '#F5C2E7' }, { i: 6, n: 'cyan', c: '#94E2D5' }, { i: 7, n: 'white', c: '#BAC2DE' },
+        { i: 8, n: 'br black', c: '#52526A' }, { i: 9, n: 'br red', c: '#FF8FA8' }, { i: 10, n: 'br green', c: '#B8EDB0' }, { i: 11, n: 'br yellow', c: '#D6BBFC' },
+        { i: 12, n: 'br blue', c: '#A6C8FF' }, { i: 13, n: 'br magenta', c: '#FBD0EF' }, { i: 14, n: 'br cyan', c: '#A8EDE0' }, { i: 15, n: 'br white', c: '#CDD6F4' },
+      ],
+      ansiLight: [
+        { i: 0, n: 'black', c: '#4C4F69' }, { i: 1, n: 'red', c: '#D20F39' }, { i: 2, n: 'green', c: '#40A02B' }, { i: 3, n: 'yellow', c: '#8839EF' },
+        { i: 4, n: 'blue', c: '#1E66F5' }, { i: 5, n: 'magenta', c: '#EA76CB' }, { i: 6, n: 'cyan', c: '#179299' }, { i: 7, n: 'white', c: '#5C5F77' },
+        { i: 8, n: 'br black', c: '#8C8FA1' }, { i: 9, n: 'br red', c: '#E64553' }, { i: 10, n: 'br green', c: '#5A9E2F' }, { i: 11, n: 'br yellow', c: '#9450F0' },
+        { i: 12, n: 'br blue', c: '#3B7DF5' }, { i: 13, n: 'br magenta', c: '#C063A8' }, { i: 14, n: 'br cyan', c: '#2AA598' }, { i: 15, n: 'br white', c: '#4C4F69' },
+      ],
+      presets: [
+        { name: 'Zenbones', by: 'zenbones-theme', tag: '', bg: '#1C1917', fg: '#B4BDC3', dots: ['#DE6E7C','#819B69','#B77E64','#6099C0','#CF86C1','#66A5AD'] },
+        { name: 'Kanagawa Wave', by: 'rebelot', tag: '', bg: '#1F1F28', fg: '#DCD7BA', dots: ['#E82424','#98BB6C','#E6C384','#7E9CD8','#957FB8','#7AA2A9'] },
+        { name: 'Tokyo Night', by: 'folke', tag: '', bg: '#1A1B26', fg: '#C0CAF5', dots: ['#F7768E','#9ECE6A','#E0AF68','#7AA2F7','#BB9AF7','#7DCFFF'] },
+        { name: 'Gruvbox', by: 'morhetz', tag: '', bg: '#282828', fg: '#EBDBB2', dots: ['#FB4934','#B8BB26','#FABD2F','#83A598','#D3869B','#8EC07C'] },
+        { name: 'Rosé Pine', by: 'rose-pine', tag: '', bg: '#191724', fg: '#E0DEF4', dots: ['#EB6F92','#9CCFD8','#F6C177','#31748F','#C4A7E7','#EBBCBA'] },
+        { name: 'Everforest', by: 'sainnhe', tag: '', bg: '#2D353B', fg: '#D3C6AA', dots: ['#E67E80','#A7C080','#DBBC7F','#7FBBB3','#D699B6','#83C092'] },
+        { name: 'Catppuccin Mocha', by: 'catppuccin', tag: 'ui base', bg: '#1E1E2E', fg: '#CDD6F4', dots: ['#F38BA8','#A6E3A1','#F9E2AF','#89B4FA','#CBA6F7','#94E2D5'] },
+        { name: 'Dracula', by: 'dracula', tag: 'accent base', bg: '#282A36', fg: '#F8F8F2', dots: ['#FF5555','#50FA7B','#F1FA8C','#BD93F9','#FF79C6','#8BE9FD'] },
+        { name: 'Nord', by: 'arcticicestudio', tag: '', bg: '#2E3440', fg: '#D8DEE9', dots: ['#BF616A','#A3BE8C','#EBCB8B','#81A1C1','#B48EAD','#88C0D0'] },
+        { name: 'Oxocarbon', by: 'nyoom-engineering', tag: '', bg: '#161616', fg: '#F2F4F8', dots: ['#FF7EB6','#42BE65','#FFB86C','#82CFFF','#BE95FF','#3DDBD9'] },
+        { name: 'Rosé Pine Dawn', by: 'rose-pine', tag: 'light', bg: '#FAF4ED', fg: '#575279', dots: ['#B4637A','#56949F','#EA9D34','#286983','#907AA9','#D7827E'] },
+      ],
+      typeScale: [
+        { tok: 'display', font: 'Space Grotesk 700', size: '88 / 0.9 / -3', use: 'Splash & brand only' },
+        { tok: 'h1', font: 'Space Grotesk 600', size: '34 / 1.1 / -1', use: 'Screen / section titles' },
+        { tok: 'h2', font: 'Space Grotesk 600', size: '20 / 1.3 / -0.4', use: 'Panel & dialog titles' },
+        { tok: 'title', font: 'IBM Plex Sans 600', size: '16 / 1.4 / 0', use: 'Card & list headers' },
+        { tok: 'body', font: 'IBM Plex Sans 400', size: '14 / 1.6 / 0', use: 'Default UI text' },
+        { tok: 'label', font: 'IBM Plex Sans 500', size: '13 / 1.4 / 0', use: 'Controls, tabs, buttons' },
+        { tok: 'caption', font: 'IBM Plex Sans 400', size: '12 / 1.4 / 0', use: 'Metadata, hints' },
+        { tok: 'micro', font: 'JetBrains Mono 500', size: '10.5 / 1 / +1.5', use: 'Uppercase tags, badges' },
+      ],
+      spacing: [
+        { n: '3xs', px: '2' }, { n: '2xs', px: '4' }, { n: 'xs', px: '6' }, { n: 'sm', px: '8' },
+        { n: 'md', px: '12' }, { n: 'lg', px: '16' }, { n: 'xl', px: '20' }, { n: '2xl', px: '24' },
+        { n: '3xl', px: '32' }, { n: '4xl', px: '40' }, { n: '5xl', px: '48' }, { n: '6xl', px: '64' },
+      ],
+      radii: [
+        { n: 'none', px: '0', use: 'Terminal cells, diff gutter' },
+        { n: 'xs', px: '4', use: 'Chips, tags, swatches' },
+        { n: 'sm', px: '6', use: 'Buttons, inputs, tab items' },
+        { n: 'md', px: '8', use: 'Cards, menus, toasts' },
+        { n: 'lg', px: '10', use: 'Panels, palette, panes' },
+        { n: 'xl', px: '12', use: 'Window / modal corners' },
+        { n: 'pill', px: '999', use: 'Badges, status dots' },
+      ],
+      elevation: [
+        { n: 'e0', v: 'none', use: 'Flush surfaces, panes' },
+        { n: 'e1', v: '0 1px 2px rgba(0,0,0,.30)', use: 'Raised chips, tab bar' },
+        { n: 'e2', v: '0 4px 12px rgba(0,0,0,.35)', use: 'Tooltips, popovers' },
+        { n: 'e3', v: '0 8px 24px rgba(0,0,0,.42)', use: 'Context menus, dropdowns' },
+        { n: 'e4', v: '0 16px 48px rgba(0,0,0,.52)', use: 'Command palette, modals' },
+      ],
+      motion: [
+        { n: 'instant', v: '0ms', use: 'Focus, selection paint' },
+        { n: 'fast', v: '120ms', use: 'Hover, press, tooltip' },
+        { n: 'base', v: '180ms', use: 'Tab switch, menu open' },
+        { n: 'slow', v: '260ms', use: 'Pane split / close' },
+        { n: 'panel', v: '320ms', use: 'Sidebar, timeline slide' },
+      ],
+      easings: [
+        { n: 'standard', v: 'cubic-bezier(.2,0,0,1)', use: 'Most transitions' },
+        { n: 'decelerate', v: 'cubic-bezier(0,0,0,1)', use: 'Enter / expand' },
+        { n: 'accelerate', v: 'cubic-bezier(.3,0,1,1)', use: 'Exit / collapse' },
+      ],
+      iconSet: [
+        { s: '❯', n: 'prompt' }, { s: '＋', n: 'new-tab' }, { s: '✕', n: 'close' }, { s: '◆', n: 'pin' },
+        { s: '▯', n: 'split-v' }, { s: '▭', n: 'split-h' }, { s: '⊞', n: 'panes' }, { s: '⤢', n: 'zoom' },
+        { s: '⌕', n: 'search' }, { s: '⌘', n: 'palette' }, { s: '⚙', n: 'settings' }, { s: '▤', n: 'sidebar' },
+        { s: '⑂', n: 'git-branch' }, { s: '±', n: 'diff' }, { s: '⟲', n: 'timeline' }, { s: '›', n: 'chevron' },
+      ],
+      anatomy: [
+        { n: '1', t: 'Control strip', d: 'macOS: inset traffic lights top-left. Linux: CSD min/max/close top-right. Height 38px, draggable.' },
+        { n: '2', t: 'Workspace switcher', d: 'Profile chips (Personal / Work). Each isolates tabs, cwd & theme. Switch with Mod+1…9.' },
+        { n: '3', t: 'Command input', d: 'Search history + run command; opens the command palette. Focus with Mod+K.' },
+        { n: '4', t: 'Pinned tab grid', d: '3-up icon tiles, persist across restarts. Pin/unpin with Mod+Shift+P or right-click.' },
+        { n: '5', t: 'Tab list', d: 'Active tab = accent.subtle fill + accent bar. Collapsible groups, drag to reorder.' },
+        { n: '6', t: 'New tab', d: 'Mod+T. Long-press / ▸ opens profile & shell picker.' },
+        { n: '7', t: 'Utility bar', d: 'Settings, theme, session timeline, git diff toggles. Icon-only, tooltip on hover.' },
+        { n: '8', t: 'Pane tree', d: 'Active tab’s content. Panes split H/V up to 8. Active pane = border.strong.' },
+        { n: '9', t: 'Pane status line', d: 'cwd · branch · mode · filetype · Ln,Col. 24px, per pane. Toggle in settings.' },
+        { n: '10', t: 'Right dock', d: 'Git diff / timeline slide-over. 420px (360–560), push or overlay. Mod+Shift+G / H.' },
+      ],
+      dims: [
+        { k: 'Window min', v: '720 × 480' },
+        { k: 'Sidebar', v: '240px · 180–360 · rail 56' },
+        { k: 'Title strip', v: '38px' },
+        { k: 'Right dock', v: '420px · 360–560' },
+        { k: 'Pane status', v: '24px' },
+        { k: 'Pane min', v: '180 × 90' },
+        { k: 'Divider', v: '1px · 6px hit area' },
+        { k: 'Content pad', v: '12px' },
+      ],
+      layouts: [
+        { name: 'Single', key: '⌥1 · zoom ⌥Z', grid: 'grid-template-columns:1fr;', cells: [{cs:''}] },
+        { name: '2 · vertical', key: '⌥ |', grid: 'grid-template-columns:1fr 1fr;', cells: [{cs:''},{cs:''}] },
+        { name: '2 · horizontal', key: '⌥ -', grid: 'grid-template-rows:1fr 1fr;', cells: [{cs:''},{cs:''}] },
+        { name: 'Main + stack', key: 'uneven · nested', grid: 'grid-template-columns:1.4fr 1fr;grid-template-rows:1fr 1fr;', cells: [{cs:'grid-row:1 / span 2;'},{cs:''},{cs:''}] },
+        { name: '4 · quad', key: '⌥| then ⌥-', grid: 'grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;', cells: [{cs:''},{cs:''},{cs:''},{cs:''}] },
+        { name: '8 · max', key: 'hard cap', grid: 'grid-template-columns:1fr 1fr 1fr 1fr;grid-template-rows:1fr 1fr;', cells: [{cs:''},{cs:''},{cs:''},{cs:''},{cs:''},{cs:''},{cs:''},{cs:''}] },
+      ],
+      tabBehaviors: [
+        { t: 'Default title', k: 'auto', d: 'A new tab is titled by its current directory (e.g. ~/skelly) and re-titles automatically as you cd. Long-running commands can surface in the subtitle.' },
+        { t: 'Pin / unpin', k: '⇧⌘P', d: 'Moves the tab into the 3-up pinned grid at top. Pinned tabs show icon only, keep their shell alive, and restore on next launch.' },
+        { t: 'Reorder', k: 'drag', d: 'Drag within or across groups. A 2px accent insertion line shows the drop target; the dragged tab lifts with e2 shadow.' },
+        { t: 'Groups', k: '⇧⌘N', d: 'Collapsible headers with a count. Collapsing hides children but keeps sessions running. Groups map to a working directory or project.' },
+        { t: 'Rename', k: 'F2', d: 'Inline edit. A manual name pins the title (stops following cwd) until cleared, when it reverts to the directory default. Custom names persist per workspace.' },
+        { t: 'Close', k: '⌘W', d: 'Confirms if a foreground process is running. Closing the last tab in a window shows the empty state, not app quit.' },
+        { t: 'Switch', k: '⌘1…9 · ⌥⇧[ ]', d: 'Number jumps to nth tab in the active group; bracket keys cycle prev/next across all tabs.' },
+      ],
+      diffFiles: [
+        { p: 'src/session/', n: 'timeline.rs', s: 'A', sc: '#A6E3A1', add: '+156', del: '−0', chk: '#BD93F9', tick: '✓', rowbg: 'transparent', nameColor: '#BAC2DE' },
+        { p: 'src/pane/', n: 'tree.rs', s: 'M', sc: '#89B4FA', add: '+42', del: '−11', chk: '#BD93F9', tick: '✓', rowbg: 'rgba(189,147,249,0.10)', nameColor: '#CDD6F4' },
+        { p: 'src/', n: 'main.rs', s: 'M', sc: '#89B4FA', add: '+8', del: '−3', chk: 'transparent', tick: '', rowbg: 'transparent', nameColor: '#BAC2DE' },
+        { p: 'src/theme/', n: 'ossein.toml', s: 'M', sc: '#89B4FA', add: '+12', del: '−4', chk: 'transparent', tick: '', rowbg: 'transparent', nameColor: '#BAC2DE' },
+        { p: '', n: 'README.md', s: 'M', sc: '#89B4FA', add: '+3', del: '−1', chk: 'transparent', tick: '', rowbg: 'transparent', nameColor: '#BAC2DE' },
+        { p: 'old/', n: 'legacy.rs', s: 'D', sc: '#F38BA8', add: '+0', del: '−88', chk: 'transparent', tick: '', rowbg: 'transparent', nameColor: '#9399B2' },
+      ],
+      timelineEvents: [
+        { time: '12:04', who: 'system', ac: '#7F849C', title: 'Session started', detail: 'main @ a1b2c3d', badge: '', op: '1', ring: 'transparent' },
+        { time: '12:18', who: 'you', ac: '#89B4FA', title: 'Edited pane/tree.rs', detail: '+12 −4', badge: '', op: '1', ring: 'transparent' },
+        { time: '12:31', who: 'agent', ac: '#F5C2E7', title: 'Refactored split() — enforce 8-pane cap', detail: 'tree.rs · +30 −7', badge: '', op: '1', ring: 'transparent' },
+        { time: '13:02', who: 'you', ac: '#89B4FA', title: 'Ran cargo test', detail: '48 passed, 0 failed', badge: '', op: '1', ring: 'transparent' },
+        { time: '13:20', who: 'agent', ac: '#F5C2E7', title: 'Generated session/timeline.rs', detail: 'new file · +156', badge: '', op: '1', ring: 'transparent' },
+        { time: '13:44', who: 'you', ac: '#BD93F9', title: 'Staged 2 files', detail: 'timeline.rs, tree.rs', badge: 'VIEWING', op: '1', ring: '#BD93F9' },
+        { time: '14:05', who: 'agent', ac: '#F5C2E7', title: 'Wrote timeline UI spec', detail: 'timeline.rs · +40', badge: 'future', op: '0.42', ring: 'transparent' },
+        { time: '14:32', who: 'you', ac: '#BD93F9', title: 'git commit — feat: timeline', detail: 'HEAD · main', badge: 'HEAD', op: '0.42', ring: 'transparent' },
+      ],
+      branchFiles: [
+        { n: 'session/timeline.rs', add: '+156', del: '−0' },
+        { n: 'pane/tree.rs', add: '+42', del: '−11' },
+        { n: 'main.rs', add: '+8', del: '−3' },
+        { n: 'theme/ossein.toml', add: '+12', del: '−4' },
+      ],
+      settingsNav: [
+        { i: '⚙', label: 'General', bg: 'transparent', fg: '#BAC2DE', ic: '#7F849C' },
+        { i: '◐', label: 'Appearance', bg: 'rgba(189,147,249,0.14)', fg: '#CDD6F4', ic: '#BD93F9' },
+        { i: '⌘', label: 'Keybindings', bg: 'transparent', fg: '#BAC2DE', ic: '#7F849C' },
+        { i: '⊞', label: 'Panes & tabs', bg: 'transparent', fg: '#BAC2DE', ic: '#7F849C' },
+        { i: '❯', label: 'Shell & env', bg: 'transparent', fg: '#BAC2DE', ic: '#7F849C' },
+        { i: '⟲', label: 'Session', bg: 'transparent', fg: '#BAC2DE', ic: '#7F849C' },
+        { i: '⑂', label: 'Git', bg: 'transparent', fg: '#BAC2DE', ic: '#7F849C' },
+        { i: '⋯', label: 'Advanced', bg: 'transparent', fg: '#BAC2DE', ic: '#7F849C' },
+      ],
+      keyGroups: [
+        { group: 'Global', note: '', keys: [
+          { a: 'Command palette', m: '⌘ K', l: 'Ctrl K' },
+          { a: 'Settings', m: '⌘ ,', l: 'Ctrl ,' },
+          { a: 'Show / hide sidebar', m: '⌘ B', l: 'Ctrl B' },
+          { a: 'Cycle sidebar / rail', m: '⇧⌘ B', l: 'Ctrl Shift B' },
+          { a: 'Keybinding cheatsheet', m: '⌘ /', l: 'Ctrl /' },
+          { a: 'Find in scrollback', m: '⌘ F', l: 'Ctrl Shift F' },
+          { a: 'Quit', m: '⌘ Q', l: 'Ctrl Q' },
+        ]},
+        { group: 'Tabs', note: '', keys: [
+          { a: 'New tab', m: '⌘ T', l: 'Ctrl Shift T' },
+          { a: 'Close tab', m: '⌘ W', l: 'Ctrl Shift W' },
+          { a: 'Next / prev tab', m: '⌥⇧ ] / [', l: 'Ctrl PgDn / PgUp' },
+          { a: 'Go to tab 1–9', m: '⌘ 1…9', l: 'Ctrl 1…9' },
+          { a: 'Pin / unpin', m: '⇧⌘ P', l: 'Ctrl Shift P' },
+          { a: 'New group', m: '⇧⌘ N', l: 'Ctrl Shift N' },
+          { a: 'Rename tab', m: 'F2', l: 'F2' },
+          { a: 'Reopen closed', m: '⇧⌘ T', l: 'Ctrl Shift O' },
+        ]},
+        { group: 'Panes', note: 'Leader = Ctrl A (tmux-style). Direct chords also work.', keys: [
+          { a: 'Split right (vertical)', m: '⌥ | · Leader |', l: 'Alt | · Leader |' },
+          { a: 'Split down (horizontal)', m: '⌥ - · Leader -', l: 'Alt - · Leader -' },
+          { a: 'Move focus', m: '⌥ ← ↓ ↑ → · Leader h j k l', l: 'Alt ← ↓ ↑ → · Leader h j k l' },
+          { a: 'Resize pane', m: '⌃⌥ arrows · Leader ⇧ h j k l', l: 'Ctrl Alt arrows' },
+          { a: 'Zoom / unzoom pane', m: '⌥ Z · Leader z', l: 'Alt Z · Leader z' },
+          { a: 'Close pane', m: '⌘ W · Leader x', l: 'Ctrl Shift W · Leader x' },
+          { a: 'Cycle layout preset', m: '⌥ Space', l: 'Alt Space' },
+          { a: 'Swap pane', m: '⌥⇧ arrows', l: 'Alt Shift arrows' },
+          { a: 'Even out splits', m: '⌥ =', l: 'Alt =' },
+        ]},
+        { group: 'Session & Git', note: '', keys: [
+          { a: 'Session timeline', m: '⇧⌘ H', l: 'Ctrl Shift H' },
+          { a: 'Git diff panel', m: '⇧⌘ G', l: 'Ctrl Shift G' },
+          { a: 'Rewind one step', m: '⌥⌘ ←', l: 'Ctrl Alt ←' },
+          { a: 'Fast-forward one step', m: '⌥⌘ →', l: 'Ctrl Alt →' },
+          { a: 'Return to now (HEAD)', m: '⌥⌘ 0', l: 'Ctrl Alt 0' },
+          { a: 'Stage hunk (in diff)', m: '⌘ ↵', l: 'Ctrl ↵' },
+        ]},
+        { group: 'Terminal', note: '', keys: [
+          { a: 'Copy / paste', m: '⌘ C / V', l: 'Ctrl Shift C / V' },
+          { a: 'Clear scrollback', m: '⌘ L', l: 'Ctrl Shift L' },
+          { a: 'Font larger / smaller', m: '⌘ = / -', l: 'Ctrl = / -' },
+          { a: 'Reset font size', m: '⌘ 0', l: 'Ctrl 0' },
+          { a: 'Run in new pane (palette)', m: '⌘ ↵', l: 'Ctrl ↵' },
+        ]},
+      ],
+      flows: [
+        { n: '1', t: 'Split a pane', steps: ['Focus the pane to split', '⌥| (right) or ⌥- (down); new pane inherits cwd + shell', 'At 8 panes the command no-ops and a toast explains the cap', 'Drag the 6px divider or ⌃⌥arrows to resize'] },
+        { n: '2', t: 'Rewind the session', steps: ['⇧⌘H opens the timeline; scrub or click an event', 'Codebase restores to that point in a shadow worktree', 'Later events dim; editing here prompts “fork from this point?”', '⌥⌘0 / Return to now snaps back to HEAD, worktree discarded'] },
+        { n: '3', t: 'Stage & commit', steps: ['⇧⌘G opens the diff scoped to the tab’s repo', 'Toggle file checkboxes or ⌘↵ to stage a hunk', 'Type a message; Commit is enabled once ≥1 file is staged', 'On success a toast shows the short SHA with Undo (soft reset)'] },
+      ],
+      edges: [
+        { s: 'Close last pane', b: 'Closing the only pane closes the tab. Closing the only tab shows the empty state — never quits the app.' },
+        { s: 'Process running on close', b: 'A foreground job (non-shell) triggers a confirm dialog naming the process. ⌘W twice within 2s skips it.' },
+        { s: 'Not a git repo', b: 'Git panel shows an empty state: “No repository here” + Init repo button. Status line hides the branch segment.' },
+        { s: 'Detached / rewound', b: 'Status line turns mauve and reads “viewing 13:44”. Typing a command warns before forking a branch.' },
+        { s: 'Shell exits / crashes', b: 'Pane shows a dim overlay: exit code + Restart (↵) / Close (⌘W). Scrollback is preserved.' },
+        { s: 'Theme with no light variant', b: 'Selecting a dark-only preset in Light mode falls back to Ossein Light UI tokens; ANSI still swaps.' },
+        { s: 'Sidebar collapsed', b: 'Below 180px the sidebar snaps to a 56px icon rail; below that it hides entirely (⌘B restores).' },
+        { s: 'Many tabs overflow', b: 'Tab list scrolls independently; pinned grid and utility bar stay fixed. Active tab auto-scrolls into view.' },
+      ],
+    };
+  }
+}
+</script>
+</body>
+</html>
