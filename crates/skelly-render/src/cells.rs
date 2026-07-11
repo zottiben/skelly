@@ -33,8 +33,10 @@ impl Quad {
 const SELECTION_ALPHA: f32 = 0.30;
 
 /// Build the quads for a grid, given the cell metrics (physical px), in draw order:
-/// opaque cell backgrounds, then translucent selection fills over them, then the
-/// accent cursor block. `selection` is the list of selected `(column, row)` cells.
+/// opaque cell backgrounds, then per-cell underline rules, then translucent
+/// selection fills, then the accent cursor block. All sit *beneath* the glyphs (the
+/// text pass loads over them). `selection` is the list of selected `(column, row)`
+/// cells.
 pub(crate) fn grid_quads(
     cell_w: f32,
     cell_h: f32,
@@ -54,11 +56,31 @@ pub(crate) fn grid_quads(
         )
     };
 
+    // An underline rule: a thin bar near the cell's baseline, in the glyph color.
+    let underline_thickness = (cell_h * 0.07).round().max(1.0);
+    let underline_top = (cell_h - underline_thickness * 2.0).max(0.0);
+    let underline_quad = |col: usize, row: usize, color: [f32; 4]| {
+        Quad::new(
+            pad + col as f32 * cell_w,
+            pad + row as f32 * cell_h + underline_top,
+            cell_w,
+            underline_thickness,
+            color,
+        )
+    };
+
     let mut quads = Vec::new();
     for (row_index, row) in rows.iter().enumerate() {
         for (col_index, cell) in row.iter().enumerate() {
             if let Some(bg) = cell.bg {
                 quads.push(cell_quad(col_index, row_index, bg.to_linear()));
+            }
+        }
+    }
+    for (row_index, row) in rows.iter().enumerate() {
+        for (col_index, cell) in row.iter().enumerate() {
+            if cell.underline {
+                quads.push(underline_quad(col_index, row_index, cell.fg.to_linear()));
             }
         }
     }

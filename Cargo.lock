@@ -2108,6 +2108,7 @@ name = "skelly-term"
 version = "0.1.0"
 dependencies = [
  "alacritty_terminal",
+ "bitflags 2.13.0",
  "portable-pty",
 ]
 

@@ -8,8 +8,8 @@
 //! verify.
 
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
-    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport,
+    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
+    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 use skelly_config::Appearance;
 
@@ -76,6 +76,11 @@ impl TextLayer {
         );
 
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_px, line_px));
+        // A terminal grid never reflows: each row is exactly one visual line. Without
+        // this, full-width rows (80 columns, trailing spaces included) exceed the
+        // buffer width and wrap, doubling the line pitch and desyncing the glyphs from
+        // the cell-background / cursor / underline quads.
+        buffer.set_wrap(Wrap::None);
         buffer.set_size(Some(dim_to_f32(width)), Some(dim_to_f32(height)));
         buffer.set_text(
             DEMO_TEXT,
@@ -115,37 +120,16 @@ impl TextLayer {
     }
 
     /// Replace the display with a colored grid, drawing each cell's glyph in its
-    /// foreground color, in the configured font (monospace fallback). Consecutive
-    /// same-color cells merge into runs to keep the span count down.
+    /// foreground color and weight/style, in the configured font (monospace
+    /// fallback). Consecutive cells with the same color and attributes merge into
+    /// runs to keep the span count down.
     pub fn set_cells(&mut self, rows: &[Vec<GridCell>]) {
-        let mut runs: Vec<(String, Color)> = Vec::new();
-        for (index, row) in rows.iter().enumerate() {
-            if index > 0 {
-                runs.push((String::from("\n"), Color::rgb(0, 0, 0)));
-            }
-            let mut current: Option<(String, Color)> = None;
-            for cell in row {
-                let color = Color::rgb(cell.fg.r, cell.fg.g, cell.fg.b);
-                match current.as_mut() {
-                    Some((text, run_color)) if *run_color == color => text.push(cell.c),
-                    _ => {
-                        if let Some(run) = current.take() {
-                            runs.push(run);
-                        }
-                        current = Some((cell.c.to_string(), color));
-                    }
-                }
-            }
-            if let Some(run) = current.take() {
-                runs.push(run);
-            }
-        }
-
+        let runs = text_runs(rows);
         let family = family_of(self.family_name.as_deref());
         let default = Attrs::new().family(family);
         let spans = runs
             .iter()
-            .map(|(text, color)| (text.as_str(), Attrs::new().family(family).color(*color)));
+            .map(|run| (run.text.as_str(), run.attrs(family)));
         self.buffer
             .set_rich_text(spans, &default, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
@@ -232,6 +216,73 @@ impl TextLayer {
     }
 }
 
+/// A run of consecutive cells that share a color, weight, and style - the unit we
+/// hand to `set_rich_text` as one span. Newlines are their own (color-irrelevant)
+/// runs separating rows.
+struct Run {
+    text: String,
+    color: Color,
+    bold: bool,
+    italic: bool,
+}
+
+impl Run {
+    /// The shaping attributes for this run in `family`: color plus bold/italic.
+    fn attrs<'a>(&self, family: Family<'a>) -> Attrs<'a> {
+        let mut attrs = Attrs::new().family(family).color(self.color);
+        if self.bold {
+            attrs = attrs.weight(Weight::BOLD);
+        }
+        if self.italic {
+            attrs = attrs.style(Style::Italic);
+        }
+        attrs
+    }
+}
+
+/// Merge a grid into runs of same-color, same-weight, same-style cells, with a
+/// newline run between rows. Underline is *not* a run key - it is drawn as a quad,
+/// not a shaping attribute (glyphon does not render text decorations).
+fn text_runs(rows: &[Vec<GridCell>]) -> Vec<Run> {
+    let mut runs: Vec<Run> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        if index > 0 {
+            runs.push(Run {
+                text: String::from("\n"),
+                color: Color::rgb(0, 0, 0),
+                bold: false,
+                italic: false,
+            });
+        }
+        let mut current: Option<Run> = None;
+        for cell in row {
+            let color = Color::rgb(cell.fg.r, cell.fg.g, cell.fg.b);
+            match current.as_mut() {
+                Some(run)
+                    if run.color == color && run.bold == cell.bold && run.italic == cell.italic =>
+                {
+                    run.text.push(cell.c);
+                }
+                _ => {
+                    if let Some(run) = current.take() {
+                        runs.push(run);
+                    }
+                    current = Some(Run {
+                        text: cell.c.to_string(),
+                        color,
+                        bold: cell.bold,
+                        italic: cell.italic,
+                    });
+                }
+            }
+        }
+        if let Some(run) = current.take() {
+            runs.push(run);
+        }
+    }
+    runs
+}
+
 /// Measure the advance width of a glyph in `family` at `font_px`, in physical px.
 fn measure_cell_width(
     font_system: &mut FontSystem,
@@ -291,4 +342,73 @@ fn dim_to_f32(value: u32) -> f32 {
 )]
 fn dim_to_i32(value: u32) -> i32 {
     value as i32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::text_runs;
+    use crate::{GridCell, Srgb};
+
+    fn cell(c: char, fg: Srgb, bold: bool, italic: bool) -> GridCell {
+        GridCell {
+            c,
+            fg,
+            bg: None,
+            bold,
+            italic,
+            underline: false,
+        }
+    }
+
+    #[test]
+    fn same_color_and_attrs_merge_into_one_run() {
+        let white = Srgb {
+            r: 255,
+            g: 255,
+            b: 255,
+        };
+        let rows = vec![vec![
+            cell('a', white, false, false),
+            cell('b', white, false, false),
+        ]];
+        let runs = text_runs(&rows);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].text, "ab");
+    }
+
+    #[test]
+    fn a_weight_change_splits_the_run() {
+        let white = Srgb {
+            r: 255,
+            g: 255,
+            b: 255,
+        };
+        let rows = vec![vec![
+            cell('a', white, false, false),
+            cell('b', white, true, false),
+        ]];
+        let runs = text_runs(&rows);
+        assert_eq!(runs.len(), 2);
+        assert_eq!(runs[0].text, "a");
+        assert!(!runs[0].bold);
+        assert_eq!(runs[1].text, "b");
+        assert!(runs[1].bold);
+    }
+
+    #[test]
+    fn rows_are_separated_by_a_newline_run() {
+        let white = Srgb {
+            r: 255,
+            g: 255,
+            b: 255,
+        };
+        let rows = vec![
+            vec![cell('a', white, false, false)],
+            vec![cell('b', white, false, false)],
+        ];
+        let runs = text_runs(&rows);
+        // "a", "\n", "b"
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[1].text, "\n");
+    }
 }

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use skelly_config::{Appearance, Config};
 use skelly_render::{AnsiPalette, GridCell, Renderer, Srgb};
-use skelly_term::{CellColor, TermCell, Terminal};
+use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -100,11 +100,7 @@ impl App {
                     .iter()
                     .map(|row| {
                         row.iter()
-                            .map(|cell| GridCell {
-                                c: cell.c,
-                                fg: resolve_fg(cell.fg, &self.palette),
-                                bg: resolve_bg(cell.bg, &self.palette),
-                            })
+                            .map(|cell| resolve_cell(cell, &self.palette))
                             .collect()
                     })
                     .collect();
@@ -222,6 +218,32 @@ impl App {
     }
 }
 
+/// Resolve a terminal cell into a render cell against the active ANSI palette,
+/// folding in the palette-dependent SGR effects: *dim* reduces the foreground
+/// intensity and *reverse video* swaps foreground and background (using the
+/// palette's default background when the cell has none). Bold/italic/underline pass
+/// through for the renderer to apply.
+fn resolve_cell(cell: &TermCell, palette: &AnsiPalette) -> GridCell {
+    let mut fg = resolve_fg(cell.fg, palette);
+    let mut bg = resolve_bg(cell.bg, palette);
+    if cell.attrs.contains(CellAttrs::DIM) {
+        fg = dim(fg);
+    }
+    if cell.attrs.contains(CellAttrs::INVERSE) {
+        let fill = fg;
+        fg = bg.unwrap_or_else(|| palette.default_bg());
+        bg = Some(fill);
+    }
+    GridCell {
+        c: cell.c,
+        fg,
+        bg,
+        bold: cell.attrs.contains(CellAttrs::BOLD),
+        italic: cell.attrs.contains(CellAttrs::ITALIC),
+        underline: cell.attrs.contains(CellAttrs::UNDERLINE),
+    }
+}
+
 /// Resolve a cell's foreground color against the active ANSI palette.
 fn resolve_fg(color: CellColor, palette: &AnsiPalette) -> Srgb {
     match color {
@@ -237,6 +259,16 @@ fn resolve_bg(color: CellColor, palette: &AnsiPalette) -> Option<Srgb> {
         CellColor::Default => None,
         CellColor::Indexed(index) => Some(palette.indexed(index)),
         CellColor::Rgb(r, g, b) => Some(Srgb { r, g, b }),
+    }
+}
+
+/// Reduce a foreground color's intensity to ~60% for the SGR *dim* attribute.
+fn dim(c: Srgb) -> Srgb {
+    let faint = |v: u8| u8::try_from(u16::from(v) * 3 / 5).unwrap_or(v);
+    Srgb {
+        r: faint(c.r),
+        g: faint(c.g),
+        b: faint(c.b),
     }
 }
 
@@ -487,21 +519,23 @@ fn init_tracing() {
 
 #[cfg(test)]
 mod tests {
-    use super::{order, selection_cells, selection_text, Selection};
-    use skelly_term::{CellColor, TermCell};
+    use super::{dim, order, resolve_cell, selection_cells, selection_text, Selection};
+    use skelly_render::{AnsiPalette, Srgb};
+    use skelly_term::{CellAttrs, CellColor, TermCell};
+
+    fn plain(c: char) -> TermCell {
+        TermCell {
+            c,
+            fg: CellColor::Default,
+            bg: CellColor::Default,
+            attrs: CellAttrs::empty(),
+        }
+    }
 
     fn grid(lines: &[&str]) -> Vec<Vec<TermCell>> {
         lines
             .iter()
-            .map(|line| {
-                line.chars()
-                    .map(|c| TermCell {
-                        c,
-                        fg: CellColor::Default,
-                        bg: CellColor::Default,
-                    })
-                    .collect()
-            })
+            .map(|line| line.chars().map(plain).collect())
             .collect()
     }
 
@@ -550,5 +584,59 @@ mod tests {
         assert_eq!(cells.len(), 15); // 3 rows x 5 cols
         assert!(cells.contains(&(4, 2)));
         assert!(!cells.iter().any(|&(c, r)| c >= 5 || r >= 3));
+    }
+
+    #[test]
+    fn reverse_video_swaps_fg_and_bg() {
+        let palette = AnsiPalette::resolve("ossein-dark");
+        let mut cell = plain('x');
+        cell.fg = CellColor::Indexed(1); // red
+        cell.attrs.insert(CellAttrs::INVERSE);
+        let resolved = resolve_cell(&cell, &palette);
+        // The red foreground becomes the fill; the (defaulted) background becomes the
+        // glyph color, drawn as the palette's default background.
+        assert_eq!(resolved.bg, Some(palette.indexed(1)));
+        assert_eq!(resolved.fg, palette.default_bg());
+    }
+
+    #[test]
+    fn reverse_video_with_an_explicit_background() {
+        let palette = AnsiPalette::resolve("ossein-dark");
+        let mut cell = plain('x');
+        cell.fg = CellColor::Indexed(2); // green
+        cell.bg = CellColor::Indexed(4); // blue
+        cell.attrs.insert(CellAttrs::INVERSE);
+        let resolved = resolve_cell(&cell, &palette);
+        assert_eq!(resolved.fg, palette.indexed(4));
+        assert_eq!(resolved.bg, Some(palette.indexed(2)));
+    }
+
+    #[test]
+    fn dim_darkens_the_foreground() {
+        let bright = Srgb {
+            r: 200,
+            g: 100,
+            b: 50,
+        };
+        let faint = dim(bright);
+        assert_eq!(
+            faint,
+            Srgb {
+                r: 120,
+                g: 60,
+                b: 30
+            }
+        );
+        assert_eq!(dim(Srgb { r: 0, g: 0, b: 0 }), Srgb { r: 0, g: 0, b: 0 });
+    }
+
+    #[test]
+    fn attributes_pass_through_to_the_render_cell() {
+        let palette = AnsiPalette::resolve("ossein-dark");
+        let mut cell = plain('b');
+        cell.attrs
+            .insert(CellAttrs::BOLD | CellAttrs::ITALIC | CellAttrs::UNDERLINE);
+        let resolved = resolve_cell(&cell, &palette);
+        assert!(resolved.bold && resolved.italic && resolved.underline);
     }
 }

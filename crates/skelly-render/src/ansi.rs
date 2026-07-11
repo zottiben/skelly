@@ -7,11 +7,13 @@
 
 use crate::theme::Srgb;
 
-/// A resolved terminal palette: the 16 ANSI base colors plus the default foreground.
+/// A resolved terminal palette: the 16 ANSI base colors plus the default
+/// foreground and background.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AnsiPalette {
     base: [Srgb; 16],
     default_fg: Srgb,
+    default_bg: Srgb,
 }
 
 impl AnsiPalette {
@@ -23,10 +25,12 @@ impl AnsiPalette {
             "ossein-light" => Self {
                 base: OSSEIN_LIGHT,
                 default_fg: rgb(0x4C, 0x4F, 0x69),
+                default_bg: rgb(0xEF, 0xF1, 0xF5),
             },
             _ => Self {
                 base: OSSEIN_DARK,
                 default_fg: rgb(0xCD, 0xD6, 0xF4),
+                default_bg: rgb(0x18, 0x18, 0x25),
             },
         }
     }
@@ -35,6 +39,13 @@ impl AnsiPalette {
     #[must_use]
     pub fn default_fg(&self) -> Srgb {
         self.default_fg
+    }
+
+    /// The default background, used as the solid fill when reverse video inverts a
+    /// cell that has no explicit background.
+    #[must_use]
+    pub fn default_bg(&self) -> Srgb {
+        self.default_bg
     }
 
     /// Resolve a palette index to a concrete color: 0..=15 are the ANSI base colors,

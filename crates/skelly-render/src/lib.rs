@@ -31,7 +31,12 @@ pub use renderer::Renderer;
 pub use text::TextLayer;
 pub use theme::{Rgba, Srgb, Theme};
 
-/// One cell to render: its character, foreground, and optional background fill.
+/// One cell to render: its character, foreground, optional background fill, and
+/// resolved text attributes.
+///
+/// Colors are already resolved against the ANSI palette (reverse video and dim
+/// folded in), so the renderer only needs the font-level attributes: `bold` and
+/// `italic` pick the face; `underline` draws a rule beneath the glyph.
 #[derive(Clone, Copy, Debug)]
 pub struct GridCell {
     /// The cell's character.
@@ -40,4 +45,10 @@ pub struct GridCell {
     pub fg: Srgb,
     /// Background fill; `None` means the terminal's default background (no fill).
     pub bg: Option<Srgb>,
+    /// Render the glyph with a bold weight.
+    pub bold: bool,
+    /// Render the glyph with an italic style.
+    pub italic: bool,
+    /// Draw an underline rule beneath the cell in the foreground color.
+    pub underline: bool,
 }

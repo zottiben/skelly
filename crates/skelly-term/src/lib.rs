@@ -20,6 +20,7 @@ use std::thread::{self, JoinHandle};
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, Processor};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
@@ -39,7 +40,27 @@ pub enum CellColor {
     Rgb(u8, u8, u8),
 }
 
-/// One grid cell: its character, foreground, and background color.
+bitflags::bitflags! {
+    /// The SGR text attributes set on a cell, as a compact flag set. Palette
+    /// independent: `BOLD`/`ITALIC`/`UNDERLINE` are font-level effects the renderer
+    /// applies directly, while `INVERSE` (reverse video) and `DIM` are resolved
+    /// against a concrete palette (swap fg/bg, reduce intensity) per Hard rule 2.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct CellAttrs: u8 {
+        /// Bold weight (`ESC[1m`).
+        const BOLD = 1 << 0;
+        /// Italic style (`ESC[3m`).
+        const ITALIC = 1 << 1;
+        /// Underline (`ESC[4m`, plus the double / curly / dotted / dashed variants).
+        const UNDERLINE = 1 << 2;
+        /// Reverse video (`ESC[7m`): swap foreground and background.
+        const INVERSE = 1 << 3;
+        /// Dim / faint (`ESC[2m`): reduce the foreground intensity.
+        const DIM = 1 << 4;
+    }
+}
+
+/// One grid cell: its character, colors, and SGR text attributes.
 #[derive(Clone, Copy, Debug)]
 pub struct TermCell {
     /// The cell's character (a space if empty).
@@ -49,6 +70,8 @@ pub struct TermCell {
     /// The cell's background color ([`CellColor::Default`] means the terminal's
     /// default background - the renderer draws no fill for those).
     pub bg: CellColor,
+    /// The cell's SGR text attributes.
+    pub attrs: CellAttrs,
 }
 
 /// A live terminal: a shell in a PTY, parsed into a cell grid.
@@ -197,6 +220,7 @@ impl Terminal {
                     c: cell.c,
                     fg: map_color(cell.fg),
                     bg: map_color(cell.bg),
+                    attrs: map_attrs(cell.flags),
                 });
             }
             out.push(cells);
@@ -241,6 +265,21 @@ impl Terminal {
         }
         self.dirty.store(true, Ordering::Relaxed);
     }
+}
+
+/// Map an `alacritty_terminal` cell's flags to our SGR [`CellAttrs`]. The various
+/// underline styles all collapse to a single underline for now.
+fn map_attrs(flags: Flags) -> CellAttrs {
+    let mut attrs = CellAttrs::empty();
+    attrs.set(CellAttrs::BOLD, flags.contains(Flags::BOLD));
+    attrs.set(CellAttrs::ITALIC, flags.contains(Flags::ITALIC));
+    attrs.set(
+        CellAttrs::UNDERLINE,
+        flags.intersects(Flags::ALL_UNDERLINES),
+    );
+    attrs.set(CellAttrs::INVERSE, flags.contains(Flags::INVERSE));
+    attrs.set(CellAttrs::DIM, flags.contains(Flags::DIM));
+    attrs
 }
 
 /// Map an `alacritty_terminal` cell color to a palette-independent [`CellColor`].

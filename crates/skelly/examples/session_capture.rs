@@ -7,14 +7,17 @@ use std::time::{Duration, Instant};
 
 use skelly_config::Appearance;
 use skelly_render::{AnsiPalette, GridCell, Srgb};
-use skelly_term::{CellColor, Terminal};
+use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 
 fn main() {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "skelly-session.png".to_owned());
     let (cols, rows) = (80_u16, 24_u16);
-    let (width, height) = (960_u32, 600_u32);
+    // Size the surface to fit all 24 rows at the default metrics (14px * 1.2 line *
+    // 2.0 scale = ~34px/row): 24 rows need ~854px, so a 600px surface would clip the
+    // lower rows (where the attribute showcase lands).
+    let (width, height) = (960_u32, 860_u32);
 
     let mut term = Terminal::spawn(cols, rows, || {}).expect("spawn shell");
     // Wait for the shell's first prompt before typing - heavy prompts (p10k etc.)
@@ -24,22 +27,24 @@ fn main() {
     });
     sleep(Duration::from_millis(400));
 
-    // Print 40 numbered lines (past the 24-row screen), each with a Nerd Font icon
-    // and colored index, ending in the marker. The split quotes make the marker
-    // appear only in the executed output.
+    // Print 30 numbered lines (past the 24-row screen, so earlier ones roll into
+    // scrollback), then an SGR text-attribute showcase (bold / italic / underline /
+    // reverse / dim), ending in the marker. Showing the live tail keeps the showcase
+    // in view and the multi-line command echo scrolled off. Split quotes make the
+    // marker appear only in the executed output.
+    let icon = '\u{f07c}';
     let cmd = format!(
-        "clear; for i in $(seq 1 40); do printf '{}  \\033[36mline %02d\\033[0m  scrollback demo\\n' \"$i\"; done; printf 'COLORS''_LIVE\\n'\n",
-        '\u{f07c}',
+        "clear; \
+         for i in $(seq 1 30); do printf '{icon}  \\033[36mline %02d\\033[0m  scrollback demo\\n' \"$i\"; done; \
+         printf 'plain  \\033[1mbold\\033[0m  \\033[3mitalic\\033[0m  \\033[4munderline\\033[0m  \\033[7mreverse\\033[0m  \\033[2mdim\\033[0m\\n'; \
+         printf '\\033[1;4mbold+underline\\033[0m  \\033[3;33myellow italic\\033[0m  \\033[4;36mcyan underline\\033[0m\\n'; \
+         printf 'COLORS''_LIVE\\n'\n",
     );
     term.write(cmd.as_bytes());
     wait_until(&term, Duration::from_secs(15), |t| {
         snapshot_has(t, "COLORS_LIVE")
     });
     sleep(Duration::from_millis(400));
-
-    // Scroll up into history so the capture shows the scrollback view, not the tail.
-    term.scroll_lines(20);
-    sleep(Duration::from_millis(100));
 
     println!("--- captured grid ---");
     for line in &term.snapshot() {
@@ -59,11 +64,7 @@ fn main() {
         .iter()
         .map(|row| {
             row.iter()
-                .map(|cell| GridCell {
-                    c: cell.c,
-                    fg: resolve_fg(cell.fg, &palette),
-                    bg: resolve_bg(cell.bg, &palette),
-                })
+                .map(|cell| resolve_cell(cell, &palette))
                 .collect()
         })
         .collect();
@@ -107,6 +108,29 @@ fn wait_until<F: Fn(&Terminal) -> bool>(term: &Terminal, timeout: Duration, read
     }
 }
 
+// Mirrors `resolve_cell` in the binary (examples cannot import the binary crate):
+// fold dim + reverse video into concrete colors, pass bold/italic/underline through.
+fn resolve_cell(cell: &TermCell, palette: &AnsiPalette) -> GridCell {
+    let mut fg = resolve_fg(cell.fg, palette);
+    let mut bg = resolve_bg(cell.bg, palette);
+    if cell.attrs.contains(CellAttrs::DIM) {
+        fg = dim(fg);
+    }
+    if cell.attrs.contains(CellAttrs::INVERSE) {
+        let fill = fg;
+        fg = bg.unwrap_or_else(|| palette.default_bg());
+        bg = Some(fill);
+    }
+    GridCell {
+        c: cell.c,
+        fg,
+        bg,
+        bold: cell.attrs.contains(CellAttrs::BOLD),
+        italic: cell.attrs.contains(CellAttrs::ITALIC),
+        underline: cell.attrs.contains(CellAttrs::UNDERLINE),
+    }
+}
+
 fn resolve_bg(color: CellColor, palette: &AnsiPalette) -> Option<Srgb> {
     match color {
         CellColor::Default => None,
@@ -120,5 +144,14 @@ fn resolve_fg(color: CellColor, palette: &AnsiPalette) -> Srgb {
         CellColor::Default => palette.default_fg(),
         CellColor::Indexed(index) => palette.indexed(index),
         CellColor::Rgb(r, g, b) => Srgb { r, g, b },
+    }
+}
+
+fn dim(c: Srgb) -> Srgb {
+    let faint = |v: u8| u8::try_from(u16::from(v) * 3 / 5).unwrap_or(v);
+    Srgb {
+        r: faint(c.r),
+        g: faint(c.g),
+        b: faint(c.b),
     }
 }

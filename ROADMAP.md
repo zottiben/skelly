@@ -48,6 +48,15 @@ ADRs (0001-0004) are ratified.
       Cmd/Super+C copies the selection, Cmd/Super+V pastes into the shell (`arboard`).
     - [ ] VT/ANSI conformance (vttest / esctest in CI, fuzz the parser).
     - [ ] Resize/reflow polish, live theme-token resolution.
+  - [x] **M2e** - SGR text attributes: bold / italic (cosmic-text weight+style),
+    underline (a cell-width rule quad), reverse video and dim (resolved against the
+    palette: swap fg/bg using a new `default_bg`, reduce fg intensity). `skelly-term`
+    exposes a `CellAttrs` bitflags set read from the engine cell flags. Also fixed a
+    latent cell-grid alignment bug: full-width rows wrapped in the text buffer,
+    doubling the line pitch and desyncing glyphs from the background / cursor /
+    underline / selection quads - the buffer now uses `Wrap::None` so each grid row is
+    exactly one visual line. `bold_is_bright` (config) is not yet honored (bold =
+    weight only) - a follow-up.
 - [ ] **M3 - Skelly shell UX.** Sidebar + tabs/groups/pinning; pane tree
   (split/focus/resize/zoom, <=8); command palette; settings view; live theming.
 - [ ] **M4 - Signature features.** Per-repo git diff dock with hunk staging;

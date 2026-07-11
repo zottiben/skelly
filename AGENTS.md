@@ -20,8 +20,14 @@ fixed-metric cell renderer (own glyph atlas + instanced glyph quads) replacing
 glyphon's reflowed text, for exact wide-char/fallback alignment. M2d is in progress: scrollback (10k-line history, mouse-wheel + Shift+PageUp/Down)
 and selection + copy/paste (mouse-drag highlight, Cmd+C/V via `arboard`) have landed.
 Remaining in M2d: VT/ANSI conformance (vttest/esctest + fuzz), reflow polish, live
-theme-token resolution. The build target is native Rust, not the mockup HTML. See
-`ROADMAP.md`.
+theme-token resolution. M2e (SGR text attributes) has landed: bold/italic via
+cosmic-text weight+style, underline as a cell-width rule quad, reverse video + dim
+resolved against the palette (`AnsiPalette::default_bg`); `skelly-term` exposes a
+`CellAttrs` bitflags set. M2e also fixed a latent alignment bug - full-width grid
+rows wrapped in the text buffer (doubling the line pitch and desyncing glyphs from
+the bg/cursor/underline/selection quads); the buffer now uses `Wrap::None` so a grid
+row is always one visual line. The build target is native Rust, not the mockup HTML.
+See `ROADMAP.md`.
 
 **Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
 workspace. Foundation crates are *proposed* in ADR-0001..0004 (terminal core

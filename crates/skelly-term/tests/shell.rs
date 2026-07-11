@@ -7,7 +7,7 @@
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use skelly_term::{CellColor, Terminal};
+use skelly_term::{CellAttrs, CellColor, Terminal};
 
 #[test]
 fn shell_executes_a_command_and_output_reaches_the_grid() {
@@ -65,6 +65,37 @@ fn scrollback_reveals_history() {
         scrolled.contains("SCROLLTEST001"),
         "scrollback should reveal the first line:\n{scrolled}"
     );
+}
+
+#[test]
+fn text_attributes_reach_the_grid() {
+    let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
+
+    // SGR 1 bold, 4 underline, 7 reverse video on the marker. The split quotes make
+    // the marker appear only in the *executed* output, not the echoed input.
+    term.write(b"printf '\\033[1;4;7mATTR''MARK\\033[0m\\n'\n");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let cells = term.cells();
+        let wanted = CellAttrs::BOLD | CellAttrs::UNDERLINE | CellAttrs::INVERSE;
+        let attributed: Option<String> = cells.iter().find_map(|row| {
+            let text: String = row
+                .iter()
+                .filter(|cell| cell.attrs.contains(wanted))
+                .map(|cell| cell.c)
+                .collect();
+            text.contains("ATTRMARK").then_some(text)
+        });
+        if attributed.is_some() {
+            return; // bold + underline + reverse all parsed onto the marker cells
+        }
+        assert!(
+            Instant::now() < deadline,
+            "bold/underline/reverse never reached the marker cells"
+        );
+        sleep(Duration::from_millis(50));
+    }
 }
 
 #[test]
