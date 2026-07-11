@@ -99,9 +99,11 @@ opportunistically rather than block M3 on, since the terminal already works. M3
       the UI tokens `bg.elevated` / `fg.muted` / `fg.secondary` / `border.strong`.
       Palette state + view-building is a pure `palette` module (unit tested);
       verified rendering by the `pane_capture` headless PNG (overlay over two panes).
+    - [x] Fuzzy subsequence matching (ranked: earliest first-match + fewest gaps win),
+      with the matched characters drawn in `accent`.
     - [ ] Merge user `[keys]` overrides + the configurable `panes.leader` (tmux-style
-      `ctrl+a`); fuzzy match with accent-highlighted characters; surface tabs /
-      themes / files and the `/` `?` mode prefixes.
+      `ctrl+a`); surface tabs / themes / files and the `/` `?` mode prefixes; `⌘↵`
+      run-in-new-pane.
   - [x] Live theming. `Renderer::set_theme` re-resolves the UI tokens and the binary
     re-resolves the ANSI palette + updates `config.appearance.theme` (Hard rule 1),
     then the next frame repaints every surface in the new theme (Hard rule 2). Driven

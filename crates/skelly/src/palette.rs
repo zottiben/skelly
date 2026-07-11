@@ -154,16 +154,29 @@ impl Palette {
         self.open = false;
     }
 
-    /// The indices into [`COMMANDS`] whose label matches the query (case-insensitive
-    /// substring). An empty query matches everything.
-    pub(crate) fn matches(&self) -> Vec<usize> {
-        let q = self.query.trim().to_lowercase();
-        COMMANDS
+    /// The commands whose label fuzzy-matches the query, best first. Each carries the
+    /// matched character positions (for accent highlighting). An empty query matches
+    /// everything in [`COMMANDS`] order.
+    pub(crate) fn results(&self) -> Vec<Match> {
+        let query = self.query.trim();
+        let mut scored: Vec<(i32, usize, Vec<usize>)> = COMMANDS
             .iter()
             .enumerate()
-            .filter(|(_, cmd)| q.is_empty() || cmd.label.to_lowercase().contains(&q))
-            .map(|(index, _)| index)
+            .filter_map(|(index, cmd)| {
+                fuzzy_match(query, cmd.label).map(|(score, positions)| (score, index, positions))
+            })
+            .collect();
+        // Best score first; ties keep COMMANDS order (a stable, predictable list).
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        scored
+            .into_iter()
+            .map(|(_, index, positions)| Match { index, positions })
             .collect()
+    }
+
+    /// The matched command indices, best first (positions dropped).
+    pub(crate) fn matches(&self) -> Vec<usize> {
+        self.results().into_iter().map(|m| m.index).collect()
     }
 
     /// Move the selection by `delta`, clamped to the current match count.
@@ -193,9 +206,9 @@ impl Palette {
 
     /// The action of the currently selected match, if any.
     pub(crate) fn selected_action(&self) -> Option<Action> {
-        self.matches()
+        self.results()
             .get(self.selected)
-            .map(|&i| COMMANDS[i].action)
+            .map(|m| COMMANDS[m.index].action)
     }
 
     /// Render the palette to a grid in `theme`'s UI tokens: a prompt line, a result
@@ -216,18 +229,18 @@ impl Palette {
         }
         rows.push(pad_to(prompt, cols, theme.fg_muted));
 
-        let matches = self.matches();
-        rows.push(count_row(matches.len(), cols, theme.fg_muted));
+        let results = self.results();
+        rows.push(count_row(results.len(), cols, theme.fg_muted));
 
         let first_command_row = rows.len();
-        for &index in &matches {
-            let cmd = &COMMANDS[index];
+        for hit in &results {
+            let cmd = &COMMANDS[hit.index];
             rows.push(command_row(
                 cmd.label,
                 cmd.hint,
                 cols,
-                theme.fg_primary,
-                theme.fg_muted,
+                &hit.positions,
+                theme,
             ));
         }
 
@@ -238,7 +251,7 @@ impl Palette {
             theme.fg_muted,
         ));
 
-        let selected_row = (!matches.is_empty()).then_some(first_command_row + self.selected);
+        let selected_row = (!results.is_empty()).then_some(first_command_row + self.selected);
         View {
             rows,
             selected_row,
@@ -250,14 +263,47 @@ impl Palette {
     /// or the longest matched `label + hint` command row), plus side margins.
     fn natural_cols(&self) -> usize {
         let mut widest = FOOTER.chars().count();
-        for &index in &self.matches() {
-            let cmd = &COMMANDS[index];
+        for hit in &self.results() {
+            let cmd = &COMMANDS[hit.index];
             // 2 indent + label + 1 gap + hint + 1 right margin.
             let width = 2 + cmd.label.chars().count() + 1 + cmd.hint.chars().count() + 1;
             widest = widest.max(width);
         }
         widest
     }
+}
+
+/// A fuzzy match: a command index plus the label positions the query matched.
+pub(crate) struct Match {
+    pub(crate) index: usize,
+    positions: Vec<usize>,
+}
+
+/// Fuzzy subsequence match: `Some((score, matched positions))` if every non-space
+/// character of `query` appears in order in `label` (ASCII case-insensitive), else
+/// `None`. An empty query matches with no highlights. Higher score is better - an
+/// earlier first match and fewer gaps between matched characters win.
+fn fuzzy_match(query: &str, label: &str) -> Option<(i32, Vec<usize>)> {
+    let mut wanted = query.chars().filter(|c| !c.is_whitespace()).peekable();
+    if wanted.peek().is_none() {
+        return Some((0, Vec::new()));
+    }
+    let mut positions = Vec::new();
+    let mut current = wanted.next();
+    for (i, lc) in label.chars().enumerate() {
+        let Some(q) = current else { break };
+        if lc.eq_ignore_ascii_case(&q) {
+            positions.push(i);
+            current = wanted.next();
+        }
+    }
+    if current.is_some() {
+        return None; // ran out of label before matching every query character
+    }
+    let first = i32::try_from(positions.first().copied().unwrap_or(0)).unwrap_or(0);
+    let gaps =
+        i32::try_from(positions.windows(2).filter(|w| w[1] != w[0] + 1).count()).unwrap_or(0);
+    Some((-first - gaps * 2, positions))
 }
 
 /// The footer hint line - also the palette's minimum width.
@@ -305,38 +351,60 @@ fn count_row(n: usize, cols: usize, fg: Srgb) -> Vec<GridCell> {
     pad_to(text_cells(&text, fg), cols, fg)
 }
 
-/// A command line: an indented `label` on the left and a right-aligned `hint`.
+/// A command line: an indented `label` on the left (with matched `positions` drawn in
+/// accent) and a right-aligned `hint` in muted text.
 fn command_row(
     label: &str,
     hint: &str,
     cols: usize,
-    label_fg: Srgb,
-    hint_fg: Srgb,
+    positions: &[usize],
+    theme: &Theme,
 ) -> Vec<GridCell> {
     let indent = 2;
-    let label_chars: Vec<char> = label.chars().collect();
     let hint_chars: Vec<char> = hint.chars().collect();
     let mut row: Vec<GridCell> = Vec::with_capacity(cols);
     for _ in 0..indent {
-        row.push(cell(' ', label_fg));
+        row.push(cell(' ', theme.fg_primary));
     }
-    for &c in &label_chars {
-        row.push(cell(c, label_fg));
+    for (i, c) in label.chars().enumerate() {
+        let fg = if positions.contains(&i) {
+            theme.accent
+        } else {
+            theme.fg_primary
+        };
+        row.push(cell(c, fg));
     }
     // Pad so the hint ends one cell from the right edge.
     let hint_start = cols.saturating_sub(hint_chars.len() + 1);
     while row.len() < hint_start {
-        row.push(cell(' ', label_fg));
+        row.push(cell(' ', theme.fg_primary));
     }
     for &c in &hint_chars {
-        row.push(cell(c, hint_fg));
+        row.push(cell(c, theme.fg_muted));
     }
-    pad_to(row, cols, label_fg)
+    pad_to(row, cols, theme.fg_primary)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Palette, COMMANDS};
+    use super::{Action, Palette, Theme, COMMANDS};
+
+    #[test]
+    fn matched_characters_render_in_accent_and_the_rest_in_primary() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut p = Palette::new();
+        p.open();
+        for c in "zm".chars() {
+            p.push_char(c);
+        }
+        // rows: [0] prompt, [1] count, [2] the sole "Zoom / unzoom pane" match.
+        let view = p.view(60, &theme);
+        let row = &view.rows[2];
+        // 2-cell indent, so label 'Z' is col 2 (matched), 'o' col 3 (not), 'm' col 5.
+        assert_eq!(row[2].fg, theme.accent, "matched 'z'");
+        assert_eq!(row[3].fg, theme.fg_primary, "unmatched 'o'");
+        assert_eq!(row[5].fg, theme.accent, "matched 'm'");
+    }
 
     #[test]
     fn empty_query_matches_every_command() {
@@ -392,6 +460,31 @@ mod tests {
         }
         assert!(p.matches().is_empty());
         assert_eq!(p.selected_action(), None);
+    }
+
+    #[test]
+    fn fuzzy_matches_a_subsequence_and_records_matched_positions() {
+        let mut p = Palette::new();
+        p.open();
+        for c in "zm".chars() {
+            p.push_char(c);
+        }
+        let results = p.results();
+        assert_eq!(results.len(), 1, "'zm' fuzzy-matches only Zoom");
+        assert_eq!(COMMANDS[results[0].index].action, Action::Zoom);
+        // "Zoom / unzoom pane": z at 0, m at 3.
+        assert_eq!(results[0].positions, vec![0, 3]);
+    }
+
+    #[test]
+    fn earlier_first_match_ranks_ahead() {
+        // 's' starts "Split pane right" (position 0) and appears mid-word elsewhere;
+        // the earliest first-match wins, and ties keep COMMANDS order.
+        let mut p = Palette::new();
+        p.open();
+        p.push_char('s');
+        let results = p.results();
+        assert_eq!(COMMANDS[results[0].index].action, Action::SplitRight);
     }
 
     #[test]

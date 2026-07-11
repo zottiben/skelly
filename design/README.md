@@ -47,6 +47,12 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-12 - **Palette fuzzy matching.** The command palette now fuzzy-matches
+  (query characters must appear in order in the label, ASCII case-insensitive) and
+  ranks results by an earliest-first-match, fewest-gaps score (ties keep the
+  registry order); the matched characters render in `accent`, per the guide. Still
+  deferred: the `/` `?` mode prefixes, surfacing tabs/themes/files, and `⌘↵`
+  run-in-new-pane.
 - 2026-07-12 - **Live theming.** Switching the UI theme repaints every surface live
   (Hard rule 2). `Renderer::set_theme(name)` re-resolves the semantic tokens (the
   clear color + all quads read the theme each frame; text-layer fallback color
