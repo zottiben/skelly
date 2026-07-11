@@ -128,6 +128,12 @@ impl TextLayer {
         self.scale
     }
 
+    /// Update the fallback glyph color used for cells with no explicit color, when the
+    /// active theme changes.
+    pub(crate) fn set_default_fg(&mut self, fg: Srgb) {
+        self.default_fg = fg;
+    }
+
     /// Grow or shrink the pane-buffer pool to exactly `n` buffers, reusing existing
     /// ones. New buffers inherit the no-reflow policy (each grid row is one visual
     /// line - see the width note below).

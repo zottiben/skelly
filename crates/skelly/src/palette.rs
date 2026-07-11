@@ -41,6 +41,10 @@ pub(crate) enum Action {
     FocusUp,
     /// Move focus right.
     FocusRight,
+    /// Switch the UI theme to Ossein Dark.
+    ThemeDark,
+    /// Switch the UI theme to Ossein Light.
+    ThemeLight,
     /// Quit the application.
     Quit,
 }
@@ -91,6 +95,16 @@ pub(crate) const COMMANDS: &[Command] = &[
         label: "Focus pane right",
         hint: "opt L",
         action: Action::FocusRight,
+    },
+    Command {
+        label: "Theme: Ossein Dark",
+        hint: "",
+        action: Action::ThemeDark,
+    },
+    Command {
+        label: "Theme: Ossein Light",
+        hint: "",
+        action: Action::ThemeLight,
     },
     Command {
         label: "Quit skelly",
@@ -378,6 +392,17 @@ mod tests {
         }
         assert!(p.matches().is_empty());
         assert_eq!(p.selected_action(), None);
+    }
+
+    #[test]
+    fn theme_query_surfaces_both_theme_commands() {
+        let mut p = Palette::new();
+        p.open();
+        for c in "theme".chars() {
+            p.push_char(c);
+        }
+        let actions: Vec<Action> = p.matches().iter().map(|&i| COMMANDS[i].action).collect();
+        assert_eq!(actions, vec![Action::ThemeDark, Action::ThemeLight]);
     }
 
     #[test]

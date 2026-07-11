@@ -408,6 +408,23 @@ impl App {
         }
     }
 
+    /// Switch the active UI theme by name, live. Updates the config (the source of
+    /// truth, Hard rule 1), the resolved UI tokens, and the ANSI palette, then repaints
+    /// everything in the new theme (Hard rule 2). The ANSI palette stays a separate
+    /// concept from the UI tokens; both currently key off the one theme name.
+    fn apply_theme(&mut self, name: &str) {
+        if self.config.appearance.theme == name {
+            return;
+        }
+        name.clone_into(&mut self.config.appearance.theme);
+        self.theme = Theme::resolve(name);
+        self.ansi_palette = AnsiPalette::resolve(name);
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_theme(name);
+        }
+        self.request_redraw();
+    }
+
     /// Handle a key while the command palette is open: it captures all input (typing
     /// filters, arrows navigate, Enter runs, Esc closes). `⌘K` toggles it shut and
     /// `⌘Q` still quits.
@@ -463,6 +480,8 @@ impl App {
             Action::FocusDown => self.apply_pane_action(PaneAction::Focus(Dir::Down)),
             Action::FocusUp => self.apply_pane_action(PaneAction::Focus(Dir::Up)),
             Action::FocusRight => self.apply_pane_action(PaneAction::Focus(Dir::Right)),
+            Action::ThemeDark => self.apply_theme("ossein-dark"),
+            Action::ThemeLight => self.apply_theme("ossein-light"),
             Action::Quit => event_loop.exit(),
         }
     }

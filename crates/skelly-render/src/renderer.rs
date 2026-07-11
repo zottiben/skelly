@@ -163,6 +163,16 @@ impl Renderer {
         self.text.cell_metrics()
     }
 
+    /// Switch the active UI theme. Re-resolves the semantic tokens and updates the
+    /// text layers' fallback color; the next frame repaints every surface in the new
+    /// theme (the clear color and all quads read the theme per frame). AGENTS Hard
+    /// rule 2: switching theme repaints everything live.
+    pub fn set_theme(&mut self, name: &str) {
+        self.theme = Theme::resolve(name);
+        self.text.set_default_fg(self.theme.fg_primary);
+        self.overlay_text.set_default_fg(self.theme.fg_primary);
+    }
+
     /// Set the panes to display next frame. Each pane's grid is filled at its
     /// `origin` and clipped to its `rect`; with more than one pane a `border` divider
     /// is drawn around each and a `border.strong` ring around the focused one. Only

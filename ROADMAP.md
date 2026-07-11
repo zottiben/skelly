@@ -102,6 +102,13 @@ opportunistically rather than block M3 on, since the terminal already works. M3
     - [ ] Merge user `[keys]` overrides + the configurable `panes.leader` (tmux-style
       `ctrl+a`); fuzzy match with accent-highlighted characters; surface tabs /
       themes / files and the `/` `?` mode prefixes.
+  - [x] Live theming. `Renderer::set_theme` re-resolves the UI tokens and the binary
+    re-resolves the ANSI palette + updates `config.appearance.theme` (Hard rule 1),
+    then the next frame repaints every surface in the new theme (Hard rule 2). Driven
+    by the palette's "Theme: Ossein Dark / Light" commands; verified by rendering the
+    workspace in both themes. (Follow-up: a separate ANSI-scheme vs UI-theme config
+    key so the two are independently selectable per Hard rule 2; today one name drives
+    both, and there is no theme-file watch yet.)
 - [ ] **M4 - Signature features.** Per-repo git diff dock with hunk staging;
   session timeline with non-destructive rewind (shadow worktree).
 - [ ] **M5 - Hardening & release.** Edge/empty/error states, perf budgets,

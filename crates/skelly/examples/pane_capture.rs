@@ -31,9 +31,14 @@ fn main() {
         .unwrap_or_else(|| "skelly-panes.png".to_owned());
     let (width, height, scale) = (1040_u32, 640_u32, 2.0_f64);
 
-    // Use an installed Nerd Font so the configured-font path is exercised.
+    // Use an installed Nerd Font so the configured-font path is exercised. An optional
+    // second arg picks the theme (e.g. `ossein-light`), exercising live-theming tokens.
+    let theme = std::env::args()
+        .nth(2)
+        .unwrap_or_else(|| "ossein-dark".to_owned());
     let appearance = Appearance {
         font_family: "SauceCodePro Nerd Font Mono".to_owned(),
+        theme,
         ..Appearance::default()
     };
     let (cell_w, cell_h) = measure_cell(&appearance, scale);

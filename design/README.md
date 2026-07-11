@@ -47,6 +47,15 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-12 - **Live theming.** Switching the UI theme repaints every surface live
+  (Hard rule 2). `Renderer::set_theme(name)` re-resolves the semantic tokens (the
+  clear color + all quads read the theme each frame; text-layer fallback color
+  updated), and the binary re-resolves the ANSI palette + rewrites
+  `config.appearance.theme` (the source of truth, Hard rule 1). Surfaced as the
+  palette commands "Theme: Ossein Dark / Light". Open follow-up: the UI theme and the
+  ANSI color scheme are meant to be independently selectable (Hard rule 2), but the
+  config has a single `appearance.theme` today, so one name drives both; a separate
+  ANSI-scheme key (and live config-file watch) is a later slice.
 - 2026-07-12 - **Command palette (first slice).** `⌘K` opens a centered overlay over
   the live terminal (Hard rule 4), `Esc` closes; typing filters a built-in command
   set (case-insensitive substring for now), up/down navigates, Enter runs. The panel
