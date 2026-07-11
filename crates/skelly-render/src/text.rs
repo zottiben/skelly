@@ -31,6 +31,7 @@ pub struct TextLayer {
     atlas: TextAtlas,
     renderer: TextRenderer,
     buffer: Buffer,
+    family: String,
 }
 
 impl TextLayer {
@@ -57,11 +58,12 @@ impl TextLayer {
         let scale = scale_to_f32(scale_factor);
         let font_px = f32::from(appearance.font_size) * scale;
         let line_px = font_px * appearance.line_height;
+        let family = appearance.font_family.clone();
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_px, line_px));
         buffer.set_size(Some(dim_to_f32(width)), Some(dim_to_f32(height)));
         buffer.set_text(
             DEMO_TEXT,
-            &Attrs::new().family(Family::Name(&appearance.font_family)),
+            &Attrs::new().family(Family::Name(&family)),
             Shaping::Advanced,
             None,
         );
@@ -76,7 +78,16 @@ impl TextLayer {
             atlas,
             renderer,
             buffer,
+            family,
         }
+    }
+
+    /// Replace the displayed text (e.g. the live terminal grid snapshot) and
+    /// re-shape it in the configured cell font.
+    pub fn set_content(&mut self, text: &str) {
+        let attrs = Attrs::new().family(Family::Name(&self.family));
+        self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        self.buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
     /// Re-layout the text for a new target size.

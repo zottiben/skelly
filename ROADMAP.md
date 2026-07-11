@@ -12,18 +12,18 @@ ADRs (0001-0004) are ratified.
 - [x] **M0 - Foundation.** Workspace, quality gates, CI, docs, ADR log, and the
   `skelly-config` slice (schema + load + validate + tests), with a runnable binary
   that reports the resolved config. All gates green on macOS + Linux.
-- [~] **M1 - Walking skeleton** (in progress). Window opens -> spawns the login
-  shell in a PTY -> shell output paints in a GPU cell grid -> keystrokes reach the
-  shell -> clean quit. Single pane, one shell, ugly but real. Retires the hardest
-  integration risks (GPU surface, PTY plumbing, event loop, glyph upload).
+- [x] **M1 - Walking skeleton** (done). Window opens -> spawns the login shell in a
+  PTY -> shell output paints on the GPU -> keystrokes reach the shell -> clean quit.
+  Single pane, one shell, ugly but real. The hardest integration risks (GPU surface,
+  PTY plumbing, event loop, glyph upload) are retired.
   - [x] **M1a** - native window (`winit`) + `wgpu` surface clearing to the theme
     background; clean quit. GPU-surface + event-loop risk retired.
   - [x] **M1b** - render shaped text via `glyphon`/`cosmic-text` in the cell font +
     `fg.primary` token; reusable `TextLayer` + headless PNG capture. Text-rendering
     risk retired.
-  - [ ] **M1c** - spawn the PTY (`portable-pty`) + terminal core
-    (`alacritty_terminal`), pipe output through the parser into the grid, forward
-    keystrokes to the shell. Full walking skeleton.
+  - [x] **M1c** - PTY (`portable-pty`) + terminal core (`alacritty_terminal`): pipe
+    shell output through the parser into the grid, render it live, forward
+    keystrokes. Proven end-to-end with an e2e shell test + a session-capture PNG.
 - [ ] **M2 - Core terminal.** VT/ANSI correctness (vttest / esctest in CI),
   scrollback, selection + copy/paste, resize/reflow, font shaping + Nerd Font
   fallback, live theme-token resolution.

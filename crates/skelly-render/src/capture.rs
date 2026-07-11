@@ -1,0 +1,130 @@
+//! Headless offscreen rendering, for visual and (future) golden-image verification
+//! without a window or OS screen-recording permission. Exercises the same
+//! [`TextLayer`](crate::TextLayer) the windowed renderer uses.
+
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "capture: dimensions are small; u32<->usize casts are exact on 64-bit targets"
+)]
+
+use skelly_config::Appearance;
+
+use crate::text::TextLayer;
+
+/// Render `content` in `appearance`'s theme and cell font to an offscreen
+/// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
+/// padding). Blocks on GPU work.
+///
+/// # Panics
+/// Panics if no GPU adapter/device is available or the readback fails - this is a
+/// verification helper, not a shipping path.
+#[must_use]
+pub fn capture_rgba(
+    appearance: &Appearance,
+    width: u32,
+    height: u32,
+    scale: f64,
+    content: &str,
+) -> Vec<u8> {
+    pollster::block_on(capture_async(appearance, width, height, scale, content))
+}
+
+async fn capture_async(
+    appearance: &Appearance,
+    width: u32,
+    height: u32,
+    scale: f64,
+    content: &str,
+) -> Vec<u8> {
+    let instance = wgpu::Instance::default();
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await
+        .expect("no GPU adapter");
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("capture"),
+            ..Default::default()
+        })
+        .await
+        .expect("no GPU device");
+
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("capture-target"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let mut text = TextLayer::new(&device, &queue, format, width, height, scale, appearance);
+    text.set_content(content);
+    text.draw(&device, &queue, &view, width, height)
+        .expect("draw scene");
+
+    // Copy the texture into a readback buffer, respecting the 256-byte row align.
+    let bytes_per_pixel = 4_u32;
+    let unpadded = width * bytes_per_pixel;
+    let padded =
+        unpadded.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("capture-readback"),
+        size: u64::from(padded) * u64::from(height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("capture-copy"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &readback,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded),
+                rows_per_image: Some(height),
+            },
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    queue.submit(std::iter::once(encoder.finish()));
+
+    readback.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .expect("poll");
+    let mapped = readback
+        .slice(..)
+        .get_mapped_range()
+        .expect("map readback buffer");
+
+    let row = unpadded as usize;
+    let stride = padded as usize;
+    let mut rgba = Vec::with_capacity(row * height as usize);
+    for y in 0..height as usize {
+        let start = y * stride;
+        rgba.extend_from_slice(&mapped[start..start + row]);
+    }
+    drop(mapped);
+    readback.unmap();
+    rgba
+}

@@ -12,11 +12,15 @@ publish = false
 [lints]
 workspace = true
 
+[dev-dependencies]
+# session_capture example: render a live shell session to a PNG for verification.
+png = "0.17"
+
 [dependencies]
 skelly-config = { path = "../skelly-config" }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 winit = "0.30.13"
-raw-window-handle = "0.6.2"
 skelly-render = { version = "0.1.0", path = "../skelly-render" }
+skelly-term = { version = "0.1.0", path = "../skelly-term" }

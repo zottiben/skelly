@@ -130,6 +130,11 @@ impl Renderer {
         self.text.resize(width, height);
     }
 
+    /// Set the text to display next frame (e.g. the live terminal grid snapshot).
+    pub fn set_content(&mut self, text: &str) {
+        self.text.set_content(text);
+    }
+
     /// Acquire the next surface frame, paint it, and present.
     ///
     /// Recovers from a lost/outdated swapchain by reconfiguring and skipping the

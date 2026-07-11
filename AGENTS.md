@@ -8,11 +8,13 @@ of scope for v0.1).
 **Status:** design-driven; M0 foundation landed. The Cargo workspace, quality
 gates, CI, docs, and ADR log exist, and `skelly-config` is implemented (schema +
 load + validate + tests) with a runnable binary that reports the resolved config.
-The M1 walking skeleton is in progress: M1a (native `winit` window + `wgpu` surface
-clearing to the theme) and M1b (shaped text via `glyphon`/`cosmic-text`, drawn by a
-reusable `TextLayer`; headless PNG `capture` example) have landed. Next is M1c (PTY
-via `portable-pty` + terminal core `alacritty_terminal`). The build target is native
-Rust, not the mockup HTML. See `ROADMAP.md`.
+The **M1 walking skeleton is complete**: a real shell runs in a PTY (`portable-pty`),
+its output is parsed by `alacritty_terminal` (`skelly-term`) and rendered live on the
+GPU (`skelly-render`, `glyphon`/`cosmic-text`), with keystrokes forwarded. Verified
+by an e2e shell test + a headless `session_capture` PNG. Next is M2 (VT/ANSI
+correctness, scrollback, colors, and the real fixed-metric cell grid - M1 renders the
+grid as reflowed text, not exact cells yet). The build target is native Rust, not the
+mockup HTML. See `ROADMAP.md`.
 
 **Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
 workspace. Foundation crates are *proposed* in ADR-0001..0004 (terminal core

@@ -9,6 +9,13 @@ Conventional Commits - do not hand-edit it.
 
 ### Added
 
+- M1c (walking skeleton complete): spawn the login shell in a PTY (`portable-pty`)
+  and parse its output with `alacritty_terminal` into a grid (`skelly-term`), paint
+  the live grid on the GPU, and forward keystrokes to the shell. The reader thread
+  wakes the event loop via an `EventLoopProxy` so repaints happen only on new
+  output. Verified by an e2e test (a real shell executes a command, output reaches
+  the grid) and a `session_capture` example that renders a real shell session to a
+  PNG. Promoted the headless offscreen render into a reusable `capture_rgba`.
 - M1b (walking skeleton, text): render shaped text via `glyphon`/`cosmic-text` in
   the configured cell font and the `fg.primary` token. Extracted a reusable
   `TextLayer` (clear + text into any target) shared by the windowed renderer and a
