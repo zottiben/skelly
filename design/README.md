@@ -25,7 +25,8 @@ with the decision + date.
 
 - [ ] **Timeline AI-actions contract** - how the session timeline receives AI
   actions. Needs an explicit integration hook/contract, not shell heuristics.
-- [ ] **Windowing** - single-window, or multiple OS windows?
+- [x] **Windowing** - single OS window for v0.1 via `winit`; multi-window is a
+  later additive decision. _Resolved 2026-07-11 (ADR-0004)._
 - [ ] **Rewind + edit** - when viewing a past state, fork a branch on edit, or
   block edits while detached?
 - [ ] **Persist scope** - restore layout only, or attempt to re-run processes?
@@ -33,13 +34,19 @@ with the decision + date.
 
 Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 
-- [ ] **GPU cell renderer** crate/approach (Alacritty/Ghostty-style vs other)
-- [ ] **PTY / shell I/O** crate
-- [ ] **Font shaping + Nerd Font fallback** stack
+- [x] **GPU cell renderer** - `wgpu` + `cosmic-text`/`glyphon`. _Resolved
+  2026-07-11 (ADR-0003)._
+- [x] **PTY / shell I/O** - `portable-pty`. _Resolved 2026-07-11 (ADR-0002)._
+- [x] **Font shaping + Nerd Font fallback** - `cosmic-text` (shaping + fallback +
+  atlas). _Resolved 2026-07-11 (ADR-0003)._
+- [x] **Terminal core** - `alacritty_terminal` behind a Skelly-owned trait.
+  _Resolved 2026-07-11 (ADR-0001)._
 
 ## Decision log
 
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
-_(none yet)_
+- 2026-07-11 - Architecture decisions are recorded as ADRs in `docs/adr/`
+  (ADR-0000). Foundation-stack choices are proposed in ADR-0001..0004, pending
+  maintainer ratification before the M1 walking skeleton lands them.

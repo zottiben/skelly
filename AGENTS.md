@@ -5,16 +5,19 @@ design, for vim / neovim / LazyVim development: multi-pane splits, per-repo git
 diff, and a rewindable session timeline. Targets macOS and Linux (Windows is out
 of scope for v0.1).
 
-**Status:** greenfield / design-driven. There is no source code yet - the repo is
-a design spec plus this knowledge pack. The build target is native Rust, not the
-mockup HTML.
+**Status:** design-driven; M0 foundation landed. The Cargo workspace, quality
+gates, CI, docs, and ADR log exist, and `skelly-config` is implemented (schema +
+load + validate + tests) with a runnable binary that reports the resolved config.
+Next is the M1 walking skeleton (window + PTY + cell renderer). The build target is
+native Rust, not the mockup HTML. See `ROADMAP.md`.
 
-**Stack:** Rust (stable toolchain, edition 2021+), cargo. Concrete crates are not
-chosen yet - see Hard rule 6 and `design/README.md` for the open foundation
-decisions (GPU cell renderer, PTY layer, font shaping/fallback).
+**Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
+workspace. Foundation crates are *proposed* in ADR-0001..0004 (terminal core
+`alacritty_terminal`, PTY `portable-pty`, renderer `wgpu` + `cosmic-text`,
+windowing `winit`) - pending ratification, landed in M1. See `docs/adr/`.
 
-**Layout** (planned Cargo workspace - not scaffolded yet; keep crate boundaries
-aligned with the design guide's modules)
+**Layout** (Cargo workspace - scaffolded; keep crate boundaries aligned with the
+design guide's modules)
 - `Cargo.toml` - `[workspace]` root
 - `crates/skelly/` - the binary: window, sidebar, pane tree, command palette, wiring
 - `crates/skelly-render/` - GPU cell-grid renderer, fonts, theme token resolution
@@ -23,8 +26,7 @@ aligned with the design guide's modules)
 - `crates/skelly-config/` - `config.toml` load/watch/schema (the source of truth; see Hard rule 1)
 - `design/` - the binding design spec (see Design below)
 
-**Commands** (from repo root - the standard cargo toolchain; the repo is not yet
-scaffolded, so these apply once `cargo init` has run)
+**Commands** (from repo root - the standard cargo toolchain)
 - Build: `cargo build` (release: `cargo build --release`)
 - Lint: `cargo clippy --all-targets --all-features -- -D warnings`
 - Format: `cargo fmt` (rustfmt; also auto-runs on save via `.claude/hooks/format-on-edit.sh`)
