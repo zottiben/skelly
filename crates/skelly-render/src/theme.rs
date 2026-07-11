@@ -35,6 +35,24 @@ pub struct Srgb {
     pub b: u8,
 }
 
+impl Srgb {
+    /// Convert to linear RGBA (alpha 1.0) for a GPU vertex color on an sRGB surface.
+    #[must_use]
+    pub(crate) fn to_linear(self) -> [f32; 4] {
+        [lin(self.r), lin(self.g), lin(self.b), 1.0]
+    }
+}
+
+/// Convert one 8-bit sRGB channel to a linear `f32` (0.0..=1.0).
+fn lin(channel: u8) -> f32 {
+    let c = f32::from(channel) / 255.0;
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
 /// The active UI theme's resolved surface tokens.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Theme {
@@ -42,6 +60,8 @@ pub struct Theme {
     pub bg_base: Rgba,
     /// `fg.primary` - primary UI/terminal text (sRGB, for glyph rendering).
     pub fg_primary: Srgb,
+    /// `accent` - brand / cursor color (sRGB).
+    pub accent: Srgb,
 }
 
 impl Theme {
@@ -50,7 +70,7 @@ impl Theme {
     #[must_use]
     pub fn resolve(name: &str) -> Self {
         match name {
-            // Ossein Light: bg.base #EFF1F5, fg.primary #4C4F69.
+            // Ossein Light: bg.base #EFF1F5, fg.primary #4C4F69, accent #8839EF.
             "ossein-light" => Self {
                 bg_base: srgb_hex(0xEF, 0xF1, 0xF5),
                 fg_primary: Srgb {
@@ -58,14 +78,24 @@ impl Theme {
                     g: 0x4F,
                     b: 0x69,
                 },
+                accent: Srgb {
+                    r: 0x88,
+                    g: 0x39,
+                    b: 0xEF,
+                },
             },
-            // Ossein Dark (default): bg.base #181825, fg.primary #CDD6F4.
+            // Ossein Dark (default): bg.base #181825, fg.primary #CDD6F4, accent #BD93F9.
             _ => Self {
                 bg_base: srgb_hex(0x18, 0x18, 0x25),
                 fg_primary: Srgb {
                     r: 0xCD,
                     g: 0xD6,
                     b: 0xF4,
+                },
+                accent: Srgb {
+                    r: 0xBD,
+                    g: 0x93,
+                    b: 0xF9,
                 },
             },
         }

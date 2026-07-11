@@ -39,13 +39,16 @@ pub enum CellColor {
     Rgb(u8, u8, u8),
 }
 
-/// One grid cell: its character and foreground color. (Backgrounds arrive in M2b.)
+/// One grid cell: its character, foreground, and background color.
 #[derive(Clone, Copy, Debug)]
 pub struct TermCell {
     /// The cell's character (a space if empty).
     pub c: char,
     /// The cell's foreground color.
     pub fg: CellColor,
+    /// The cell's background color ([`CellColor::Default`] means the terminal's
+    /// default background - the renderer draws no fill for those).
+    pub bg: CellColor,
 }
 
 /// A live terminal: a shell in a PTY, parsed into a cell grid.
@@ -191,11 +194,23 @@ impl Terminal {
                 cells.push(TermCell {
                     c: cell.c,
                     fg: map_color(cell.fg),
+                    bg: map_color(cell.bg),
                 });
             }
             out.push(cells);
         }
         out
+    }
+
+    /// The cursor's position as `(column, row)` in the visible grid.
+    ///
+    /// # Panics
+    /// Panics if the terminal mutex is poisoned.
+    #[must_use]
+    pub fn cursor(&self) -> (usize, usize) {
+        let term = self.term.lock().expect("terminal mutex poisoned");
+        let point = term.grid().cursor.point;
+        (point.column.0, usize::try_from(point.line.0).unwrap_or(0))
     }
 }
 

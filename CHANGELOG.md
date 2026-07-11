@@ -9,6 +9,11 @@ Conventional Commits - do not hand-edit it.
 
 ### Added
 
+- M2b (core terminal, backgrounds + cursor): render per-cell background colors and
+  a cursor block via a new instanced colored-quad `wgpu` pipeline, drawn beneath the
+  text and aligned to the measured monospace cell grid (two passes: quads, then
+  glyphs). `skelly-term` now exposes per-cell `bg` and the cursor position; a theme
+  `accent` color drives the cursor.
 - M2a (core terminal, colors): render per-cell foreground colors. `skelly-term`
   exposes a colored cell snapshot (`cells()` with a palette-independent `CellColor`);
   `skelly-render` gains an `AnsiPalette` (Ossein Dark/Light 16-color + 256-color

@@ -7,7 +7,7 @@
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
-use skelly_term::Terminal;
+use skelly_term::{CellColor, Terminal};
 
 #[test]
 fn shell_executes_a_command_and_output_reaches_the_grid() {
@@ -28,6 +28,36 @@ fn shell_executes_a_command_and_output_reaches_the_grid() {
             Instant::now() < deadline,
             "marker {marker:?} never appeared; grid was:\n{}",
             term.snapshot().join("\n")
+        );
+        sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn background_color_escape_reaches_the_grid() {
+    let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
+
+    // SGR 44 sets a blue background (ANSI index 4). The split quotes ensure the
+    // marker only appears in the *executed* output row, not the echoed input.
+    term.write(b"printf '\\033[44mBG''MARK\\033[0m\\n'\n");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let cells = term.cells();
+        let output_row = cells.iter().find(|row| {
+            row.iter()
+                .map(|cell| cell.c)
+                .collect::<String>()
+                .contains("BGMARK")
+        });
+        if let Some(row) = output_row {
+            if row.iter().any(|cell| cell.bg == CellColor::Indexed(4)) {
+                return; // the blue background parsed onto the output cells
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "blue background never reached the grid"
         );
         sleep(Duration::from_millis(50));
     }

@@ -1,18 +1,21 @@
 //! The GPU renderer.
 //!
-//! M1b: owns the `wgpu` device, queue, and surface, and drives a [`TextLayer`] to
-//! paint each frame (clear to the theme background + shaped text). Kept decoupled
-//! from the windowing crate - it accepts anything with a raw window handle, so
-//! `skelly` never leaks `winit` types into here and the backend stays swappable
-//! (ADR-0003).
+//! Owns the `wgpu` device, queue, and surface, and paints each frame in two passes:
+//! a background/cursor quad pass (clears + fills cells) then a text pass on top.
+//! Kept decoupled from the windowing crate - it accepts anything with a raw window
+//! handle, so `skelly` never leaks `winit` types into here and the backend stays
+//! swappable (ADR-0003).
 
 use std::sync::Arc;
 
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use skelly_config::Appearance;
 
+use crate::cells::QuadLayer;
 use crate::error::RenderError;
 use crate::text::TextLayer;
+use crate::theme::Theme;
+use crate::GridCell;
 
 /// Owns the GPU device and surface and presents painted frames.
 pub struct Renderer {
@@ -20,6 +23,8 @@ pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    theme: Theme,
+    quads: QuadLayer,
     text: TextLayer,
 }
 
@@ -99,6 +104,7 @@ impl Renderer {
         }
         surface.configure(&device, &config);
 
+        let quads = QuadLayer::new(&device, config.format);
         let text = TextLayer::new(
             &device,
             &queue,
@@ -114,6 +120,8 @@ impl Renderer {
             device,
             queue,
             config,
+            theme: Theme::resolve(&appearance.theme),
+            quads,
             text,
         }
     }
@@ -130,14 +138,19 @@ impl Renderer {
         self.text.resize(width, height);
     }
 
-    /// Set the text to display next frame (e.g. the live terminal grid snapshot).
-    pub fn set_content(&mut self, text: &str) {
-        self.text.set_content(text);
-    }
-
-    /// Set a colored grid to display next frame: each cell is `(char, fg)`.
-    pub fn set_content_rgb(&mut self, rows: &[Vec<(char, crate::theme::Srgb)>]) {
+    /// Set the colored grid to display next frame, with the cursor at `cursor`
+    /// `(column, row)`. Lays out the glyphs and builds the background + cursor quads.
+    pub fn set_grid(&mut self, rows: &[Vec<GridCell>], cursor: (usize, usize)) {
         self.text.set_cells(rows);
+        let (cell_w, cell_h, pad) = self.text.cell_metrics();
+        let quads = crate::cells::grid_quads(cell_w, cell_h, pad, rows, cursor, self.theme.accent);
+        self.quads.set(
+            &self.device,
+            &self.queue,
+            self.config.width,
+            self.config.height,
+            &quads,
+        );
     }
 
     /// Acquire the next surface frame, paint it, and present.
@@ -166,6 +179,20 @@ impl Renderer {
         let view = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let bg = self.theme.bg_base;
+        // Pass 1: clear to the background and fill cell backgrounds + cursor.
+        self.quads.draw(
+            &self.device,
+            &self.queue,
+            &view,
+            wgpu::Color {
+                r: bg.r,
+                g: bg.g,
+                b: bg.b,
+                a: bg.a,
+            },
+        );
+        // Pass 2: draw the glyphs on top.
         self.text.draw(
             &self.device,
             &self.queue,

@@ -18,6 +18,7 @@ workspace = true
 png = "0.17"
 
 [dependencies]
+bytemuck = { version = "1.25.1", features = ["derive"] }
 glyphon = "0.12.0"
 pollster = "1.0.1"
 raw-window-handle = "0.6"

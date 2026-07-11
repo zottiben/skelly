@@ -2043,6 +2043,7 @@ dependencies = [
 name = "skelly-render"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "glyphon",
  "png",
  "pollster",

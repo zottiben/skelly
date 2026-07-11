@@ -9,8 +9,10 @@
 
 use skelly_config::Appearance;
 
+use crate::cells::{grid_quads, Quad, QuadLayer};
 use crate::text::TextLayer;
-use crate::theme::Srgb;
+use crate::theme::{Rgba, Theme};
+use crate::GridCell;
 
 /// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
@@ -27,12 +29,22 @@ pub fn capture_rgba(
     scale: f64,
     content: &str,
 ) -> Vec<u8> {
-    pollster::block_on(capture_async(appearance, width, height, scale, |text| {
-        text.set_content(content);
-    }))
+    let clear = color(Theme::resolve(&appearance.theme).bg_base);
+    pollster::block_on(capture_async(
+        appearance,
+        width,
+        height,
+        scale,
+        clear,
+        |text| {
+            text.set_content(content);
+            Vec::new()
+        },
+    ))
 }
 
-/// Like [`capture_rgba`], but renders a colored grid (each cell is `(char, fg)`).
+/// Like [`capture_rgba`], but renders a colored grid with per-cell backgrounds and a
+/// cursor at `cursor` `(column, row)`.
 ///
 /// # Panics
 /// Panics if no GPU adapter/device is available or the readback fails.
@@ -42,11 +54,31 @@ pub fn capture_cells_rgba(
     width: u32,
     height: u32,
     scale: f64,
-    rows: &[Vec<(char, Srgb)>],
+    rows: &[Vec<GridCell>],
+    cursor: (usize, usize),
 ) -> Vec<u8> {
-    pollster::block_on(capture_async(appearance, width, height, scale, |text| {
-        text.set_cells(rows);
-    }))
+    let theme = Theme::resolve(&appearance.theme);
+    pollster::block_on(capture_async(
+        appearance,
+        width,
+        height,
+        scale,
+        color(theme.bg_base),
+        |text| {
+            text.set_cells(rows);
+            let (cell_w, cell_h, pad) = text.cell_metrics();
+            grid_quads(cell_w, cell_h, pad, rows, cursor, theme.accent)
+        },
+    ))
+}
+
+fn color(c: Rgba) -> wgpu::Color {
+    wgpu::Color {
+        r: c.r,
+        g: c.g,
+        b: c.b,
+        a: c.a,
+    }
 }
 
 async fn capture_async<F>(
@@ -54,10 +86,11 @@ async fn capture_async<F>(
     width: u32,
     height: u32,
     scale: f64,
-    apply: F,
+    clear: wgpu::Color,
+    setup: F,
 ) -> Vec<u8>
 where
-    F: FnOnce(&mut TextLayer),
+    F: FnOnce(&mut TextLayer) -> Vec<Quad>,
 {
     let instance = wgpu::Instance::default();
     let adapter = instance
@@ -89,10 +122,13 @@ where
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+    let mut quad_layer = QuadLayer::new(&device, format);
     let mut text = TextLayer::new(&device, &queue, format, width, height, scale, appearance);
-    apply(&mut text);
+    let quads = setup(&mut text);
+    quad_layer.set(&device, &queue, width, height, &quads);
+    quad_layer.draw(&device, &queue, &view, clear);
     text.draw(&device, &queue, &view, width, height)
-        .expect("draw scene");
+        .expect("draw text");
 
     // Copy the texture into a readback buffer, respecting the 256-byte row align.
     let bytes_per_pixel = 4_u32;

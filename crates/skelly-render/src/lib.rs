@@ -18,6 +18,7 @@
 
 mod ansi;
 mod capture;
+mod cells;
 mod error;
 mod renderer;
 mod text;
@@ -29,3 +30,14 @@ pub use error::RenderError;
 pub use renderer::Renderer;
 pub use text::TextLayer;
 pub use theme::{Rgba, Srgb, Theme};
+
+/// One cell to render: its character, foreground, and optional background fill.
+#[derive(Clone, Copy, Debug)]
+pub struct GridCell {
+    /// The cell's character.
+    pub c: char,
+    /// Foreground (glyph) color.
+    pub fg: Srgb,
+    /// Background fill; `None` means the terminal's default background (no fill).
+    pub bg: Option<Srgb>,
+}

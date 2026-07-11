@@ -11,12 +11,13 @@ load + validate + tests) with a runnable binary that reports the resolved config
 The **M1 walking skeleton is complete**: a real shell runs in a PTY (`portable-pty`),
 its output is parsed by `alacritty_terminal` (`skelly-term`) and rendered live on the
 GPU (`skelly-render`, `glyphon`/`cosmic-text`), with keystrokes forwarded. Verified
-by an e2e shell test + a headless `session_capture` PNG. M2 (core terminal) is in progress: M2a landed per-cell foreground colors (an
-`AnsiPalette` in `skelly-render`, kept separate from UI tokens) + monospace
-alignment. Next: M2b per-cell backgrounds + cursor, then M2c the real fixed-metric
-cell renderer (M1/M2a still render the grid as reflowed monospace text, not exact
-cells), then M2d VT/ANSI conformance + scrollback + selection. The build target is
-native Rust, not the mockup HTML. See `ROADMAP.md`.
+by an e2e shell test + a headless `session_capture` PNG. M2 (core terminal) is in progress: M2a (per-cell foreground colors via an
+`AnsiPalette`, kept separate from UI tokens) and M2b (per-cell backgrounds + cursor
+via an instanced colored-quad `wgpu` pipeline, two passes: quads then text) have
+landed. Next: M2c the real fixed-metric cell renderer honoring the configured font
+(M1/M2a/M2b still render the grid as reflowed monospace text, not exact cells), then
+M2d VT/ANSI conformance + scrollback + selection. The build target is native Rust,
+not the mockup HTML. See `ROADMAP.md`.
 
 **Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
 workspace. Foundation crates are *proposed* in ADR-0001..0004 (terminal core

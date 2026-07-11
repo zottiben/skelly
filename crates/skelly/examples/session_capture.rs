@@ -6,7 +6,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use skelly_config::Appearance;
-use skelly_render::{AnsiPalette, Srgb};
+use skelly_render::{AnsiPalette, GridCell, Srgb};
 use skelly_term::{CellColor, Terminal};
 
 fn main() {
@@ -24,10 +24,13 @@ fn main() {
     });
     sleep(Duration::from_millis(400));
 
-    // `ls -G` colorizes to a tty (the PTY is one), so the output shows real ANSI
-    // colors. The adjacent quotes concatenate only when the shell *executes* the
-    // command, so the marker appears in the output but not the echoed input.
-    term.write(b"printf 'COLORS''_LIVE\\n'; ls -G -1\n");
+    // Emit explicit ANSI backgrounds (blue/green/red) so the capture shows per-cell
+    // backgrounds; the cursor lands at the next prompt (in view). The adjacent
+    // quotes concatenate only when the shell *executes* the command, so the marker
+    // appears in the output but not the echoed input.
+    term.write(
+        b"clear; printf '\\033[44m blue \\033[0m \\033[42m green \\033[0m \\033[41m red \\033[0m COLORS''_LIVE\\n'\n",
+    );
     wait_until(&term, Duration::from_secs(10), |t| {
         snapshot_has(t, "COLORS_LIVE")
     });
@@ -41,16 +44,21 @@ fn main() {
 
     let appearance = Appearance::default();
     let palette = AnsiPalette::resolve(&appearance.theme);
-    let rows: Vec<Vec<(char, Srgb)>> = term
+    let rows: Vec<Vec<GridCell>> = term
         .cells()
         .iter()
         .map(|row| {
             row.iter()
-                .map(|cell| (cell.c, resolve_fg(cell.fg, &palette)))
+                .map(|cell| GridCell {
+                    c: cell.c,
+                    fg: resolve_fg(cell.fg, &palette),
+                    bg: resolve_bg(cell.bg, &palette),
+                })
                 .collect()
         })
         .collect();
-    let rgba = skelly_render::capture_cells_rgba(&appearance, width, height, 2.0, &rows);
+    let rgba =
+        skelly_render::capture_cells_rgba(&appearance, width, height, 2.0, &rows, term.cursor());
 
     let file = std::fs::File::create(&path).expect("create png");
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
@@ -72,6 +80,14 @@ fn wait_until<F: Fn(&Terminal) -> bool>(term: &Terminal, timeout: Duration, read
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline && !ready(term) {
         sleep(Duration::from_millis(50));
+    }
+}
+
+fn resolve_bg(color: CellColor, palette: &AnsiPalette) -> Option<Srgb> {
+    match color {
+        CellColor::Default => None,
+        CellColor::Indexed(index) => Some(palette.indexed(index)),
+        CellColor::Rgb(r, g, b) => Some(Srgb { r, g, b }),
     }
 }
 
