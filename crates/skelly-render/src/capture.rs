@@ -10,11 +10,11 @@
 use skelly_config::Appearance;
 
 use crate::cells::{
-    grid_quads, overlay_quads as build_overlay_quads, push_outline, Quad, QuadLayer,
+    grid_quads, overlay_quads as build_overlay_quads, push_outline, sidebar_quads, Quad, QuadLayer,
 };
 use crate::text::{measure_cell, PaneTextInput, TextLayer};
 use crate::theme::{Rgba, Theme};
-use crate::{GridCell, OverlayView, PxRect};
+use crate::{GridCell, OverlayView, PxRect, SidebarView};
 
 /// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
@@ -42,7 +42,7 @@ pub fn capture_rgba(
             text.set_content(content);
             Vec::new()
         },
-        None,
+        Vec::new(),
     ))
 }
 
@@ -81,7 +81,7 @@ pub fn capture_cells_rgba(
                 selection,
             )
         },
-        None,
+        Vec::new(),
     ))
 }
 
@@ -98,6 +98,19 @@ pub struct CapturePane {
     pub cursor: (usize, usize),
     /// Whether this is the focused pane (accent ring + drawn cursor).
     pub focused: bool,
+}
+
+/// The left sidebar for [`capture_panes_rgba`], mirroring
+/// [`SidebarView`](crate::SidebarView) but owning its rows.
+pub struct CaptureSidebar {
+    /// The sidebar rectangle (`x = 0`, full height), physical px.
+    pub panel: PxRect,
+    /// Pixel position of the text grid's cell `(0, 0)` top-left.
+    pub text_origin: (f32, f32),
+    /// The sidebar text as a monospace grid (UI-token colored).
+    pub rows: Vec<Vec<GridCell>>,
+    /// Grid row of the active tab to highlight, if any.
+    pub active_row: Option<usize>,
 }
 
 /// A command-palette overlay for [`capture_panes_rgba`], mirroring
@@ -135,8 +148,25 @@ pub fn capture_panes_rgba(
     scale: f64,
     panes: &[CapturePane],
     overlay: Option<&CaptureOverlay>,
+    sidebar: Option<&CaptureSidebar>,
 ) -> Vec<u8> {
     let theme = Theme::resolve(&appearance.theme);
+    let (cell_w, cell_h) = measure_cell(appearance, scale);
+    let sidebar_scene = sidebar.map(|sb| {
+        let view = SidebarView {
+            panel: sb.panel,
+            text_origin: sb.text_origin,
+            rows: &sb.rows,
+            active_row: sb.active_row,
+        };
+        SidebarScene {
+            quads: sidebar_quads(&view, &theme, cell_w, cell_h, scale as f32),
+            rows: &sb.rows,
+            left: sb.text_origin.0,
+            top: sb.text_origin.1,
+            clip: (sb.panel.x, sb.panel.y, sb.panel.w, sb.panel.h),
+        }
+    });
     let overlay_scene = overlay.map(|ov| {
         let view = OverlayView {
             panel: ov.panel,
@@ -145,7 +175,6 @@ pub fn capture_panes_rgba(
             selected_row: ov.selected_row,
             caret: ov.caret,
         };
-        let (cell_w, cell_h) = measure_cell(appearance, scale);
         OverlayScene {
             quads: build_overlay_quads(&view, &theme, cell_w, cell_h, scale as f32),
             rows: &ov.rows,
@@ -211,7 +240,11 @@ pub fn capture_panes_rgba(
             text.set_panes(&inputs);
             quads
         },
-        overlay_scene,
+        // Sidebar first (drawn beneath), then the overlay on top.
+        [sidebar_scene, overlay_scene]
+            .into_iter()
+            .flatten()
+            .collect(),
     ))
 }
 
@@ -224,15 +257,20 @@ fn color(c: Rgba) -> wgpu::Color {
     }
 }
 
-/// A prepared overlay to draw over the terminal in the headless capture, mirroring
-/// the windowed renderer's passes 3-4.
-struct OverlayScene<'a> {
+/// A prepared chrome layer (sidebar or overlay) to draw over the terminal in the
+/// headless capture, mirroring one of the windowed renderer's load-pass pairs.
+struct Scene<'a> {
     quads: Vec<Quad>,
     rows: &'a [Vec<GridCell>],
     left: f32,
     top: f32,
     clip: (f32, f32, f32, f32),
 }
+
+/// The sidebar chrome scene (passes 3-4 in the windowed renderer).
+type SidebarScene<'a> = Scene<'a>;
+/// The command-palette overlay scene (passes 5-6).
+type OverlayScene<'a> = Scene<'a>;
 
 async fn capture_async<F>(
     appearance: &Appearance,
@@ -241,7 +279,7 @@ async fn capture_async<F>(
     scale: f64,
     clear: wgpu::Color,
     setup: F,
-    overlay: Option<OverlayScene<'_>>,
+    chrome: Vec<Scene<'_>>,
 ) -> Vec<u8>
 where
     F: FnOnce(&mut TextLayer) -> Vec<Quad>,
@@ -284,22 +322,23 @@ where
     text.draw(&device, &queue, &view, width, height)
         .expect("draw text");
 
-    // Passes 3-4: the overlay, loaded over the terminal (as `Renderer::render` does).
-    if let Some(scene) = overlay {
-        let mut overlay_quad_layer = QuadLayer::new(&device, format);
-        overlay_quad_layer.set(&device, &queue, width, height, &scene.quads);
-        overlay_quad_layer.draw(&device, &queue, &view, None);
-        let mut overlay_text =
+    // The chrome load-pass pairs, in the windowed renderer's order: the sidebar
+    // (passes 3-4) beneath the overlay (passes 5-6). Each loads over the terminal.
+    for scene in chrome {
+        let mut chrome_quads = QuadLayer::new(&device, format);
+        chrome_quads.set(&device, &queue, width, height, &scene.quads);
+        chrome_quads.draw(&device, &queue, &view, None);
+        let mut chrome_text =
             TextLayer::new(&device, &queue, format, width, height, scale, appearance);
-        overlay_text.set_panes(&[PaneTextInput {
+        chrome_text.set_panes(&[PaneTextInput {
             rows: scene.rows,
             left: scene.left,
             top: scene.top,
             clip: scene.clip,
         }]);
-        overlay_text
+        chrome_text
             .draw(&device, &queue, &view, width, height)
-            .expect("draw overlay text");
+            .expect("draw chrome text");
     }
 
     read_texture(&device, &queue, &texture, width, height)

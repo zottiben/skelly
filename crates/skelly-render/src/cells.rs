@@ -158,6 +158,49 @@ pub(crate) fn overlay_quads(
     quads
 }
 
+/// Build the decorative quads for the left sidebar: the active tab's `accent.subtle`
+/// fill + a 2px `accent` bar on its left edge, and a `border` divider down the right
+/// edge separating the sidebar from the pane area. The sidebar shares the app's
+/// `bg.base` (already the clear color), so there is no panel fill. Shared by the
+/// windowed [`Renderer`](crate::Renderer) and the headless capture.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the active-row index into a short tab list is exact as f32"
+)]
+pub(crate) fn sidebar_quads(
+    view: &crate::SidebarView,
+    theme: &crate::theme::Theme,
+    _cell_w: f32,
+    cell_h: f32,
+    scale: f32,
+) -> Vec<Quad> {
+    let panel = view.panel;
+    let stroke = scale.max(1.0);
+    let mut quads = Vec::new();
+    if let Some(row) = view.active_row {
+        let y = view.text_origin.1 + row as f32 * cell_h;
+        let mut subtle = theme.accent.to_linear();
+        subtle[3] = 0.16;
+        quads.push(Quad::new(panel.x, y, panel.w, cell_h, subtle));
+        quads.push(Quad::new(
+            panel.x,
+            y,
+            (2.0 * scale).max(1.0),
+            cell_h,
+            theme.accent.to_linear(),
+        ));
+    }
+    // The divider on the sidebar's right edge (drawn last, over the active fill).
+    quads.push(Quad::new(
+        panel.x + panel.w - stroke,
+        panel.y,
+        stroke,
+        panel.h,
+        theme.border.to_linear(),
+    ));
+    quads
+}
+
 /// Append a rectangular outline (four `thickness`-px bars) around the pixel rect
 /// `(x, y, w, h)` in linear `color`, drawn *inside* the rect's edges so it never
 /// escapes the pane. Used for the per-pane divider and the focused pane's ring.

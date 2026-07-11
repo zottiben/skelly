@@ -1,7 +1,8 @@
 //! Headless proof of the M3 pane workspace: build a real two-pane split with the
 //! `skelly-pane` tree, spawn a live shell in each pane, and render the tiled result
-//! (dividers, focused-pane ring, and a cursor only in the focused pane) to a PNG,
-//! with no window or screen-recording needed.
+//! (the left sidebar / tab list, pane dividers, the focused-pane ring, and a cursor
+//! only in the focused pane, with a command palette on top) to a PNG, with no window
+//! or screen-recording needed.
 //! Run: `cargo run -p skelly --example pane_capture -- panes.png`.
 #![allow(
     clippy::cast_precision_loss,
@@ -16,7 +17,8 @@ use std::time::{Duration, Instant};
 use skelly_config::Appearance;
 use skelly_pane::{Dir, PaneTree, Rect};
 use skelly_render::{
-    measure_cell, AnsiPalette, CaptureOverlay, CapturePane, GridCell, PxRect, Srgb, Theme,
+    measure_cell, AnsiPalette, CaptureOverlay, CapturePane, CaptureSidebar, GridCell, PxRect, Srgb,
+    Theme,
 };
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 
@@ -24,12 +26,16 @@ use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 const WINDOW_PAD: f32 = 12.0;
 /// Logical inset inside each pane - mirrors the binary's `PANE_INSET`.
 const PANE_INSET: f32 = 6.0;
+/// Logical sidebar width - mirrors the config default (`[sidebar] width = 240`).
+const SIDEBAR_WIDTH: f32 = 240.0;
+/// Logical inset of the sidebar text - mirrors the binary's `SIDEBAR_PAD`.
+const SIDEBAR_PAD: f32 = 12.0;
 
 fn main() {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "skelly-panes.png".to_owned());
-    let (width, height, scale) = (1040_u32, 640_u32, 2.0_f64);
+    let (width, height, scale) = (1360_u32, 680_u32, 2.0_f64);
 
     // Use an installed Nerd Font so the configured-font path is exercised. An optional
     // second arg picks the theme (e.g. `ossein-light`), exercising live-theming tokens.
@@ -45,10 +51,12 @@ fn main() {
     let sc = scale as f32;
     let pad = WINDOW_PAD * sc;
     let inset = PANE_INSET * sc;
+    // The pane viewport starts to the right of the sidebar, as the binary insets it.
+    let sidebar_w = SIDEBAR_WIDTH * sc;
     let viewport = Rect::new(
+        sidebar_w + pad,
         pad,
-        pad,
-        width as f32 - 2.0 * pad,
+        width as f32 - sidebar_w - 2.0 * pad,
         height as f32 - 2.0 * pad,
     );
 
@@ -113,9 +121,10 @@ fn main() {
         });
     }
 
-    // A command-palette overlay over the panes, to verify the overlay compositing
-    // (opaque panel, border, selected-row highlight, caret, clipped text).
+    // The left sidebar (a two-tab list, tab 1 active) + a command-palette overlay over
+    // the panes, verifying the sidebar chrome and the overlay compositing together.
     let theme = Theme::resolve(&appearance.theme);
+    let sidebar = sidebar_panel(height, cell_w, sidebar_w, sc, &theme);
     let overlay = palette_overlay(width, height, cell_w, cell_h, sc, &theme);
     let rgba = skelly_render::capture_panes_rgba(
         &appearance,
@@ -124,6 +133,7 @@ fn main() {
         scale,
         &panes,
         Some(&overlay),
+        Some(&sidebar),
     );
 
     let file = std::fs::File::create(&path).expect("create png");
@@ -178,6 +188,42 @@ fn palette_overlay(
         rows,
         selected_row: Some(2),
         caret: Some(("> zoom".chars().count(), 0)),
+    }
+}
+
+/// Build a representative left sidebar (a brand header, a two-tab list with tab 1
+/// active, and a "+ New tab" action) - mirroring the binary's `sidebar` module layout
+/// so the capture verifies the tab-list chrome. The live binary drives this from the
+/// real module.
+fn sidebar_panel(
+    height: u32,
+    cell_w: f32,
+    sidebar_w: f32,
+    scale: f32,
+    theme: &Theme,
+) -> CaptureSidebar {
+    let pad = SIDEBAR_PAD * scale;
+    let cols = ((sidebar_w - 2.0 * pad) / cell_w).max(1.0) as usize;
+    let indent = "  ";
+    let rows = vec![
+        ui_row(&format!("{indent}skelly"), cols, theme.fg_secondary), // header
+        ui_row("", cols, theme.fg_muted),                             // spacer
+        ui_row(&format!("{indent}Tab 1"), cols, theme.fg_primary),    // active
+        ui_row(&format!("{indent}Tab 2"), cols, theme.fg_secondary),
+        ui_row("", cols, theme.fg_muted), // spacer
+        ui_row(&format!("{indent}+ New tab"), cols, theme.fg_muted),
+    ];
+    CaptureSidebar {
+        panel: PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: sidebar_w,
+            h: height as f32,
+        },
+        text_origin: (pad, pad),
+        rows,
+        // Active tab (index 0) sits at grid row HEADER_ROWS (=2); highlight there.
+        active_row: Some(2),
     }
 }
 

@@ -87,9 +87,17 @@ opportunistically rather than block M3 on, since the terminal already works. M3
       single workspace did) and the binary boots clean. Deferred to the sidebar-chrome
       slice: closing the last tab -> empty state, and the close-confirm on a running
       process.
-    - [ ] The left-dock **sidebar chrome** rendering the tab list (+ pinned grid,
-      footer), `⌘B` show/hide, `⇧⌘B` full<->rail, viewport inset by its width, and
-      click-to-switch. Then groups, pinning (`⇧⌘P`), and drag-reorder.
+    - [x] The left-dock **sidebar chrome** - a fixed-width left panel (config
+      `[sidebar] width`) listing the open tabs (active = `accent` bar + `accent.subtle`
+      fill, per the guide), a brand header, and a "+ New tab" action, with a `border`
+      divider on its right edge. The pane viewport insets by its width; `⌘B` shows/hides
+      it (re-fitting the shells); clicking a tab switches, clicking "+ New tab" opens
+      one. Renders as base chrome (a dedicated quad+text load-pass pair beneath the
+      palette overlay), shared by the headless `pane_capture` PNG - verified in Ossein
+      Dark + Light. Pure `sidebar` module (view + hit-test), unit-tested. Deferred: the
+      `⇧⌘B` slim rail, the pinned grid + `⇧⌘P`, collapsible groups, drag-reorder, the
+      footer action icons, cwd/command tab titles (tabs are numbered), and the
+      last-tab-close empty state.
   - [x] Pane tree (split/focus/resize/zoom, <=8).
     - [x] The pane-tree **model** - a leaf crate `skelly-pane` (ADR-0005): nested
       uneven binary splits, directional focus, keyboard resize, zoom, even-out, and

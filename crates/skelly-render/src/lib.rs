@@ -27,6 +27,7 @@ mod theme;
 pub use ansi::AnsiPalette;
 pub use capture::{
     capture_cells_rgba, capture_panes_rgba, capture_rgba, CaptureOverlay, CapturePane,
+    CaptureSidebar,
 };
 pub use error::RenderError;
 pub use renderer::Renderer;
@@ -87,6 +88,25 @@ pub struct OverlayView<'a> {
     pub selected_row: Option<usize>,
     /// The input caret's `(column, row)` cell, if the input line is active.
     pub caret: Option<(usize, usize)>,
+}
+
+/// The persistent left sidebar (the tab list) to draw as base-layer chrome.
+///
+/// It sits in the left strip of the surface, beneath any overlay and never over the
+/// panes (the pane viewport is inset to its right). The renderer draws the active
+/// tab's `accent.subtle` fill + `accent` bar and a `border` divider on the right edge,
+/// then paints `rows` as a monospace grid at `text_origin` (clipped to `panel`). The
+/// caller bakes the UI-token colors into `rows`; the renderer owns only the
+/// decorative quads.
+pub struct SidebarView<'a> {
+    /// The sidebar rectangle on the surface (`x = 0`, full height), physical px.
+    pub panel: PxRect,
+    /// Pixel position of the text grid's cell `(0, 0)` top-left, physical px.
+    pub text_origin: (f32, f32),
+    /// The sidebar's text as a monospace grid (rows top to bottom), UI-token colored.
+    pub rows: &'a [Vec<GridCell>],
+    /// Grid row of the active tab to highlight (`accent` bar + `accent.subtle` fill).
+    pub active_row: Option<usize>,
 }
 
 /// One cell to render: its character, foreground, optional background fill, and

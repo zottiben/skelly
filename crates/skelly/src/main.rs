@@ -11,6 +11,7 @@
 //! never leak up.
 
 mod palette;
+mod sidebar;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -18,10 +19,13 @@ use std::sync::Arc;
 use anyhow::Context as _;
 use skelly_config::Config;
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
-use skelly_render::{AnsiPalette, GridCell, OverlayView, PaneView, PxRect, Renderer, Srgb, Theme};
+use skelly_render::{
+    AnsiPalette, GridCell, OverlayView, PaneView, PxRect, Renderer, SidebarView, Srgb, Theme,
+};
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 
 use palette::Palette;
+use sidebar::Sidebar;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -37,6 +41,8 @@ const PANE_INSET: f32 = 6.0;
 const RESIZE_STEP: f32 = 0.04;
 /// Logical padding (px) inside the command palette panel.
 const PALETTE_PAD: f32 = 12.0;
+/// Logical inset (px) of the sidebar's text from the sidebar's top-left corner.
+const SIDEBAR_PAD: f32 = 12.0;
 
 /// Event the reader thread sends to wake the UI when a shell produces output.
 #[derive(Debug, Clone, Copy)]
@@ -143,6 +149,8 @@ struct App {
     theme: Theme,
     /// The command-palette overlay state.
     palette: Palette,
+    /// The persistent left sidebar (the tab list) state.
+    sidebar: Sidebar,
     clipboard: Option<arboard::Clipboard>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -163,12 +171,14 @@ impl App {
     fn new(config: Config, proxy: EventLoopProxy<Wakeup>) -> Self {
         let ansi_palette = AnsiPalette::resolve(&config.appearance.theme);
         let theme = Theme::resolve(&config.appearance.theme);
+        let sidebar = Sidebar::new(config.sidebar.mode);
         Self {
             config,
             proxy,
             ansi_palette,
             theme,
             palette: Palette::new(),
+            sidebar,
             clipboard: arboard::Clipboard::new().ok(),
             window: None,
             renderer: None,
@@ -192,12 +202,29 @@ impl App {
         &mut self.tabs[self.active]
     }
 
-    /// The pane area within the window (the surface inset by the window margin).
+    /// The pane area within the window: the surface inset by the window margin, and by
+    /// the sidebar's width on the left when it is shown.
     fn viewport_rect(&self) -> Rect {
         let pad = WINDOW_PAD * scale32(self.scale);
+        let sidebar = self.sidebar_width_px();
         let w = dim_f32(self.size.0);
         let h = dim_f32(self.size.1);
-        Rect::new(pad, pad, (w - 2.0 * pad).max(1.0), (h - 2.0 * pad).max(1.0))
+        Rect::new(
+            sidebar + pad,
+            pad,
+            (w - sidebar - 2.0 * pad).max(1.0),
+            (h - 2.0 * pad).max(1.0),
+        )
+    }
+
+    /// The sidebar's width in physical px, or `0.0` when it is hidden. The tab-list
+    /// panel occupies the strip `[0, width)` and the pane viewport starts after it.
+    fn sidebar_width_px(&self) -> f32 {
+        if self.sidebar.visible {
+            f32::from(self.config.sidebar.width) * scale32(self.scale)
+        } else {
+            0.0
+        }
     }
 
     /// The physical-pixel inset inside each pane (border-to-cells gap).
@@ -336,11 +363,21 @@ impl App {
             })
             .collect();
 
-        // Build the command-palette overlay before the mutable renderer borrow.
+        // Build the chrome frames before the mutable renderer borrow.
+        let sidebar = self.sidebar.visible.then(|| self.build_sidebar_frame());
         let overlay = self.palette.open.then(|| self.build_palette_frame());
 
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_panes(&views);
+            match &sidebar {
+                Some(frame) => renderer.set_sidebar(Some(&SidebarView {
+                    panel: frame.panel,
+                    text_origin: frame.origin,
+                    rows: &frame.rows,
+                    active_row: frame.active_row,
+                })),
+                None => renderer.set_sidebar(None),
+            }
             match &overlay {
                 Some(frame) => renderer.set_overlay(Some(&OverlayView {
                     panel: frame.panel,
@@ -393,6 +430,66 @@ impl App {
             selected_row: view.selected_row,
             caret: view.caret,
         }
+    }
+
+    /// Lay out the left sidebar: a full-height panel of `sidebar.width`, its tab list
+    /// rendered in UI tokens and clipped to that width.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the sidebar cell width is a small, non-negative value"
+    )]
+    fn build_sidebar_frame(&self) -> SidebarFrame {
+        let (cell_w, _) = self.cell_size();
+        let pad = SIDEBAR_PAD * scale32(self.scale);
+        let sidebar_w = self.sidebar_width_px();
+        let surface_h = dim_f32(self.size.1);
+
+        let cols = ((sidebar_w - 2.0 * pad) / cell_w).floor().max(1.0) as usize;
+        let view = sidebar::view(self.tabs.len(), self.active, cols, &self.theme);
+
+        SidebarFrame {
+            panel: PxRect {
+                x: 0.0,
+                y: 0.0,
+                w: sidebar_w,
+                h: surface_h,
+            },
+            origin: (pad, pad),
+            rows: view.rows,
+            active_row: view.active_row,
+        }
+    }
+
+    /// Toggle the sidebar (`⌘B`). The pane viewport changes width, so re-fit the shells.
+    fn toggle_sidebar(&mut self) {
+        self.sidebar.toggle();
+        self.sync_layout();
+        self.request_redraw();
+    }
+
+    /// Map the pointer to a sidebar row action, or `None` if it isn't over the sidebar.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the row index is computed from a guarded non-negative offset"
+    )]
+    fn sidebar_hit(&self) -> Option<sidebar::Hit> {
+        if !self.sidebar.visible {
+            return None;
+        }
+        let (px, py) = point_f32(self.pointer);
+        if px >= self.sidebar_width_px() {
+            return None;
+        }
+        let (_, cell_h) = self.cell_size();
+        let origin_y = SIDEBAR_PAD * scale32(self.scale);
+        if py < origin_y {
+            return None;
+        }
+        let row = ((py - origin_y) / cell_h).floor() as usize;
+        sidebar::hit(self.tabs.len(), row)
     }
 
     /// Copy the current selection to the clipboard.
@@ -598,6 +695,7 @@ impl App {
             Action::CloseTab => self.close_tab(),
             Action::NextTab => self.cycle_tab(true),
             Action::PrevTab => self.cycle_tab(false),
+            Action::ToggleSidebar => self.toggle_sidebar(),
             Action::ThemeDark => self.apply_theme("ossein-dark"),
             Action::ThemeLight => self.apply_theme("ossein-light"),
             Action::Quit => event_loop.exit(),
@@ -644,6 +742,10 @@ impl App {
                     self.paste();
                     return;
                 }
+                if ch.eq_ignore_ascii_case("b") {
+                    self.toggle_sidebar();
+                    return;
+                }
             }
         }
         // Pane control (the `⌥` leader chords). Matched on the physical key so macOS
@@ -681,6 +783,80 @@ impl App {
             self.active_tab_mut().selection = None; // typing clears the selection
         }
     }
+
+    /// Extend the active drag selection to the pointer (a no-op unless a drag is live).
+    fn on_cursor_moved(&mut self) {
+        if !self.selecting {
+            return;
+        }
+        if let Some((id, _)) = self.active_tab().selection {
+            if let Some(rect) = self.pane_rect(id) {
+                let (cell_w, cell_h) = self.cell_size();
+                let cell = pointer_cell_in(rect, cell_w, cell_h, self.pane_inset(), self.pointer);
+                if let Some((_, sel)) = self.active_tab_mut().selection.as_mut() {
+                    sel.head = cell;
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Handle a left mouse button press/release: a press either switches tabs (in the
+    /// sidebar) or focuses a pane and starts a selection; a release ends the drag and
+    /// clears a zero-width (click-only) selection.
+    fn on_left_click(&mut self, state: ElementState) {
+        match state {
+            ElementState::Pressed => {
+                if let Some(hit) = self.sidebar_hit() {
+                    match hit {
+                        sidebar::Hit::Tab(index) => self.goto_tab(index),
+                        sidebar::Hit::NewTab => self.new_tab(),
+                    }
+                } else if let Some((id, rect)) = self.pane_at_pointer() {
+                    self.active_tab_mut().tree.set_focus(id);
+                    let (cell_w, cell_h) = self.cell_size();
+                    let cell =
+                        pointer_cell_in(rect, cell_w, cell_h, self.pane_inset(), self.pointer);
+                    self.active_tab_mut().selection = Some((
+                        id,
+                        Selection {
+                            anchor: cell,
+                            head: cell,
+                        },
+                    ));
+                    self.selecting = true;
+                }
+            }
+            ElementState::Released => {
+                self.selecting = false;
+                // A click with no drag clears the (single-cell) selection.
+                if self
+                    .active_tab()
+                    .selection
+                    .is_some_and(|(_, sel)| sel.anchor == sel.head)
+                {
+                    self.active_tab_mut().selection = None;
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Scroll the scrollback of the pane under the pointer by a wheel `delta`.
+    fn on_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        let lines = match delta {
+            MouseScrollDelta::LineDelta(_, y) => wheel_lines(f64::from(y)),
+            MouseScrollDelta::PixelDelta(pos) => wheel_lines(pos.y / 20.0),
+        };
+        if lines == 0 {
+            return;
+        }
+        if let Some((id, _)) = self.pane_at_pointer() {
+            if let Some(term) = self.active_tab_mut().panes.get_mut(&id) {
+                term.scroll_lines(lines);
+            }
+        }
+    }
 }
 
 /// Owned per-pane frame data the borrowed [`PaneView`]s point at during a repaint.
@@ -700,6 +876,14 @@ struct PaletteFrame {
     rows: Vec<Vec<GridCell>>,
     selected_row: Option<usize>,
     caret: (usize, usize),
+}
+
+/// Owned sidebar frame data the borrowed [`SidebarView`] points at.
+struct SidebarFrame {
+    panel: PxRect,
+    origin: (f32, f32),
+    rows: Vec<Vec<GridCell>>,
+    active_row: Option<usize>,
 }
 
 /// Resolve a terminal cell into a render cell against the active ANSI palette,
@@ -817,83 +1001,14 @@ impl ApplicationHandler<Wakeup> for App {
             }
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = (position.x, position.y);
-                if self.selecting {
-                    if let Some((id, _)) = self.active_tab().selection {
-                        if let Some(rect) = self.pane_rect(id) {
-                            let (cell_w, cell_h) = self.cell_size();
-                            let cell = pointer_cell_in(
-                                rect,
-                                cell_w,
-                                cell_h,
-                                self.pane_inset(),
-                                self.pointer,
-                            );
-                            if let Some((_, sel)) = self.active_tab_mut().selection.as_mut() {
-                                sel.head = cell;
-                            }
-                        }
-                    }
-                    if let Some(window) = self.window.as_ref() {
-                        window.request_redraw();
-                    }
-                }
+                self.on_cursor_moved();
             }
             WindowEvent::MouseInput {
                 state,
                 button: MouseButton::Left,
                 ..
-            } => {
-                match state {
-                    ElementState::Pressed => {
-                        if let Some((id, rect)) = self.pane_at_pointer() {
-                            self.active_tab_mut().tree.set_focus(id);
-                            let (cell_w, cell_h) = self.cell_size();
-                            let cell = pointer_cell_in(
-                                rect,
-                                cell_w,
-                                cell_h,
-                                self.pane_inset(),
-                                self.pointer,
-                            );
-                            self.active_tab_mut().selection = Some((
-                                id,
-                                Selection {
-                                    anchor: cell,
-                                    head: cell,
-                                },
-                            ));
-                            self.selecting = true;
-                        }
-                    }
-                    ElementState::Released => {
-                        self.selecting = false;
-                        // A click with no drag clears the (single-cell) selection.
-                        if self
-                            .active_tab()
-                            .selection
-                            .is_some_and(|(_, sel)| sel.anchor == sel.head)
-                        {
-                            self.active_tab_mut().selection = None;
-                        }
-                    }
-                }
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw();
-                }
-            }
-            WindowEvent::MouseWheel { delta, .. } => {
-                let lines = match delta {
-                    MouseScrollDelta::LineDelta(_, y) => wheel_lines(f64::from(y)),
-                    MouseScrollDelta::PixelDelta(pos) => wheel_lines(pos.y / 20.0),
-                };
-                if lines != 0 {
-                    if let Some((id, _)) = self.pane_at_pointer() {
-                        if let Some(term) = self.active_tab_mut().panes.get_mut(&id) {
-                            term.scroll_lines(lines);
-                        }
-                    }
-                }
-            }
+            } => self.on_left_click(state),
+            WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
             WindowEvent::Resized(size) => {
                 self.size = (size.width, size.height);
                 if let Some(renderer) = self.renderer.as_mut() {

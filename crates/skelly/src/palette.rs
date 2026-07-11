@@ -49,6 +49,8 @@ pub(crate) enum Action {
     NextTab,
     /// Switch to the previous tab.
     PrevTab,
+    /// Show or hide the left sidebar.
+    ToggleSidebar,
     /// Switch the UI theme to Ossein Dark.
     ThemeDark,
     /// Switch the UI theme to Ossein Light.
@@ -123,6 +125,11 @@ pub(crate) const COMMANDS: &[Command] = &[
         label: "Previous tab",
         hint: "opt shift [",
         action: Action::PrevTab,
+    },
+    Command {
+        label: "Toggle sidebar",
+        hint: "cmd B",
+        action: Action::ToggleSidebar,
     },
     Command {
         label: "Theme: Ossein Dark",

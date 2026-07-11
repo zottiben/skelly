@@ -47,6 +47,22 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-12 - **Sidebar chrome (second half of "sidebar + tabs").** The persistent
+  left dock now renders: a fixed-width panel (config `[sidebar] width`, default 240
+  logical px) with a quiet brand header, the open-tab list, and a "+ New tab" action.
+  The active tab is marked per the guide's "Sidebar tab item" component - an `accent`
+  bar on its left edge plus an `accent.subtle` (accent at ~0.16 alpha) row fill - and a
+  `border` divider runs down the right edge. The sidebar shares the app `bg.base` (no
+  separate sidebar-surface token was invented; Hard rule 2), so it reads as quiet
+  chrome. `⌘B` shows/hides it (the pane viewport insets by its width and the shells
+  re-fit); clicking a tab switches to it, clicking "+ New tab" opens one. It draws as
+  base chrome - a dedicated quad+text load-pass pair beneath the command-palette
+  overlay (`Renderer::set_sidebar` / `SidebarView`), shared with the headless capture.
+  Tabs are labeled by position (`Tab 1..`); cwd / command titling (`[tabs] title` /
+  `follow_cwd`) needs shell-cwd tracking and is a later slice. Deferred: the `⇧⌘B` slim
+  56px rail (config `mode` / `width < 180`), the pinned grid + `⇧⌘P`, collapsible
+  groups, drag-reorder, and the footer action icons (`⚙ ◐ ⟲ ⑂`) - those wait on the
+  settings / theme / timeline / git surfaces they trigger.
 - 2026-07-12 - **Tab model (first half of "sidebar + tabs").** The window now holds
   multiple tabs, each an independent tiling workspace (its own pane tree + a live
   shell per pane + selection); switching a tab swaps the whole terminal workspace and

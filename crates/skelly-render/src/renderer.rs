@@ -15,7 +15,7 @@ use crate::cells::{grid_quads, push_outline, QuadLayer};
 use crate::error::RenderError;
 use crate::text::{PaneTextInput, TextLayer};
 use crate::theme::Theme;
-use crate::{OverlayView, PaneView};
+use crate::{OverlayView, PaneView, SidebarView};
 
 /// Owns the GPU device and surface and presents painted frames.
 pub struct Renderer {
@@ -26,6 +26,10 @@ pub struct Renderer {
     theme: Theme,
     quads: QuadLayer,
     text: TextLayer,
+    /// The persistent left sidebar, drawn as base chrome when shown.
+    sidebar_quads: QuadLayer,
+    sidebar_text: TextLayer,
+    sidebar_active: bool,
     /// The command-palette / overlay layer, drawn over the live terminal when active.
     overlay_quads: QuadLayer,
     overlay_text: TextLayer,
@@ -118,6 +122,16 @@ impl Renderer {
             scale_factor,
             appearance,
         );
+        let sidebar_quads = QuadLayer::new(&device, config.format);
+        let sidebar_text = TextLayer::new(
+            &device,
+            &queue,
+            config.format,
+            config.width,
+            config.height,
+            scale_factor,
+            appearance,
+        );
         let overlay_quads = QuadLayer::new(&device, config.format);
         let overlay_text = TextLayer::new(
             &device,
@@ -137,6 +151,9 @@ impl Renderer {
             theme: Theme::resolve(&appearance.theme),
             quads,
             text,
+            sidebar_quads,
+            sidebar_text,
+            sidebar_active: false,
             overlay_quads,
             overlay_text,
             overlay_active: false,
@@ -153,6 +170,7 @@ impl Renderer {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.text.resize(width, height);
+        self.sidebar_text.resize(width, height);
         self.overlay_text.resize(width, height);
     }
 
@@ -170,6 +188,7 @@ impl Renderer {
     pub fn set_theme(&mut self, name: &str) {
         self.theme = Theme::resolve(name);
         self.text.set_default_fg(self.theme.fg_primary);
+        self.sidebar_text.set_default_fg(self.theme.fg_primary);
         self.overlay_text.set_default_fg(self.theme.fg_primary);
     }
 
@@ -235,6 +254,33 @@ impl Renderer {
             &quads,
         );
         self.text.set_panes(&text_inputs);
+    }
+
+    /// Set the persistent left sidebar to draw next frame, or clear it with `None`
+    /// (hidden). Builds the active-tab highlight + right-edge divider quads; the tab
+    /// labels come baked into `sidebar.rows`. Drawn as base chrome beneath any overlay.
+    pub fn set_sidebar(&mut self, sidebar: Option<&SidebarView>) {
+        let Some(view) = sidebar else {
+            self.sidebar_active = false;
+            return;
+        };
+        self.sidebar_active = true;
+        let scale = self.sidebar_text.scale();
+        let (cell_w, cell_h, _) = self.sidebar_text.cell_metrics();
+        let quads = crate::cells::sidebar_quads(view, &self.theme, cell_w, cell_h, scale);
+        self.sidebar_quads.set(
+            &self.device,
+            &self.queue,
+            self.config.width,
+            self.config.height,
+            &quads,
+        );
+        self.sidebar_text.set_panes(&[PaneTextInput {
+            rows: view.rows,
+            left: view.text_origin.0,
+            top: view.text_origin.1,
+            clip: (view.panel.x, view.panel.y, view.panel.w, view.panel.h),
+        }]);
     }
 
     /// Set the command-palette overlay to draw over the terminal next frame, or clear
@@ -312,7 +358,19 @@ impl Renderer {
             self.config.width,
             self.config.height,
         )?;
-        // Passes 3-4: the command palette / overlay, loaded over the live terminal.
+        // Passes 3-4: the sidebar chrome, loaded over the cleared left strip.
+        if self.sidebar_active {
+            self.sidebar_quads
+                .draw(&self.device, &self.queue, &view, None);
+            self.sidebar_text.draw(
+                &self.device,
+                &self.queue,
+                &view,
+                self.config.width,
+                self.config.height,
+            )?;
+        }
+        // Passes 5-6: the command palette / overlay, loaded over everything.
         if self.overlay_active {
             self.overlay_quads
                 .draw(&self.device, &self.queue, &view, None);
