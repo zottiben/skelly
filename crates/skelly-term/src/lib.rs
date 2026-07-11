@@ -9,6 +9,11 @@
 //! M1c: a single shell, monochrome text snapshot (no scrollback, colors, or
 //! selection yet - those arrive with the real cell grid in M2). A background thread
 //! reads the PTY and advances the parser; the UI thread snapshots and writes input.
+//!
+//! [`Parser`] is the headless twin of [`Terminal`]: the same `alacritty_terminal`
+//! grid and `Processor`, driven directly by bytes with no PTY, shell, or thread.
+//! It lets conformance tests and fuzzers exercise the exact parse path
+//! deterministically (see `tests/conformance.rs` and `tests/robustness.rs`).
 
 #![doc(test(attr(deny(warnings))))]
 
@@ -26,6 +31,21 @@ use alacritty_terminal::vte::ansi::{Color as AnsiColor, Processor};
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 
 type SharedTerm = Arc<Mutex<Term<VoidListener>>>;
+
+/// The narrowest grid we allow. `alacritty_terminal`'s reflow degenerates into a
+/// pathological (multi-second) loop at exactly one column - a size no usable
+/// terminal reaches, but reachable by dragging the window to a sliver, which would
+/// let hostile output wedge the reflow. Two columns and up reflow in microseconds,
+/// so we clamp the floor here, at the single point where dimensions enter the core,
+/// keeping the PTY size and the grid in lockstep. See `tests/robustness.rs`.
+const MIN_COLS: u16 = 2;
+/// The shortest grid we allow: a zero-row grid is degenerate and panic-prone.
+const MIN_ROWS: u16 = 1;
+
+/// Clamp requested dimensions to the usable floor ([`MIN_COLS`] x [`MIN_ROWS`]).
+fn clamp_dims(cols: u16, rows: u16) -> (u16, u16) {
+    (cols.max(MIN_COLS), rows.max(MIN_ROWS))
+}
 
 /// A terminal color, independent of any palette: the default foreground, a palette
 /// index (ANSI 16 or the 256-color cube), or a 24-bit truecolor. Resolving an index
@@ -101,6 +121,7 @@ impl Terminal {
     where
         W: Fn() + Send + 'static,
     {
+        let (cols, rows) = clamp_dims(cols, rows);
         let pty = native_pty_system();
         let pair = pty
             .openpty(PtySize {
@@ -151,8 +172,9 @@ impl Terminal {
         let _ = self.writer.flush();
     }
 
-    /// Resize the PTY and the grid to `cols` x `rows`.
+    /// Resize the PTY and the grid to `cols` x `rows` (clamped to the usable floor).
     pub fn resize(&mut self, cols: u16, rows: u16) {
+        let (cols, rows) = clamp_dims(cols, rows);
         let _ = self.master.resize(PtySize {
             rows,
             cols,
@@ -179,21 +201,7 @@ impl Terminal {
     #[must_use]
     pub fn snapshot(&self) -> Vec<String> {
         let term = self.term.lock().expect("terminal mutex poisoned");
-        let grid = term.grid();
-        let columns = grid.columns();
-        let lines = grid.screen_lines();
-        let offset = i32::try_from(grid.display_offset()).unwrap_or(0);
-
-        let mut out = Vec::with_capacity(lines);
-        for line in 0..lines {
-            let row = Line(i32::try_from(line).unwrap_or(0) - offset);
-            let mut text = String::with_capacity(columns);
-            for column in 0..columns {
-                text.push(grid[row][Column(column)].c);
-            }
-            out.push(text.trim_end().to_owned());
-        }
-        out
+        grid_lines(&term)
     }
 
     /// Snapshot the visible grid as cells with per-cell foreground color (top to
@@ -205,27 +213,7 @@ impl Terminal {
     #[must_use]
     pub fn cells(&self) -> Vec<Vec<TermCell>> {
         let term = self.term.lock().expect("terminal mutex poisoned");
-        let grid = term.grid();
-        let columns = grid.columns();
-        let lines = grid.screen_lines();
-        let offset = i32::try_from(grid.display_offset()).unwrap_or(0);
-
-        let mut out = Vec::with_capacity(lines);
-        for line in 0..lines {
-            let row = Line(i32::try_from(line).unwrap_or(0) - offset);
-            let mut cells = Vec::with_capacity(columns);
-            for column in 0..columns {
-                let cell = &grid[row][Column(column)];
-                cells.push(TermCell {
-                    c: cell.c,
-                    fg: map_color(cell.fg),
-                    bg: map_color(cell.bg),
-                    attrs: map_attrs(cell.flags),
-                });
-            }
-            out.push(cells);
-        }
-        out
+        grid_cells(&term)
     }
 
     /// The cursor's position as `(column, row)` in the visible grid.
@@ -235,13 +223,7 @@ impl Terminal {
     #[must_use]
     pub fn cursor(&self) -> (usize, usize) {
         let term = self.term.lock().expect("terminal mutex poisoned");
-        let grid = term.grid();
-        let offset = i32::try_from(grid.display_offset()).unwrap_or(0);
-        let point = grid.cursor.point;
-        (
-            point.column.0,
-            usize::try_from(point.line.0 + offset).unwrap_or(0),
-        )
+        grid_cursor(&term)
     }
 
     /// Scroll the view by `delta` lines (positive scrolls up into history).
@@ -265,6 +247,127 @@ impl Terminal {
         }
         self.dirty.store(true, Ordering::Relaxed);
     }
+}
+
+/// A headless VT parser: an `alacritty_terminal` grid driven directly by bytes,
+/// with no PTY, shell, or reader thread.
+///
+/// [`Parser`] shares the exact parse path the live [`Terminal`] uses - the same
+/// `Processor` and `Term`, built from the same [`Config`] (so scrollback history
+/// matches) - which makes it the harness for deterministic conformance tests and
+/// fuzzing: feed known (or arbitrary) bytes with [`advance`](Parser::advance), then
+/// read the grid back with the same [`snapshot`](Parser::snapshot),
+/// [`cells`](Parser::cells), and [`cursor`](Parser::cursor) methods.
+pub struct Parser {
+    term: Term<VoidListener>,
+    processor: Processor,
+}
+
+impl Parser {
+    /// Create a `cols` x `rows` headless grid, configured identically to a live
+    /// [`Terminal`] (same 10k-line scrollback history).
+    #[must_use]
+    pub fn new(cols: u16, rows: u16) -> Self {
+        let (cols, rows) = clamp_dims(cols, rows);
+        let dims = GridSize::new(cols, rows);
+        Self {
+            term: Term::new(Config::default(), &dims, VoidListener),
+            processor: Processor::new(),
+        }
+    }
+
+    /// Feed bytes through the VT parser into the grid - the same call the live
+    /// reader thread makes on PTY output.
+    pub fn advance(&mut self, bytes: &[u8]) {
+        self.processor.advance(&mut self.term, bytes);
+    }
+
+    /// Snapshot the visible grid as trimmed text lines (top to bottom).
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<String> {
+        grid_lines(&self.term)
+    }
+
+    /// Snapshot the visible grid as cells with color + SGR attributes.
+    #[must_use]
+    pub fn cells(&self) -> Vec<Vec<TermCell>> {
+        grid_cells(&self.term)
+    }
+
+    /// The cursor's position as `(column, row)` in the visible grid.
+    #[must_use]
+    pub fn cursor(&self) -> (usize, usize) {
+        grid_cursor(&self.term)
+    }
+
+    /// Resize the grid to `cols` x `rows` (clamped to the usable floor).
+    pub fn resize(&mut self, cols: u16, rows: u16) {
+        let (cols, rows) = clamp_dims(cols, rows);
+        self.term.resize(GridSize::new(cols, rows));
+    }
+
+    /// Scroll the view by `delta` lines (positive scrolls up into history).
+    pub fn scroll_lines(&mut self, delta: i32) {
+        self.term.scroll_display(Scroll::Delta(delta));
+    }
+}
+
+/// Snapshot a grid's visible lines as trimmed text (top to bottom). Shared by the
+/// live [`Terminal`] and the headless [`Parser`] so both read the grid identically.
+fn grid_lines(term: &Term<VoidListener>) -> Vec<String> {
+    let grid = term.grid();
+    let columns = grid.columns();
+    let lines = grid.screen_lines();
+    let offset = i32::try_from(grid.display_offset()).unwrap_or(0);
+
+    let mut out = Vec::with_capacity(lines);
+    for line in 0..lines {
+        let row = Line(i32::try_from(line).unwrap_or(0) - offset);
+        let mut text = String::with_capacity(columns);
+        for column in 0..columns {
+            text.push(grid[row][Column(column)].c);
+        }
+        out.push(text.trim_end().to_owned());
+    }
+    out
+}
+
+/// Snapshot a grid's visible cells with per-cell color + SGR attributes (top to
+/// bottom, left to right). Shared by [`Terminal`] and [`Parser`].
+fn grid_cells(term: &Term<VoidListener>) -> Vec<Vec<TermCell>> {
+    let grid = term.grid();
+    let columns = grid.columns();
+    let lines = grid.screen_lines();
+    let offset = i32::try_from(grid.display_offset()).unwrap_or(0);
+
+    let mut out = Vec::with_capacity(lines);
+    for line in 0..lines {
+        let row = Line(i32::try_from(line).unwrap_or(0) - offset);
+        let mut cells = Vec::with_capacity(columns);
+        for column in 0..columns {
+            let cell = &grid[row][Column(column)];
+            cells.push(TermCell {
+                c: cell.c,
+                fg: map_color(cell.fg),
+                bg: map_color(cell.bg),
+                attrs: map_attrs(cell.flags),
+            });
+        }
+        out.push(cells);
+    }
+    out
+}
+
+/// The cursor position as `(column, row)` in the visible grid. Shared by
+/// [`Terminal`] and [`Parser`].
+fn grid_cursor(term: &Term<VoidListener>) -> (usize, usize) {
+    let grid = term.grid();
+    let offset = i32::try_from(grid.display_offset()).unwrap_or(0);
+    let point = grid.cursor.point;
+    (
+        point.column.0,
+        usize::try_from(point.line.0 + offset).unwrap_or(0),
+    )
 }
 
 /// Map an `alacritty_terminal` cell's flags to our SGR [`CellAttrs`]. The various

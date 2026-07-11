@@ -19,8 +19,14 @@ monospace fallback, so Nerd glyphs render aligned. Still remaining in M2c: the r
 fixed-metric cell renderer (own glyph atlas + instanced glyph quads) replacing
 glyphon's reflowed text, for exact wide-char/fallback alignment. M2d is in progress: scrollback (10k-line history, mouse-wheel + Shift+PageUp/Down)
 and selection + copy/paste (mouse-drag highlight, Cmd+C/V via `arboard`) have landed.
-Remaining in M2d: VT/ANSI conformance (vttest/esctest + fuzz), reflow polish, live
-theme-token resolution. M2e (SGR text attributes) has landed: bold/italic via
+VT/ANSI conformance has landed too: `skelly-term` exposes a headless `Parser`
+(`alacritty_terminal` grid + `Processor`, no PTY) that shares the live terminal's
+exact parse path, covered by a deterministic conformance suite
+(`tests/conformance.rs`) and a `proptest` byte-fuzz robustness guard
+(`tests/robustness.rs`). The fuzzer found a reachable DoS - a single-column grid
+wedges `alacritty_terminal`'s reflow for seconds - so the core now clamps every
+grid to a 2-column floor (`MIN_COLS`). Remaining in M2d: coverage-guided
+`cargo-fuzz` (nightly), reflow polish, live theme-token resolution. M2e (SGR text attributes) has landed: bold/italic via
 cosmic-text weight+style, underline as a cell-width rule quad, reverse video + dim
 resolved against the palette (`AnsiPalette::default_bg`); `skelly-term` exposes a
 `CellAttrs` bitflags set. M2e also fixed a latent alignment bug - full-width grid

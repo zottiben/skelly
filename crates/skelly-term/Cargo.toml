@@ -16,3 +16,8 @@ workspace = true
 alacritty_terminal = "0.25.0"
 bitflags = { workspace = true }
 portable-pty = "0.9.0"
+
+[dev-dependencies]
+# Property-based robustness testing of the VT parser: feed arbitrary bytes and
+# assert our grid readers never panic (playbook §4 parsers / §7 threat model).
+proptest = "1"

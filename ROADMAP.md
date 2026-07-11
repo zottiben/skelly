@@ -46,7 +46,16 @@ ADRs (0001-0004) are ratified.
       display offset. (Engine support from `alacritty_terminal`.)
     - [x] Selection + copy/paste: mouse-drag selection with a translucent highlight,
       Cmd/Super+C copies the selection, Cmd/Super+V pastes into the shell (`arboard`).
-    - [ ] VT/ANSI conformance (vttest / esctest in CI, fuzz the parser).
+    - [~] VT/ANSI conformance + parser fuzzing.
+      - [x] Headless `Parser` (`alacritty_terminal` grid + `Processor`, no PTY)
+        sharing the live terminal's exact parse path, plus a deterministic
+        conformance suite (SGR named/256/truecolor + bg, bold/italic/underline/
+        inverse/dim + reset, CUP/relative moves/CHA, EL/ED, wrap, tab, scrollback)
+        and a `proptest` robustness guard that fuzzes arbitrary bytes in CI. The
+        fuzzer caught a reachable reflow DoS (a single-column grid wedged
+        `alacritty_terminal`'s reflow for seconds); the core now clamps to a
+        2-column floor.
+      - [ ] Coverage-guided `cargo-fuzz` target (nightly) for deeper fuzzing.
     - [ ] Resize/reflow polish, live theme-token resolution.
   - [x] **M2e** - SGR text attributes: bold / italic (cosmic-text weight+style),
     underline (a cell-width rule quad), reverse video and dim (resolved against the
