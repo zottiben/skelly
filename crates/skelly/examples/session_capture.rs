@@ -24,13 +24,14 @@ fn main() {
     });
     sleep(Duration::from_millis(400));
 
-    // Emit explicit ANSI backgrounds (blue/green/red) so the capture shows per-cell
-    // backgrounds; the cursor lands at the next prompt (in view). The adjacent
-    // quotes concatenate only when the shell *executes* the command, so the marker
-    // appears in the output but not the echoed input.
-    term.write(
-        b"clear; printf '\\033[44m blue \\033[0m \\033[42m green \\033[0m \\033[41m red \\033[0m COLORS''_LIVE\\n'\n",
+    // Emit Nerd Font icons (to exercise the configured font) plus an ANSI
+    // background, ending in the marker. The adjacent quotes concatenate only when
+    // the shell *executes* the command, so the marker appears in the output only.
+    let cmd = format!(
+        "clear; printf ' {}  {}  {}  nerd  \\033[44m blue-bg \\033[0m  COLORS''_LIVE\\n'\n",
+        '\u{e0b0}', '\u{f07c}', '\u{f115}',
     );
+    term.write(cmd.as_bytes());
     wait_until(&term, Duration::from_secs(10), |t| {
         snapshot_has(t, "COLORS_LIVE")
     });
@@ -42,7 +43,12 @@ fn main() {
     }
     println!("---------------------");
 
-    let appearance = Appearance::default();
+    // Use an installed Nerd Font so the configured-font path is exercised and the
+    // Nerd glyphs render (default "JetBrainsMono Nerd Font" is not installed here).
+    let appearance = Appearance {
+        font_family: "SauceCodePro Nerd Font Mono".to_owned(),
+        ..Appearance::default()
+    };
     let palette = AnsiPalette::resolve(&appearance.theme);
     let rows: Vec<Vec<GridCell>> = term
         .cells()

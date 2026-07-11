@@ -36,7 +36,8 @@ pub struct TextLayer {
     atlas: TextAtlas,
     renderer: TextRenderer,
     buffer: Buffer,
-    family: String,
+    /// The configured font family when installed; `None` falls back to monospace.
+    family_name: Option<String>,
 }
 
 impl TextLayer {
@@ -63,14 +64,22 @@ impl TextLayer {
         let scale = scale_to_f32(scale_factor);
         let font_px = f32::from(appearance.font_size) * scale;
         let line_px = font_px * appearance.line_height;
-        let cell_w = measure_cell_width(&mut font_system, font_px, line_px);
 
-        let family = appearance.font_family.clone();
+        // Honor the configured font (Nerd Fonts included) when it is installed;
+        // otherwise fall back to a system monospace face so columns still align.
+        let family_name = installed_family(&font_system, &appearance.font_family);
+        let cell_w = measure_cell_width(
+            &mut font_system,
+            font_px,
+            line_px,
+            family_of(family_name.as_deref()),
+        );
+
         let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_px, line_px));
         buffer.set_size(Some(dim_to_f32(width)), Some(dim_to_f32(height)));
         buffer.set_text(
             DEMO_TEXT,
-            &Attrs::new().family(Family::Name(&family)),
+            &Attrs::new().family(family_of(family_name.as_deref())),
             Shaping::Advanced,
             None,
         );
@@ -87,7 +96,7 @@ impl TextLayer {
             atlas,
             renderer,
             buffer,
-            family,
+            family_name,
         }
     }
 
@@ -100,13 +109,13 @@ impl TextLayer {
 
     /// Replace the displayed text with a plain string in the configured cell font.
     pub fn set_content(&mut self, text: &str) {
-        let attrs = Attrs::new().family(Family::Name(&self.family));
+        let attrs = Attrs::new().family(family_of(self.family_name.as_deref()));
         self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
     }
 
     /// Replace the display with a colored grid, drawing each cell's glyph in its
-    /// foreground color. Uses a monospace face so columns align; consecutive
+    /// foreground color, in the configured font (monospace fallback). Consecutive
     /// same-color cells merge into runs to keep the span count down.
     pub fn set_cells(&mut self, rows: &[Vec<GridCell>]) {
         let mut runs: Vec<(String, Color)> = Vec::new();
@@ -132,13 +141,11 @@ impl TextLayer {
             }
         }
 
-        let default = Attrs::new().family(Family::Monospace);
-        let spans = runs.iter().map(|(text, color)| {
-            (
-                text.as_str(),
-                Attrs::new().family(Family::Monospace).color(*color),
-            )
-        });
+        let family = family_of(self.family_name.as_deref());
+        let default = Attrs::new().family(family);
+        let spans = runs
+            .iter()
+            .map(|(text, color)| (text.as_str(), Attrs::new().family(family).color(*color)));
         self.buffer
             .set_rich_text(spans, &default, Shaping::Advanced, None);
         self.buffer.shape_until_scroll(&mut self.font_system, false);
@@ -225,15 +232,15 @@ impl TextLayer {
     }
 }
 
-/// Measure the advance width of a monospace glyph at `font_px`, in physical px.
-fn measure_cell_width(font_system: &mut FontSystem, font_px: f32, line_px: f32) -> f32 {
+/// Measure the advance width of a glyph in `family` at `font_px`, in physical px.
+fn measure_cell_width(
+    font_system: &mut FontSystem,
+    font_px: f32,
+    line_px: f32,
+    family: Family,
+) -> f32 {
     let mut probe = Buffer::new(font_system, Metrics::new(font_px, line_px));
-    probe.set_text(
-        "M",
-        &Attrs::new().family(Family::Monospace),
-        Shaping::Advanced,
-        None,
-    );
+    probe.set_text("M", &Attrs::new().family(family), Shaping::Advanced, None);
     probe.shape_until_scroll(font_system, false);
     probe
         .layout_runs()
@@ -241,6 +248,22 @@ fn measure_cell_width(font_system: &mut FontSystem, font_px: f32, line_px: f32) 
         .and_then(|run| run.glyphs.first().map(|glyph| glyph.w))
         .filter(|width| *width > 0.0)
         .unwrap_or(font_px * 0.6)
+}
+
+/// Return `Some(name)` if a font family with that name is installed, else `None`.
+fn installed_family(font_system: &FontSystem, name: &str) -> Option<String> {
+    let installed = font_system.db().faces().any(|face| {
+        face.families
+            .iter()
+            .any(|(family, _)| family.eq_ignore_ascii_case(name))
+    });
+    installed.then(|| name.to_owned())
+}
+
+/// Resolve the family to shape with: the configured name when installed, else a
+/// generic monospace face so columns still align.
+fn family_of(name: Option<&str>) -> Family<'_> {
+    name.map_or(Family::Monospace, Family::Name)
 }
 
 /// Cast a scale factor to `f32`. Sub-pixel precision loss is irrelevant for glyphs.

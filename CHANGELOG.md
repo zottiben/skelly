@@ -9,6 +9,11 @@ Conventional Commits - do not hand-edit it.
 
 ### Added
 
+- M2c (core terminal, fonts): honor the configured font family when it is installed
+  (Nerd Fonts included), falling back to a system monospace face otherwise, so
+  columns still align. Cell metrics are measured from the chosen face. The full
+  fixed-metric cell renderer (exact placement for wide/fallback glyphs) is still to
+  come.
 - M2b (core terminal, backgrounds + cursor): render per-cell background colors and
   a cursor block via a new instanced colored-quad `wgpu` pipeline, drawn beneath the
   text and aligned to the measured monospace cell grid (two passes: quads, then

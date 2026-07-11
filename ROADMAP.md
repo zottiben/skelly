@@ -33,10 +33,13 @@ ADRs (0001-0004) are ratified.
   - [x] **M2b** - per-cell background colors + a cursor block, via an instanced
     colored-quad `wgpu` pipeline aligned to the measured monospace cell grid (two
     passes: quads then text). `skelly-term` exposes per-cell `bg` + cursor position.
-  - [ ] **M2c** - the real fixed-metric cell renderer (glyph atlas + instanced
-    quads) replacing reflowed text, so cells align exactly regardless of glyph, and
-    honor the configured font with proper monospace fallback (M2a/M2b force a
-    system monospace face).
+  - [~] **M2c** - honor the configured font + exact per-cell placement.
+    - [x] Honor the configured font (Nerd Fonts) with a monospace fallback; the
+      primary neovim / monospace-Nerd-Font case renders correctly and aligned, with
+      Nerd glyphs. `skelly-render` uses the configured family when installed.
+    - [ ] The real fixed-metric cell renderer (own glyph atlas + instanced glyph
+      quads) replacing glyphon's reflowed text, so cells align exactly for wide
+      chars / fallback glyphs regardless of natural advance.
   - [ ] **M2d** - VT/ANSI conformance (vttest / esctest in CI, fuzz the parser),
     scrollback, selection + copy/paste, resize/reflow, live theme-token resolution.
 - [ ] **M3 - Skelly shell UX.** Sidebar + tabs/groups/pinning; pane tree

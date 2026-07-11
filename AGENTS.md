@@ -14,10 +14,12 @@ GPU (`skelly-render`, `glyphon`/`cosmic-text`), with keystrokes forwarded. Verif
 by an e2e shell test + a headless `session_capture` PNG. M2 (core terminal) is in progress: M2a (per-cell foreground colors via an
 `AnsiPalette`, kept separate from UI tokens) and M2b (per-cell backgrounds + cursor
 via an instanced colored-quad `wgpu` pipeline, two passes: quads then text) have
-landed. Next: M2c the real fixed-metric cell renderer honoring the configured font
-(M1/M2a/M2b still render the grid as reflowed monospace text, not exact cells), then
-M2d VT/ANSI conformance + scrollback + selection. The build target is native Rust,
-not the mockup HTML. See `ROADMAP.md`.
+landed. M2c is partly done: the renderer now honors the configured font (Nerd Fonts) with a
+monospace fallback, so Nerd glyphs render aligned. Still remaining in M2c: the real
+fixed-metric cell renderer (own glyph atlas + instanced glyph quads) replacing
+glyphon's reflowed text, for exact wide-char/fallback alignment. Then M2d: VT/ANSI
+conformance + scrollback + selection. The build target is native Rust, not the mockup
+HTML. See `ROADMAP.md`.
 
 **Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
 workspace. Foundation crates are *proposed* in ADR-0001..0004 (terminal core
