@@ -10,14 +10,18 @@
 //! output. Errors are contextualized here with `anyhow`; `wgpu`/`alacritty` types
 //! never leak up.
 
+mod palette;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use skelly_config::Config;
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
-use skelly_render::{AnsiPalette, GridCell, PaneView, PxRect, Renderer, Srgb};
+use skelly_render::{AnsiPalette, GridCell, OverlayView, PaneView, PxRect, Renderer, Srgb, Theme};
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
+
+use palette::Palette;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -31,6 +35,8 @@ const WINDOW_PAD: f32 = 12.0;
 const PANE_INSET: f32 = 6.0;
 /// One keyboard resize step, as a fraction of the enclosing split's extent.
 const RESIZE_STEP: f32 = 0.04;
+/// Logical padding (px) inside the command palette panel.
+const PALETTE_PAD: f32 = 12.0;
 
 /// Event the reader thread sends to wake the UI when a shell produces output.
 #[derive(Debug, Clone, Copy)]
@@ -89,7 +95,11 @@ enum PaneAction {
 struct App {
     config: Config,
     proxy: EventLoopProxy<Wakeup>,
-    palette: AnsiPalette,
+    ansi_palette: AnsiPalette,
+    /// The resolved UI theme tokens (for the command palette and other chrome).
+    theme: Theme,
+    /// The command-palette overlay state.
+    palette: Palette,
     clipboard: Option<arboard::Clipboard>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -111,11 +121,14 @@ struct App {
 
 impl App {
     fn new(config: Config, proxy: EventLoopProxy<Wakeup>) -> Self {
-        let palette = AnsiPalette::resolve(&config.appearance.theme);
+        let ansi_palette = AnsiPalette::resolve(&config.appearance.theme);
+        let theme = Theme::resolve(&config.appearance.theme);
         Self {
             config,
             proxy,
-            palette,
+            ansi_palette,
+            theme,
+            palette: Palette::new(),
             clipboard: arboard::Clipboard::new().ok(),
             window: None,
             renderer: None,
@@ -227,7 +240,11 @@ impl App {
                 let rows: Vec<Vec<GridCell>> = term
                     .cells()
                     .iter()
-                    .map(|row| row.iter().map(|c| resolve_cell(c, &self.palette)).collect())
+                    .map(|row| {
+                        row.iter()
+                            .map(|c| resolve_cell(c, &self.ansi_palette))
+                            .collect()
+                    })
                     .collect();
                 let cols = rows.first().map_or(0, Vec::len);
                 let selection = match self.selection {
@@ -262,11 +279,62 @@ impl App {
             })
             .collect();
 
+        // Build the command-palette overlay before the mutable renderer borrow.
+        let overlay = self.palette.open.then(|| self.build_palette_frame());
+
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_panes(&views);
+            match &overlay {
+                Some(frame) => renderer.set_overlay(Some(&OverlayView {
+                    panel: frame.panel,
+                    text_origin: frame.origin,
+                    rows: &frame.rows,
+                    selected_row: frame.selected_row,
+                    caret: Some(frame.caret),
+                })),
+                None => renderer.set_overlay(None),
+            }
             if let Err(err) = renderer.render() {
                 tracing::error!(%err, "frame render failed");
             }
+        }
+    }
+
+    /// Lay out the command palette as a centered panel: pick a width in cells, render
+    /// the palette grid in UI tokens, and size the panel to fit it.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "palette grid dimensions are small, non-negative values"
+    )]
+    fn build_palette_frame(&self) -> PaletteFrame {
+        let (cell_w, cell_h) = self.cell_size();
+        let pad = PALETTE_PAD * scale32(self.scale);
+        let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
+
+        // The palette sizes itself to its content, but never wider than fits.
+        let max_cols = ((surface_w * 0.9) / cell_w).floor().max(28.0) as usize;
+        let view = self.palette.view(max_cols, &self.theme);
+        let grid_cols = view.rows.first().map_or(max_cols, Vec::len);
+        let rows = view.rows.len();
+
+        let panel_w = grid_cols as f32 * cell_w + 2.0 * pad;
+        let panel_h = rows as f32 * cell_h + 2.0 * pad;
+        let x = ((surface_w - panel_w) / 2.0).max(0.0);
+        let y = (surface_h * 0.16).min((surface_h - panel_h).max(0.0));
+
+        PaletteFrame {
+            panel: PxRect {
+                x,
+                y,
+                w: panel_w,
+                h: panel_h,
+            },
+            origin: (x + pad, y + pad),
+            rows: view.rows,
+            selected_row: view.selected_row,
+            caret: view.caret,
         }
     }
 
@@ -333,16 +401,92 @@ impl App {
         }
     }
 
-    /// Handle a key press: platform combos (quit/copy/paste), pane chords, scrollback
-    /// keys, then terminal input to the focused pane.
+    /// Ask the window to repaint, if it exists.
+    fn request_redraw(&self) {
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
+    }
+
+    /// Handle a key while the command palette is open: it captures all input (typing
+    /// filters, arrows navigate, Enter runs, Esc closes). `⌘K` toggles it shut and
+    /// `⌘Q` still quits.
+    fn on_palette_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
+        if self.modifiers.super_key() {
+            if let Key::Character(ch) = key_event.logical_key.as_ref() {
+                if ch.eq_ignore_ascii_case("k") {
+                    self.palette.close();
+                    self.request_redraw();
+                    return;
+                }
+                if ch.eq_ignore_ascii_case("q") {
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
+        match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape) => self.palette.close(),
+            Key::Named(NamedKey::Enter) => {
+                let action = self.palette.selected_action();
+                self.palette.close();
+                if let Some(action) = action {
+                    self.run_palette_action(event_loop, action);
+                }
+            }
+            Key::Named(NamedKey::ArrowDown) => self.palette.move_selection(1),
+            Key::Named(NamedKey::ArrowUp) => self.palette.move_selection(-1),
+            Key::Named(NamedKey::Backspace) => self.palette.backspace(),
+            _ => {
+                if let Some(text) = key_event.text.as_ref() {
+                    for c in text.chars() {
+                        if !c.is_control() {
+                            self.palette.push_char(c);
+                        }
+                    }
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Dispatch a chosen palette command to the matching handler.
+    fn run_palette_action(&mut self, event_loop: &ActiveEventLoop, action: palette::Action) {
+        use palette::Action;
+        match action {
+            Action::SplitRight => self.apply_pane_action(PaneAction::Split(Dir::Right)),
+            Action::SplitDown => self.apply_pane_action(PaneAction::Split(Dir::Down)),
+            Action::Zoom => self.apply_pane_action(PaneAction::Zoom),
+            Action::EvenOut => self.apply_pane_action(PaneAction::EvenOut),
+            Action::ClosePane => self.apply_pane_action(PaneAction::Close),
+            Action::FocusLeft => self.apply_pane_action(PaneAction::Focus(Dir::Left)),
+            Action::FocusDown => self.apply_pane_action(PaneAction::Focus(Dir::Down)),
+            Action::FocusUp => self.apply_pane_action(PaneAction::Focus(Dir::Up)),
+            Action::FocusRight => self.apply_pane_action(PaneAction::Focus(Dir::Right)),
+            Action::Quit => event_loop.exit(),
+        }
+    }
+
+    /// Handle a key press: the palette (when open), platform combos (quit/copy/paste/
+    /// palette), pane chords, scrollback keys, then terminal input to the focused pane.
     fn on_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
         if key_event.state != ElementState::Pressed {
             return;
         }
-        // Platform combos (Cmd/Super + Q/C/V). The terminal owns every other key -
+        // The command palette captures all input while open.
+        if self.palette.open {
+            self.on_palette_key(event_loop, key_event);
+            return;
+        }
+        // Platform combos (Cmd/Super + K/Q/C/V). The terminal owns every other key -
         // Ctrl+C etc. still reach the shell.
         if self.modifiers.super_key() {
             if let Key::Character(ch) = key_event.logical_key.as_ref() {
+                if ch.eq_ignore_ascii_case("k") {
+                    self.palette.open();
+                    self.request_redraw();
+                    return;
+                }
                 if ch.eq_ignore_ascii_case("q") {
                     event_loop.exit();
                     return;
@@ -402,6 +546,15 @@ struct PaneFrame {
     cursor: (usize, usize),
     selection: Vec<(usize, usize)>,
     focused: bool,
+}
+
+/// Owned command-palette frame data the borrowed [`OverlayView`] points at.
+struct PaletteFrame {
+    panel: PxRect,
+    origin: (f32, f32),
+    rows: Vec<Vec<GridCell>>,
+    selected_row: Option<usize>,
+    caret: (usize, usize),
 }
 
 /// Resolve a terminal cell into a render cell against the active ANSI palette,

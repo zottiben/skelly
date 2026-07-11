@@ -60,11 +60,20 @@ pub struct Theme {
     pub bg_base: Rgba,
     /// `fg.primary` - primary UI/terminal text (sRGB, for glyph rendering).
     pub fg_primary: Srgb,
-    /// `accent` - brand / cursor color (sRGB). Also the focused pane's `border.strong`
-    /// ring per the design guide.
+    /// `fg.secondary` - secondary UI text; also the palette's command labels (sRGB).
+    pub fg_secondary: Srgb,
+    /// `fg.muted` - muted UI text: key hints, group labels, placeholders (sRGB).
+    pub fg_muted: Srgb,
+    /// `accent` - brand / terminal cursor color; the focus ring on interactive UI
+    /// elements (sRGB).
     pub accent: Srgb,
+    /// `bg.elevated` - the surface for menus, the command palette, and modals (sRGB).
+    pub bg_elevated: Srgb,
     /// `border` - the subtle divider drawn between tiled panes (sRGB).
     pub border: Srgb,
+    /// `border.strong` - the stronger border on the focused pane and on elevated
+    /// surfaces (sRGB).
+    pub border_strong: Srgb,
 }
 
 impl Theme {
@@ -73,49 +82,36 @@ impl Theme {
     #[must_use]
     pub fn resolve(name: &str) -> Self {
         match name {
-            // Ossein Light: bg.base #EFF1F5, fg.primary #4C4F69, accent #8839EF,
-            // border #BCC0CC (the shared Catppuccin-Latte surface the palette derives
-            // from - see design/README.md).
+            // Ossein Light (see the guide's token table; border #BCC0CC is the shared
+            // Catppuccin-Latte surface the palette derives from - see design/README).
             "ossein-light" => Self {
                 bg_base: srgb_hex(0xEF, 0xF1, 0xF5),
-                fg_primary: Srgb {
-                    r: 0x4C,
-                    g: 0x4F,
-                    b: 0x69,
-                },
-                accent: Srgb {
-                    r: 0x88,
-                    g: 0x39,
-                    b: 0xEF,
-                },
-                border: Srgb {
-                    r: 0xBC,
-                    g: 0xC0,
-                    b: 0xCC,
-                },
+                fg_primary: srgb(0x4C, 0x4F, 0x69),
+                fg_secondary: srgb(0x5C, 0x5F, 0x77),
+                fg_muted: srgb(0x8C, 0x8F, 0xA1),
+                accent: srgb(0x88, 0x39, 0xEF),
+                bg_elevated: srgb(0xFF, 0xFF, 0xFF),
+                border: srgb(0xBC, 0xC0, 0xCC),
+                border_strong: srgb(0xAC, 0xB0, 0xBE),
             },
-            // Ossein Dark (default): bg.base #181825, fg.primary #CDD6F4, accent
-            // #BD93F9, border #313244 (an Ossein surface color used in the guide).
+            // Ossein Dark (default) - the guide's token table.
             _ => Self {
                 bg_base: srgb_hex(0x18, 0x18, 0x25),
-                fg_primary: Srgb {
-                    r: 0xCD,
-                    g: 0xD6,
-                    b: 0xF4,
-                },
-                accent: Srgb {
-                    r: 0xBD,
-                    g: 0x93,
-                    b: 0xF9,
-                },
-                border: Srgb {
-                    r: 0x31,
-                    g: 0x32,
-                    b: 0x44,
-                },
+                fg_primary: srgb(0xCD, 0xD6, 0xF4),
+                fg_secondary: srgb(0xBA, 0xC2, 0xDE),
+                fg_muted: srgb(0x7F, 0x84, 0x9C),
+                accent: srgb(0xBD, 0x93, 0xF9),
+                bg_elevated: srgb(0x38, 0x3A, 0x54),
+                border: srgb(0x31, 0x32, 0x44),
+                border_strong: srgb(0x6C, 0x6F, 0x93),
             },
         }
     }
+}
+
+/// An 8-bit sRGB color from its channels - a terse constructor for the token table.
+fn srgb(r: u8, g: u8, b: u8) -> Srgb {
+    Srgb { r, g, b }
 }
 
 /// Build an opaque [`Rgba`] from an 8-bit sRGB triple, converting to linear space.

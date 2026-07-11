@@ -15,7 +15,7 @@ use crate::cells::{grid_quads, push_outline, QuadLayer};
 use crate::error::RenderError;
 use crate::text::{PaneTextInput, TextLayer};
 use crate::theme::Theme;
-use crate::PaneView;
+use crate::{OverlayView, PaneView};
 
 /// Owns the GPU device and surface and presents painted frames.
 pub struct Renderer {
@@ -26,6 +26,10 @@ pub struct Renderer {
     theme: Theme,
     quads: QuadLayer,
     text: TextLayer,
+    /// The command-palette / overlay layer, drawn over the live terminal when active.
+    overlay_quads: QuadLayer,
+    overlay_text: TextLayer,
+    overlay_active: bool,
 }
 
 impl Renderer {
@@ -114,6 +118,16 @@ impl Renderer {
             scale_factor,
             appearance,
         );
+        let overlay_quads = QuadLayer::new(&device, config.format);
+        let overlay_text = TextLayer::new(
+            &device,
+            &queue,
+            config.format,
+            config.width,
+            config.height,
+            scale_factor,
+            appearance,
+        );
 
         Self {
             surface,
@@ -123,6 +137,9 @@ impl Renderer {
             theme: Theme::resolve(&appearance.theme),
             quads,
             text,
+            overlay_quads,
+            overlay_text,
+            overlay_active: false,
         }
     }
 
@@ -136,6 +153,7 @@ impl Renderer {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.text.resize(width, height);
+        self.overlay_text.resize(width, height);
     }
 
     /// Cell metrics in physical px: `(width, height, top-left padding)`. Callers use
@@ -147,8 +165,8 @@ impl Renderer {
 
     /// Set the panes to display next frame. Each pane's grid is filled at its
     /// `origin` and clipped to its `rect`; with more than one pane a `border` divider
-    /// is drawn around each and an `accent` ring around the focused one. Only the
-    /// focused pane draws a cursor.
+    /// is drawn around each and a `border.strong` ring around the focused one. Only
+    /// the focused pane draws a cursor.
     pub fn set_panes(&mut self, panes: &[PaneView]) {
         let (cell_w, cell_h, _) = self.text.cell_metrics();
         let scale = self.text.scale();
@@ -195,7 +213,7 @@ impl Renderer {
                     pane.rect.w,
                     pane.rect.h,
                     2.0 * scale,
-                    self.theme.accent.to_linear(),
+                    self.theme.border_strong.to_linear(),
                 );
             }
         }
@@ -207,6 +225,34 @@ impl Renderer {
             &quads,
         );
         self.text.set_panes(&text_inputs);
+    }
+
+    /// Set the command-palette overlay to draw over the terminal next frame, or clear
+    /// it with `None`. Builds the panel surface (`bg.elevated`), its `border.strong`
+    /// outline, the selected-row highlight, and the input caret; the text colors come
+    /// baked into `overlay.rows`.
+    pub fn set_overlay(&mut self, overlay: Option<&OverlayView>) {
+        let Some(view) = overlay else {
+            self.overlay_active = false;
+            return;
+        };
+        self.overlay_active = true;
+        let scale = self.overlay_text.scale();
+        let (cell_w, cell_h, _) = self.overlay_text.cell_metrics();
+        let quads = crate::cells::overlay_quads(view, &self.theme, cell_w, cell_h, scale);
+        self.overlay_quads.set(
+            &self.device,
+            &self.queue,
+            self.config.width,
+            self.config.height,
+            &quads,
+        );
+        self.overlay_text.set_panes(&[PaneTextInput {
+            rows: view.rows,
+            left: view.text_origin.0,
+            top: view.text_origin.1,
+            clip: (view.panel.x, view.panel.y, view.panel.w, view.panel.h),
+        }]);
     }
 
     /// Acquire the next surface frame, paint it, and present.
@@ -241,12 +287,12 @@ impl Renderer {
             &self.device,
             &self.queue,
             &view,
-            wgpu::Color {
+            Some(wgpu::Color {
                 r: bg.r,
                 g: bg.g,
                 b: bg.b,
                 a: bg.a,
-            },
+            }),
         );
         // Pass 2: draw the glyphs on top.
         self.text.draw(
@@ -256,6 +302,18 @@ impl Renderer {
             self.config.width,
             self.config.height,
         )?;
+        // Passes 3-4: the command palette / overlay, loaded over the live terminal.
+        if self.overlay_active {
+            self.overlay_quads
+                .draw(&self.device, &self.queue, &view, None);
+            self.overlay_text.draw(
+                &self.device,
+                &self.queue,
+                &view,
+                self.config.width,
+                self.config.height,
+            )?;
+        }
         self.queue.present(frame);
         Ok(())
     }

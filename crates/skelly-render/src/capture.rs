@@ -9,10 +9,12 @@
 
 use skelly_config::Appearance;
 
-use crate::cells::{grid_quads, push_outline, Quad, QuadLayer};
-use crate::text::{PaneTextInput, TextLayer};
+use crate::cells::{
+    grid_quads, overlay_quads as build_overlay_quads, push_outline, Quad, QuadLayer,
+};
+use crate::text::{measure_cell, PaneTextInput, TextLayer};
 use crate::theme::{Rgba, Theme};
-use crate::{GridCell, PxRect};
+use crate::{GridCell, OverlayView, PxRect};
 
 /// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
@@ -40,6 +42,7 @@ pub fn capture_rgba(
             text.set_content(content);
             Vec::new()
         },
+        None,
     ))
 }
 
@@ -78,6 +81,7 @@ pub fn capture_cells_rgba(
                 selection,
             )
         },
+        None,
     ))
 }
 
@@ -96,22 +100,60 @@ pub struct CapturePane {
     pub focused: bool,
 }
 
-/// Render a tiled set of `panes` headlessly - the exact multi-pane path the windowed
-/// [`Renderer::set_panes`](crate::Renderer::set_panes) uses (dividers, focus ring,
-/// and per-pane cursor) - to an offscreen `width` x `height` sRGB target, returning
-/// tight RGBA8 bytes. The verification twin of the live pane workspace.
+/// A command-palette overlay for [`capture_panes_rgba`], mirroring
+/// [`OverlayView`](crate::OverlayView) but owning its rows.
+pub struct CaptureOverlay {
+    /// The centered panel rectangle, physical px.
+    pub panel: PxRect,
+    /// Pixel position of the text grid's cell `(0, 0)` top-left.
+    pub text_origin: (f32, f32),
+    /// The overlay text as a monospace grid (UI-token colored).
+    pub rows: Vec<Vec<GridCell>>,
+    /// The selected row to highlight, if any.
+    pub selected_row: Option<usize>,
+    /// The input caret's `(column, row)` cell, if any.
+    pub caret: Option<(usize, usize)>,
+}
+
+/// Render a tiled set of `panes` (and an optional `overlay`) headlessly - the exact
+/// path the windowed [`Renderer`](crate::Renderer) uses (dividers, focus ring,
+/// per-pane cursor, and the palette overlay on top) - to an offscreen `width` x
+/// `height` sRGB target, returning tight RGBA8 bytes. The verification twin of the
+/// live workspace.
 ///
 /// # Panics
 /// Panics if no GPU adapter/device is available or the readback fails.
 #[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "DPI scale precision loss is irrelevant for the overlay stroke width"
+)]
 pub fn capture_panes_rgba(
     appearance: &Appearance,
     width: u32,
     height: u32,
     scale: f64,
     panes: &[CapturePane],
+    overlay: Option<&CaptureOverlay>,
 ) -> Vec<u8> {
     let theme = Theme::resolve(&appearance.theme);
+    let overlay_scene = overlay.map(|ov| {
+        let view = OverlayView {
+            panel: ov.panel,
+            text_origin: ov.text_origin,
+            rows: &ov.rows,
+            selected_row: ov.selected_row,
+            caret: ov.caret,
+        };
+        let (cell_w, cell_h) = measure_cell(appearance, scale);
+        OverlayScene {
+            quads: build_overlay_quads(&view, &theme, cell_w, cell_h, scale as f32),
+            rows: &ov.rows,
+            left: ov.text_origin.0,
+            top: ov.text_origin.1,
+            clip: (ov.panel.x, ov.panel.y, ov.panel.w, ov.panel.h),
+        }
+    });
     pollster::block_on(capture_async(
         appearance,
         width,
@@ -162,13 +204,14 @@ pub fn capture_panes_rgba(
                         pane.rect.w,
                         pane.rect.h,
                         2.0 * stroke,
-                        theme.accent.to_linear(),
+                        theme.border_strong.to_linear(),
                     );
                 }
             }
             text.set_panes(&inputs);
             quads
         },
+        overlay_scene,
     ))
 }
 
@@ -181,6 +224,16 @@ fn color(c: Rgba) -> wgpu::Color {
     }
 }
 
+/// A prepared overlay to draw over the terminal in the headless capture, mirroring
+/// the windowed renderer's passes 3-4.
+struct OverlayScene<'a> {
+    quads: Vec<Quad>,
+    rows: &'a [Vec<GridCell>],
+    left: f32,
+    top: f32,
+    clip: (f32, f32, f32, f32),
+}
+
 async fn capture_async<F>(
     appearance: &Appearance,
     width: u32,
@@ -188,6 +241,7 @@ async fn capture_async<F>(
     scale: f64,
     clear: wgpu::Color,
     setup: F,
+    overlay: Option<OverlayScene<'_>>,
 ) -> Vec<u8>
 where
     F: FnOnce(&mut TextLayer) -> Vec<Quad>,
@@ -226,11 +280,40 @@ where
     let mut text = TextLayer::new(&device, &queue, format, width, height, scale, appearance);
     let quads = setup(&mut text);
     quad_layer.set(&device, &queue, width, height, &quads);
-    quad_layer.draw(&device, &queue, &view, clear);
+    quad_layer.draw(&device, &queue, &view, Some(clear));
     text.draw(&device, &queue, &view, width, height)
         .expect("draw text");
 
-    // Copy the texture into a readback buffer, respecting the 256-byte row align.
+    // Passes 3-4: the overlay, loaded over the terminal (as `Renderer::render` does).
+    if let Some(scene) = overlay {
+        let mut overlay_quad_layer = QuadLayer::new(&device, format);
+        overlay_quad_layer.set(&device, &queue, width, height, &scene.quads);
+        overlay_quad_layer.draw(&device, &queue, &view, None);
+        let mut overlay_text =
+            TextLayer::new(&device, &queue, format, width, height, scale, appearance);
+        overlay_text.set_panes(&[PaneTextInput {
+            rows: scene.rows,
+            left: scene.left,
+            top: scene.top,
+            clip: scene.clip,
+        }]);
+        overlay_text
+            .draw(&device, &queue, &view, width, height)
+            .expect("draw overlay text");
+    }
+
+    read_texture(&device, &queue, &texture, width, height)
+}
+
+/// Copy `texture` into a mapped buffer and return tight RGBA8 bytes (row-major, no
+/// row padding), respecting the 256-byte copy row alignment.
+fn read_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    width: u32,
+    height: u32,
+) -> Vec<u8> {
     let bytes_per_pixel = 4_u32;
     let unpadded = width * bytes_per_pixel;
     let padded =
@@ -246,7 +329,7 @@ where
     });
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
-            texture: &texture,
+            texture,
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,

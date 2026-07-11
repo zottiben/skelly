@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 
 use skelly_config::Appearance;
 use skelly_pane::{Dir, PaneTree, Rect};
-use skelly_render::{measure_cell, AnsiPalette, CapturePane, GridCell, PxRect, Srgb};
+use skelly_render::{
+    measure_cell, AnsiPalette, CaptureOverlay, CapturePane, GridCell, PxRect, Srgb, Theme,
+};
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 
 /// Logical padding around the whole pane area - mirrors the binary's `WINDOW_PAD`.
@@ -106,7 +108,18 @@ fn main() {
         });
     }
 
-    let rgba = skelly_render::capture_panes_rgba(&appearance, width, height, scale, &panes);
+    // A command-palette overlay over the panes, to verify the overlay compositing
+    // (opaque panel, border, selected-row highlight, caret, clipped text).
+    let theme = Theme::resolve(&appearance.theme);
+    let overlay = palette_overlay(width, height, cell_w, cell_h, sc, &theme);
+    let rgba = skelly_render::capture_panes_rgba(
+        &appearance,
+        width,
+        height,
+        scale,
+        &panes,
+        Some(&overlay),
+    );
 
     let file = std::fs::File::create(&path).expect("create png");
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
@@ -118,6 +131,98 @@ fn main() {
         .write_image_data(&rgba)
         .expect("png data");
     println!("wrote {path} ({} panes)", panes.len());
+}
+
+/// Build a representative command-palette overlay (a prompt line, a few command
+/// rows, and a footer) centered on the surface - to exercise the overlay compositing
+/// path. The live binary drives this from the real `palette` module.
+fn palette_overlay(
+    width: u32,
+    height: u32,
+    cell_w: f32,
+    cell_h: f32,
+    scale: f32,
+    theme: &Theme,
+) -> CaptureOverlay {
+    let cols = 44_usize; // fits the footer (the widest line), matching the real palette
+    let rows = vec![
+        prompt_row("> zoom", cols, theme),
+        ui_row("  2 results", cols, theme.fg_muted),
+        command_row("Zoom / unzoom pane", "opt Z", cols, theme),
+        command_row("Even out splits", "opt =", cols, theme),
+        ui_row("", cols, theme.fg_muted),
+        ui_row(
+            "  up/down navigate    enter run    esc close",
+            cols,
+            theme.fg_muted,
+        ),
+    ];
+    let pad = 12.0 * scale;
+    let panel_w = cols as f32 * cell_w + 2.0 * pad;
+    let panel_h = rows.len() as f32 * cell_h + 2.0 * pad;
+    let x = ((width as f32 - panel_w) / 2.0).max(0.0);
+    let y = height as f32 * 0.16;
+    CaptureOverlay {
+        panel: PxRect {
+            x,
+            y,
+            w: panel_w,
+            h: panel_h,
+        },
+        text_origin: (x + pad, y + pad),
+        rows,
+        selected_row: Some(2),
+        caret: Some(("> zoom".chars().count(), 0)),
+    }
+}
+
+fn ui_cell(c: char, fg: Srgb) -> GridCell {
+    GridCell {
+        c,
+        fg,
+        bg: None,
+        bold: false,
+        italic: false,
+        underline: false,
+    }
+}
+
+fn ui_row(text: &str, cols: usize, fg: Srgb) -> Vec<GridCell> {
+    let mut row: Vec<GridCell> = text.chars().map(|c| ui_cell(c, fg)).collect();
+    row.truncate(cols);
+    while row.len() < cols {
+        row.push(ui_cell(' ', fg));
+    }
+    row
+}
+
+fn prompt_row(text: &str, cols: usize, theme: &Theme) -> Vec<GridCell> {
+    let mut row = vec![ui_cell('>', theme.accent)];
+    row.extend(text.chars().skip(1).map(|c| ui_cell(c, theme.fg_primary)));
+    row.truncate(cols);
+    while row.len() < cols {
+        row.push(ui_cell(' ', theme.fg_muted));
+    }
+    row
+}
+
+fn command_row(label: &str, hint: &str, cols: usize, theme: &Theme) -> Vec<GridCell> {
+    let mut row: Vec<GridCell> = "  "
+        .chars()
+        .chain(label.chars())
+        .map(|c| ui_cell(c, theme.fg_primary))
+        .collect();
+    let hint_len = hint.chars().count();
+    let hint_start = cols.saturating_sub(hint_len + 1);
+    while row.len() < hint_start {
+        row.push(ui_cell(' ', theme.fg_primary));
+    }
+    row.extend(hint.chars().map(|c| ui_cell(c, theme.fg_muted)));
+    row.truncate(cols);
+    while row.len() < cols {
+        row.push(ui_cell(' ', theme.fg_muted));
+    }
+    row
 }
 
 fn wait_until<F: Fn(&Terminal) -> bool>(term: &Terminal, timeout: Duration, ready: F) {

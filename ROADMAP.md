@@ -89,9 +89,19 @@ opportunistically rather than block M3 on, since the terminal already works. M3
       wheel), and the `⌥` pane keybindings (split `⌥|`/`⌥-`, focus `⌥h/j/k/l` +
       `⌥1..8`, resize `⌥⇧h/j/k/l`, zoom `⌥Z`, close `⌥w`, even-out `⌥=`). Verified
       by the `pane_capture` headless PNG (real 2-pane split, two live shells) + unit
-      tests for the geometry and chord decode. Follow-ups: configurable
-      `panes.leader` + remappable `[keys]` + palette surfacing (command-palette
-      slice); draggable dividers.
+      tests for the geometry and chord decode. (The focused-pane ring is
+      `border.strong`, corrected from accent.) Follow-ups: draggable dividers.
+  - [~] Command palette.
+    - [x] A centered overlay (Hard rule 4) over the live terminal, opened with `⌘K`
+      / closed with `Esc`, that filters a built-in command set by typed query,
+      navigates with up/down, and runs the selection with Enter. The renderer gained
+      an overlay pass (`Renderer::set_overlay`, drawn on top with `LoadOp::Load`) and
+      the UI tokens `bg.elevated` / `fg.muted` / `fg.secondary` / `border.strong`.
+      Palette state + view-building is a pure `palette` module (unit tested);
+      verified rendering by the `pane_capture` headless PNG (overlay over two panes).
+    - [ ] Merge user `[keys]` overrides + the configurable `panes.leader` (tmux-style
+      `ctrl+a`); fuzzy match with accent-highlighted characters; surface tabs /
+      themes / files and the `/` `?` mode prefixes.
 - [ ] **M4 - Signature features.** Per-repo git diff dock with hunk staging;
   session timeline with non-destructive rewind (shadow worktree).
 - [ ] **M5 - Hardening & release.** Edge/empty/error states, perf budgets,

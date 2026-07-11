@@ -47,6 +47,18 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-12 - **Command palette (first slice).** `⌘K` opens a centered overlay over
+  the live terminal (Hard rule 4), `Esc` closes; typing filters a built-in command
+  set (case-insensitive substring for now), up/down navigates, Enter runs. The panel
+  uses `bg.elevated`, a `border.strong` outline, a translucent `accent` selected-row
+  highlight, and an `accent` caret; hints are `fg.muted`. The panel sizes to its
+  widest line. Deferred (guide describes these, but they're a later slice): fuzzy
+  matching with accent-highlighted matched characters, the mode prefixes (`>`
+  commands / `/` files / `?` help / plain = scrollback search), surfacing tabs /
+  themes / files, `⌘↵` run-in-new-pane, and merging user `[keys]` + the configurable
+  `panes.leader`. Also corrected the focused-pane ring from `accent` to
+  `border.strong` (the guide's token table: `border.strong` #6C6F93 dark / #ACB0BE
+  light) - the `accent` focus ring belongs to interactive UI elements, not panes.
 - 2026-07-11 - **Pane keybindings (M3 wiring).** Pane control uses `Alt` (`⌥`) as a
   direct, leader-less modifier, matched on the *physical* key (so macOS Option-key
   glyph remapping doesn't interfere). The guide shows `⌥|` split-right, `⌥-`

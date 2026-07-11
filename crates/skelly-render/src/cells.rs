@@ -99,6 +99,65 @@ pub(crate) fn grid_quads(
     quads
 }
 
+/// Build the decorative quads for a command-palette overlay: the `bg.elevated` panel
+/// fill, the translucent `accent` selected-row highlight, the `accent` input caret,
+/// and the `border.strong` outline (drawn last, on top). Shared by the windowed
+/// [`Renderer`](crate::Renderer) and the headless capture so both draw identically.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "row/column indices into a small overlay grid are exact as f32"
+)]
+pub(crate) fn overlay_quads(
+    view: &crate::OverlayView,
+    theme: &crate::theme::Theme,
+    cell_w: f32,
+    cell_h: f32,
+    scale: f32,
+) -> Vec<Quad> {
+    let panel = view.panel;
+    let stroke = scale.max(1.0);
+    let mut quads = vec![Quad::new(
+        panel.x,
+        panel.y,
+        panel.w,
+        panel.h,
+        theme.bg_elevated.to_linear(),
+    )];
+    if let Some(row) = view.selected_row {
+        let mut highlight = theme.accent.to_linear();
+        highlight[3] = 0.16;
+        let y = view.text_origin.1 + row as f32 * cell_h;
+        quads.push(Quad::new(
+            panel.x + stroke,
+            y,
+            panel.w - 2.0 * stroke,
+            cell_h,
+            highlight,
+        ));
+    }
+    if let Some((col, row)) = view.caret {
+        let x = view.text_origin.0 + col as f32 * cell_w;
+        let y = view.text_origin.1 + row as f32 * cell_h;
+        quads.push(Quad::new(
+            x,
+            y,
+            (2.0 * scale).max(1.0),
+            cell_h,
+            theme.accent.to_linear(),
+        ));
+    }
+    push_outline(
+        &mut quads,
+        panel.x,
+        panel.y,
+        panel.w,
+        panel.h,
+        stroke,
+        theme.border_strong.to_linear(),
+    );
+    quads
+}
+
 /// Append a rectangular outline (four `thickness`-px bars) around the pixel rect
 /// `(x, y, w, h)` in linear `color`, drawn *inside* the rect's edges so it never
 /// escapes the pane. Used for the per-pane divider and the focused pane's ring.
@@ -266,19 +325,25 @@ impl QuadLayer {
         queue.write_buffer(&self.instances, 0, bytes);
     }
 
-    /// Clear `view` to `clear` and draw the uploaded quads over it. Submits its own
-    /// command buffer; run before the text pass (which loads this result).
+    /// Draw the uploaded quads onto `view`. When `clear` is `Some`, the pass first
+    /// clears to that color (the terminal quad pass); when `None`, it loads the
+    /// existing contents and draws over them (the overlay quad pass). Submits its own
+    /// command buffer.
     pub(crate) fn draw(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         view: &wgpu::TextureView,
-        clear: wgpu::Color,
+        clear: Option<wgpu::Color>,
     ) {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("quad-encoder"),
         });
         {
+            let load = match clear {
+                Some(color) => wgpu::LoadOp::Clear(color),
+                None => wgpu::LoadOp::Load,
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("cells"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -286,7 +351,7 @@ impl QuadLayer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(clear),
+                        load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],

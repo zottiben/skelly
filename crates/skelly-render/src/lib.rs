@@ -25,7 +25,9 @@ mod text;
 mod theme;
 
 pub use ansi::AnsiPalette;
-pub use capture::{capture_cells_rgba, capture_panes_rgba, capture_rgba, CapturePane};
+pub use capture::{
+    capture_cells_rgba, capture_panes_rgba, capture_rgba, CaptureOverlay, CapturePane,
+};
 pub use error::RenderError;
 pub use renderer::Renderer;
 pub use text::{measure_cell, TextLayer};
@@ -49,9 +51,9 @@ pub struct PxRect {
 /// The renderer tiles any number of these onto the surface: it fills each pane's
 /// cell backgrounds/underlines/selection, draws the glyphs clipped to `rect`, and -
 /// when more than one pane is present - a subtle `border` divider around each with
-/// an `accent` ring around the focused one. The cursor is drawn only in the focused
-/// pane. The binary owns the geometry (`rect` and the cell `origin`); the renderer
-/// just paints where told.
+/// a `border.strong` ring around the focused one. The cursor is drawn only in the
+/// focused pane. The binary owns the geometry (`rect` and the cell `origin`); the
+/// renderer just paints where told.
 pub struct PaneView<'a> {
     /// The pane's rectangle on the surface (border + text clip), physical px.
     pub rect: PxRect,
@@ -65,6 +67,26 @@ pub struct PaneView<'a> {
     pub selection: &'a [(usize, usize)],
     /// Whether this is the focused pane (accent ring + drawn cursor).
     pub focused: bool,
+}
+
+/// The command-palette / modal overlay to draw over the live terminal.
+///
+/// The renderer fills `panel` with `bg.elevated`, outlines it with `border.strong`,
+/// highlights `selected_row`, draws the `caret`, and paints `rows` as a monospace
+/// grid at `text_origin` (clipped to the panel). The caller bakes the UI-token colors
+/// into each cell of `rows`; the renderer owns only the decorative quads. Drawn on
+/// top of the terminal, so it never unmounts the panes beneath (AGENTS Hard rule 4).
+pub struct OverlayView<'a> {
+    /// The centered panel rectangle on the surface, physical px.
+    pub panel: PxRect,
+    /// Pixel position of the text grid's cell `(0, 0)` top-left, physical px.
+    pub text_origin: (f32, f32),
+    /// The overlay's text as a monospace grid (rows top to bottom), UI-token colored.
+    pub rows: &'a [Vec<GridCell>],
+    /// Row index in `rows` to highlight (the selected command), if any.
+    pub selected_row: Option<usize>,
+    /// The input caret's `(column, row)` cell, if the input line is active.
+    pub caret: Option<(usize, usize)>,
 }
 
 /// One cell to render: its character, foreground, optional background fill, and
