@@ -43,6 +43,18 @@ impl Srgb {
     }
 }
 
+impl Rgba {
+    /// As a linear `[f32; 4]` GPU vertex color (this color is already linear).
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "linear channels are in 0.0..=1.0; the f64->f32 narrowing is lossless enough for a fill"
+    )]
+    pub(crate) fn to_array(self) -> [f32; 4] {
+        [self.r as f32, self.g as f32, self.b as f32, self.a as f32]
+    }
+}
+
 /// Convert one 8-bit sRGB channel to a linear `f32` (0.0..=1.0).
 fn lin(channel: u8) -> f32 {
     let c = f32::from(channel) / 255.0;

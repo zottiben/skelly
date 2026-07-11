@@ -51,6 +51,8 @@ pub(crate) enum Action {
     PrevTab,
     /// Show or hide the left sidebar.
     ToggleSidebar,
+    /// Open the full-window settings view.
+    OpenSettings,
     /// Switch the UI theme to Ossein Dark.
     ThemeDark,
     /// Switch the UI theme to Ossein Light.
@@ -130,6 +132,11 @@ pub(crate) const COMMANDS: &[Command] = &[
         label: "Toggle sidebar",
         hint: "cmd B",
         action: Action::ToggleSidebar,
+    },
+    Command {
+        label: "Open settings",
+        hint: "cmd ,",
+        action: Action::OpenSettings,
     },
     Command {
         label: "Theme: Ossein Dark",

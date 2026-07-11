@@ -36,6 +36,18 @@ pub enum ConfigError {
     /// A value parsed but fell outside its allowed range. Names the offending key.
     #[error("invalid config: {0}")]
     Invalid(String),
+    /// The config could not be serialized back to TOML.
+    #[error("serializing config")]
+    Serialize(#[from] toml::ser::Error),
+    /// The file could not be written to disk.
+    #[error("writing config to {path}")]
+    Write {
+        /// The path we tried to write.
+        path: PathBuf,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// The complete Skelly configuration - one field per `config.toml` key.
@@ -330,6 +342,50 @@ impl Config {
         toml::to_string_pretty(self)
     }
 
+    /// Validate, serialize, and write the config to `path`, creating parent
+    /// directories as needed. The write is atomic: it lands in a sibling temp file
+    /// that is renamed over `path`, so a crash mid-write never truncates the real
+    /// config. This is the settings view's persistence path - every control edit
+    /// writes the whole file back (the file stays the single source of truth, Hard
+    /// rule 1).
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Invalid`] if the config is out of range,
+    /// [`ConfigError::Serialize`] if it cannot be encoded, or [`ConfigError::Write`]
+    /// on any I/O failure.
+    pub fn save(&self, path: &Path) -> Result<(), ConfigError> {
+        self.validate()?;
+        let text = self.to_toml_string()?;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|source| ConfigError::Write {
+                path: parent.to_path_buf(),
+                source,
+            })?;
+        }
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, text.as_bytes()).map_err(|source| ConfigError::Write {
+            path: tmp.clone(),
+            source,
+        })?;
+        std::fs::rename(&tmp, path).map_err(|source| ConfigError::Write {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    /// Save to the default config path ([`Config::default_path`]), the launch path's
+    /// mirror of [`Config::load_default`].
+    ///
+    /// # Errors
+    /// Returns [`ConfigError::Invalid`] if no default path resolves (neither
+    /// `XDG_CONFIG_HOME` nor `HOME` is set) or the same errors as [`Config::save`].
+    pub fn save_default(&self) -> Result<(), ConfigError> {
+        let path = Self::default_path().ok_or_else(|| {
+            ConfigError::Invalid("no config path (neither XDG_CONFIG_HOME nor HOME is set)".into())
+        })?;
+        self.save(&path)
+    }
+
     /// Check every value is within its allowed range.
     ///
     /// # Errors
@@ -479,5 +535,36 @@ mod tests {
     fn rejects_malformed_toml() {
         let err = Config::from_toml_str("this is not = = toml").unwrap_err();
         assert!(matches!(err, ConfigError::Parse(_)));
+    }
+
+    #[test]
+    fn save_then_load_round_trips_through_a_file() {
+        // Write a non-default config to a temp path and read it straight back.
+        let mut original = Config::default();
+        original.appearance.font_size = 18;
+        original.appearance.theme = "ossein-light".to_owned();
+        original.sidebar.mode = SidebarMode::Hidden;
+
+        let dir = std::env::temp_dir().join(format!("skelly-cfg-{}", std::process::id()));
+        let path = dir.join("nested").join("config.toml");
+        original.save(&path).expect("save creates dirs and writes");
+
+        let reloaded = Config::load(&path).expect("reload the saved file");
+        assert_eq!(original, reloaded);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn save_leaves_no_temp_file_behind() {
+        let dir = std::env::temp_dir().join(format!("skelly-cfg-tmp-{}", std::process::id()));
+        let path = dir.join("config.toml");
+        Config::default().save(&path).expect("save");
+        assert!(path.exists(), "the real config exists");
+        assert!(
+            !path.with_extension("toml.tmp").exists(),
+            "the atomic temp file is renamed away, never left behind"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

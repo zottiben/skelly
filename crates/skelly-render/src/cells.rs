@@ -201,6 +201,93 @@ pub(crate) fn sidebar_quads(
     quads
 }
 
+/// Build the decorative quads for the full-window settings view: the `bg.elevated`
+/// panel fill, a `bg.base` fill over the left category-nav strip, the active
+/// category's `accent.subtle` fill + `accent` bar, the focused control's translucent
+/// `accent` highlight (over the content strip only), and the `border` divider between
+/// nav and content. Shared by the windowed [`Renderer`](crate::Renderer) and the
+/// headless capture so both draw identically.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "row/column indices into a small settings grid are exact as f32"
+)]
+pub(crate) fn settings_quads(
+    view: &crate::SettingsView,
+    theme: &crate::theme::Theme,
+    cell_w: f32,
+    cell_h: f32,
+    scale: f32,
+) -> Vec<Quad> {
+    let panel = view.panel;
+    let stroke = scale.max(1.0);
+    let divider_x = view.text_origin.0 + view.nav_cols as f32 * cell_w;
+    let row_y = |row: usize| view.text_origin.1 + row as f32 * cell_h;
+
+    // The content panel, then the nav strip painted over its left portion.
+    let mut quads = vec![
+        Quad::new(
+            panel.x,
+            panel.y,
+            panel.w,
+            panel.h,
+            theme.bg_elevated.to_linear(),
+        ),
+        Quad::new(
+            panel.x,
+            panel.y,
+            (divider_x - panel.x).max(0.0),
+            panel.h,
+            theme.bg_base.to_array(),
+        ),
+    ];
+
+    // The active category: a subtle fill across the nav strip + an accent bar.
+    if let Some(row) = view.nav_active_row {
+        let y = row_y(row);
+        let mut subtle = theme.accent.to_linear();
+        subtle[3] = 0.16;
+        quads.push(Quad::new(
+            panel.x,
+            y,
+            (divider_x - panel.x).max(0.0),
+            cell_h,
+            subtle,
+        ));
+        quads.push(Quad::new(
+            panel.x,
+            y,
+            (2.0 * scale).max(1.0),
+            cell_h,
+            theme.accent.to_linear(),
+        ));
+    }
+
+    // The focused control: a translucent highlight over the content strip only.
+    if let Some(row) = view.selected_row {
+        let y = row_y(row);
+        let mut highlight = theme.accent.to_linear();
+        highlight[3] = 0.16;
+        let content_x = divider_x + stroke;
+        quads.push(Quad::new(
+            content_x,
+            y,
+            (panel.x + panel.w - content_x).max(0.0),
+            cell_h,
+            highlight,
+        ));
+    }
+
+    // The nav/content divider, drawn last so it sits over both fills.
+    quads.push(Quad::new(
+        divider_x,
+        panel.y,
+        stroke,
+        panel.h,
+        theme.border.to_linear(),
+    ));
+    quads
+}
+
 /// Append a rectangular outline (four `thickness`-px bars) around the pixel rect
 /// `(x, y, w, h)` in linear `color`, drawn *inside* the rect's edges so it never
 /// escapes the pane. Used for the per-pane divider and the focused pane's ring.

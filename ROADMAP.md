@@ -126,6 +126,25 @@ opportunistically rather than block M3 on, since the terminal already works. M3
     - [ ] Merge user `[keys]` overrides + the configurable `panes.leader` (tmux-style
       `ctrl+a`); surface tabs / themes / files and the `/` `?` mode prefixes; `⌘↵`
       run-in-new-pane.
+  - [~] Settings view.
+    - [x] A full in-window view over `config.toml` (Hard rule 4), opened with `⌘,` /
+      closed with `Esc`, drawn on top of the live terminal. A left category nav
+      (Appearance, Sidebar, Tabs, Panes, Session, Git) and a right control list; `↑/↓`
+      move between controls, `←/→` (or Enter) change the focused value, `Tab` switches
+      category. Every control round-trips **exactly one** `config.toml` key (Hard rule
+      1) - enforced by a test that diffs the serialized config and asserts a single
+      leaf, the control's declared key, changed. Changes persist immediately
+      (`Config::save_default`, atomic write) and apply live where cheap (theme +
+      sidebar mode/width); font / cursor / opacity persist and take effect next launch.
+      The renderer gained a settings pass (`Renderer::set_settings`, nav/content fills +
+      the active-category and focused-control highlights + divider). Pure `settings`
+      module (control model + view, unit tested); verified by the `settings_capture`
+      headless PNG in Ossein Dark + Light. Surfaced in the palette ("Open settings").
+    - [ ] Live font re-shaping (font size / family / line-height applied without a
+      relaunch); the mockup's theme cards + real slider/toggle widgets and mouse
+      hit-testing; the Keybindings / Shell & env / Advanced categories (they need the
+      `[keys]` registry or config keys we do not have yet); Nerd-Font category icons
+      (ASCII markers today, pending the fixed-metric cell renderer).
   - [x] Live theming. `Renderer::set_theme` re-resolves the UI tokens and the binary
     re-resolves the ANSI palette + updates `config.appearance.theme` (Hard rule 1),
     then the next frame repaints every surface in the new theme (Hard rule 2). Driven

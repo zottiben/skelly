@@ -10,11 +10,12 @@
 use skelly_config::Appearance;
 
 use crate::cells::{
-    grid_quads, overlay_quads as build_overlay_quads, push_outline, sidebar_quads, Quad, QuadLayer,
+    grid_quads, overlay_quads as build_overlay_quads, push_outline,
+    settings_quads as build_settings_quads, sidebar_quads, Quad, QuadLayer,
 };
 use crate::text::{measure_cell, PaneTextInput, TextLayer};
 use crate::theme::{Rgba, Theme};
-use crate::{GridCell, OverlayView, PxRect, SidebarView};
+use crate::{GridCell, OverlayView, PxRect, SettingsView, SidebarView};
 
 /// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
@@ -245,6 +246,76 @@ pub fn capture_panes_rgba(
             .into_iter()
             .flatten()
             .collect(),
+    ))
+}
+
+/// The full-window settings view for [`capture_settings_rgba`], mirroring
+/// [`SettingsView`](crate::SettingsView) but owning its rows.
+pub struct CaptureSettings {
+    /// The settings panel rectangle (usually the whole surface), physical px.
+    pub panel: PxRect,
+    /// Pixel position of the text grid's cell `(0, 0)` top-left.
+    pub text_origin: (f32, f32),
+    /// The settings text as a monospace grid (UI-token colored).
+    pub rows: Vec<Vec<GridCell>>,
+    /// Width of the left category-nav column, in cells.
+    pub nav_cols: usize,
+    /// Grid row of the active category to mark, if any.
+    pub nav_active_row: Option<usize>,
+    /// Grid row of the focused control to highlight, if any.
+    pub selected_row: Option<usize>,
+}
+
+/// Render the full-window `settings` view over the theme background headlessly - the
+/// exact path the windowed [`Renderer`](crate::Renderer) uses for its settings pass -
+/// to an offscreen `width` x `height` sRGB target, returning tight RGBA8 bytes. The
+/// settings panel is opaque and full-bleed, so (as in the app) it fully replaces the
+/// terminal view; capturing it over the plain background is representative.
+///
+/// # Panics
+/// Panics if no GPU adapter/device is available or the readback fails.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "DPI scale precision loss is irrelevant for the divider stroke width"
+)]
+pub fn capture_settings_rgba(
+    appearance: &Appearance,
+    width: u32,
+    height: u32,
+    scale: f64,
+    settings: &CaptureSettings,
+) -> Vec<u8> {
+    let theme = Theme::resolve(&appearance.theme);
+    let (cell_w, cell_h) = measure_cell(appearance, scale);
+    let view = SettingsView {
+        panel: settings.panel,
+        text_origin: settings.text_origin,
+        rows: &settings.rows,
+        nav_cols: settings.nav_cols,
+        nav_active_row: settings.nav_active_row,
+        selected_row: settings.selected_row,
+    };
+    let scene = Scene {
+        quads: build_settings_quads(&view, &theme, cell_w, cell_h, scale as f32),
+        rows: &settings.rows,
+        left: settings.text_origin.0,
+        top: settings.text_origin.1,
+        clip: (
+            settings.panel.x,
+            settings.panel.y,
+            settings.panel.w,
+            settings.panel.h,
+        ),
+    };
+    pollster::block_on(capture_async(
+        appearance,
+        width,
+        height,
+        scale,
+        color(theme.bg_base),
+        |_text| Vec::new(),
+        vec![scene],
     ))
 }
 

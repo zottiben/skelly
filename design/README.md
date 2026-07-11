@@ -47,6 +47,28 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-12 - **Settings view.** A full in-window view over `config.toml` (Hard rule
+  4), opened with `⌘,` and dismissed with `Esc`, drawn over the still-running terminal
+  (never a route; focus returns to the exact pane on close). Left category nav
+  (Appearance, Sidebar, Tabs, Panes, Session, Git), right control list; keyboard-driven
+  (`↑/↓` move control, `←/→` or Enter change value, `Tab` switch category). Every
+  control maps to **exactly one** `config.toml` key (Hard rule 1); a test diffs the
+  serialized config and asserts a single leaf - the control's declared key - changes.
+  Edits persist immediately (`Config::save_default`, atomic temp-file rename) since the
+  file is the source of truth, and apply live where cheap (theme repaints everything,
+  including the open settings view itself; sidebar mode/width re-fit the shells);
+  font / cursor / opacity persist and take effect on next launch (live font re-shaping
+  is a follow-up). Rendered via a dedicated renderer pass (`Renderer::set_settings`):
+  a `bg.elevated` content panel over a `bg.base` nav strip, a `border` divider, the
+  active category's `accent` bar + `accent.subtle` fill, and the focused control's
+  translucent `accent` highlight - all UI tokens (Hard rule 2), verified in both
+  themes. Decided here (the guide is silent on these): the in-settings nav keys above;
+  the nav categories are the config sections we actually have (the mockup's General /
+  Keybindings / Shell & env / Advanced wait on config keys or the `[keys]` registry we
+  do not have yet); the rich widgets (theme cards, sliders, toggles) are represented
+  textually; category markers are alignment-safe ASCII glyphs until the fixed-metric
+  cell renderer (M2c) can place Nerd-Font icons. Deferred: mouse hit-testing in
+  settings, and a debounce on the per-edit file write.
 - 2026-07-12 - **Sidebar chrome (second half of "sidebar + tabs").** The persistent
   left dock now renders: a fixed-width panel (config `[sidebar] width`, default 240
   logical px) with a quiet brand header, the open-tab list, and a "+ New tab" action.

@@ -26,8 +26,8 @@ mod theme;
 
 pub use ansi::AnsiPalette;
 pub use capture::{
-    capture_cells_rgba, capture_panes_rgba, capture_rgba, CaptureOverlay, CapturePane,
-    CaptureSidebar,
+    capture_cells_rgba, capture_panes_rgba, capture_rgba, capture_settings_rgba, CaptureOverlay,
+    CapturePane, CaptureSettings, CaptureSidebar,
 };
 pub use error::RenderError;
 pub use renderer::Renderer;
@@ -107,6 +107,31 @@ pub struct SidebarView<'a> {
     pub rows: &'a [Vec<GridCell>],
     /// Grid row of the active tab to highlight (`accent` bar + `accent.subtle` fill).
     pub active_row: Option<usize>,
+}
+
+/// The full-window settings view to draw over the live terminal (AGENTS Hard rule
+/// 4 - a layer over the always-present pane tree, dismissed with Esc, never a route).
+///
+/// It splits into a left category nav and a right control panel, both baked into one
+/// monospace `rows` grid: the nav occupies the first `nav_cols` cells of each row and
+/// the controls occupy the rest. The renderer fills the panel with `bg.elevated`, the
+/// nav strip with `bg.base`, draws a `border` divider between them, marks the active
+/// category (`nav_active_row`: `accent` bar + `accent.subtle` fill) and the focused
+/// control (`selected_row`: translucent `accent` fill), then paints `rows` on top. The
+/// caller bakes the UI-token colors into `rows`; the renderer owns only the quads.
+pub struct SettingsView<'a> {
+    /// The settings panel rectangle on the surface (usually the whole window).
+    pub panel: PxRect,
+    /// Pixel position of the text grid's cell `(0, 0)` top-left, physical px.
+    pub text_origin: (f32, f32),
+    /// The settings text as a monospace grid (rows top to bottom), UI-token colored.
+    pub rows: &'a [Vec<GridCell>],
+    /// Width of the left category-nav column, in cells (the divider sits at its edge).
+    pub nav_cols: usize,
+    /// Grid row of the active category, to mark with the `accent` bar + subtle fill.
+    pub nav_active_row: Option<usize>,
+    /// Grid row of the focused control, to mark with the translucent `accent` fill.
+    pub selected_row: Option<usize>,
 }
 
 /// One cell to render: its character, foreground, optional background fill, and

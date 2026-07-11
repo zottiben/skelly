@@ -15,6 +15,8 @@ workspace = true
 [dev-dependencies]
 # session_capture example: render a live shell session to a PNG for verification.
 png = "0.17"
+# settings round-trip test: diff serialized config to prove each control writes one key.
+toml.workspace = true
 
 [dependencies]
 skelly-config = { path = "../skelly-config" }

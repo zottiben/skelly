@@ -15,7 +15,7 @@ use crate::cells::{grid_quads, push_outline, QuadLayer};
 use crate::error::RenderError;
 use crate::text::{PaneTextInput, TextLayer};
 use crate::theme::Theme;
-use crate::{OverlayView, PaneView, SidebarView};
+use crate::{OverlayView, PaneView, SettingsView, SidebarView};
 
 /// Owns the GPU device and surface and presents painted frames.
 pub struct Renderer {
@@ -34,6 +34,10 @@ pub struct Renderer {
     overlay_quads: QuadLayer,
     overlay_text: TextLayer,
     overlay_active: bool,
+    /// The full-window settings view, drawn over everything when open.
+    settings_quads: QuadLayer,
+    settings_text: TextLayer,
+    settings_active: bool,
 }
 
 impl Renderer {
@@ -142,6 +146,16 @@ impl Renderer {
             scale_factor,
             appearance,
         );
+        let settings_quads = QuadLayer::new(&device, config.format);
+        let settings_text = TextLayer::new(
+            &device,
+            &queue,
+            config.format,
+            config.width,
+            config.height,
+            scale_factor,
+            appearance,
+        );
 
         Self {
             surface,
@@ -157,6 +171,9 @@ impl Renderer {
             overlay_quads,
             overlay_text,
             overlay_active: false,
+            settings_quads,
+            settings_text,
+            settings_active: false,
         }
     }
 
@@ -172,6 +189,7 @@ impl Renderer {
         self.text.resize(width, height);
         self.sidebar_text.resize(width, height);
         self.overlay_text.resize(width, height);
+        self.settings_text.resize(width, height);
     }
 
     /// Cell metrics in physical px: `(width, height, top-left padding)`. Callers use
@@ -190,6 +208,7 @@ impl Renderer {
         self.text.set_default_fg(self.theme.fg_primary);
         self.sidebar_text.set_default_fg(self.theme.fg_primary);
         self.overlay_text.set_default_fg(self.theme.fg_primary);
+        self.settings_text.set_default_fg(self.theme.fg_primary);
     }
 
     /// Set the panes to display next frame. Each pane's grid is filled at its
@@ -311,6 +330,35 @@ impl Renderer {
         }]);
     }
 
+    /// Set the full-window settings view to draw over everything next frame, or clear
+    /// it with `None` (closed). Builds the nav/content panel fills, the active-category
+    /// and focused-control highlights, and the divider; the text colors come baked into
+    /// `settings.rows`. Drawn on top so it never unmounts the panes beneath (AGENTS Hard
+    /// rule 4).
+    pub fn set_settings(&mut self, settings: Option<&SettingsView>) {
+        let Some(view) = settings else {
+            self.settings_active = false;
+            return;
+        };
+        self.settings_active = true;
+        let scale = self.settings_text.scale();
+        let (cell_w, cell_h, _) = self.settings_text.cell_metrics();
+        let quads = crate::cells::settings_quads(view, &self.theme, cell_w, cell_h, scale);
+        self.settings_quads.set(
+            &self.device,
+            &self.queue,
+            self.config.width,
+            self.config.height,
+            &quads,
+        );
+        self.settings_text.set_panes(&[PaneTextInput {
+            rows: view.rows,
+            left: view.text_origin.0,
+            top: view.text_origin.1,
+            clip: (view.panel.x, view.panel.y, view.panel.w, view.panel.h),
+        }]);
+    }
+
     /// Acquire the next surface frame, paint it, and present.
     ///
     /// Recovers from a lost/outdated swapchain by reconfiguring and skipping the
@@ -375,6 +423,19 @@ impl Renderer {
             self.overlay_quads
                 .draw(&self.device, &self.queue, &view, None);
             self.overlay_text.draw(
+                &self.device,
+                &self.queue,
+                &view,
+                self.config.width,
+                self.config.height,
+            )?;
+        }
+        // Passes 7-8: the full-window settings view, loaded over everything else. It
+        // is mutually exclusive with the palette, so the two never draw together.
+        if self.settings_active {
+            self.settings_quads
+                .draw(&self.device, &self.queue, &view, None);
+            self.settings_text.draw(
                 &self.device,
                 &self.queue,
                 &view,

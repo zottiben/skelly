@@ -2177,6 +2177,7 @@ dependencies = [
  "skelly-pane",
  "skelly-render",
  "skelly-term",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "winit",

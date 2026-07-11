@@ -11,20 +11,23 @@
 //! never leak up.
 
 mod palette;
+mod settings;
 mod sidebar;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Context as _;
-use skelly_config::Config;
+use skelly_config::{Config, SidebarMode};
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
 use skelly_render::{
-    AnsiPalette, GridCell, OverlayView, PaneView, PxRect, Renderer, SidebarView, Srgb, Theme,
+    AnsiPalette, GridCell, OverlayView, PaneView, PxRect, Renderer, SettingsView, SidebarView,
+    Srgb, Theme,
 };
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 
 use palette::Palette;
+use settings::Settings;
 use sidebar::Sidebar;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -43,6 +46,8 @@ const RESIZE_STEP: f32 = 0.04;
 const PALETTE_PAD: f32 = 12.0;
 /// Logical inset (px) of the sidebar's text from the sidebar's top-left corner.
 const SIDEBAR_PAD: f32 = 12.0;
+/// Logical inset (px) of the full-window settings view's text from the window edge.
+const SETTINGS_PAD: f32 = 20.0;
 
 /// Event the reader thread sends to wake the UI when a shell produces output.
 #[derive(Debug, Clone, Copy)]
@@ -149,6 +154,8 @@ struct App {
     theme: Theme,
     /// The command-palette overlay state.
     palette: Palette,
+    /// The full-window settings view state.
+    settings: Settings,
     /// The persistent left sidebar (the tab list) state.
     sidebar: Sidebar,
     clipboard: Option<arboard::Clipboard>,
@@ -178,6 +185,7 @@ impl App {
             ansi_palette,
             theme,
             palette: Palette::new(),
+            settings: Settings::new(),
             sidebar,
             clipboard: arboard::Clipboard::new().ok(),
             window: None,
@@ -366,6 +374,7 @@ impl App {
         // Build the chrome frames before the mutable renderer borrow.
         let sidebar = self.sidebar.visible.then(|| self.build_sidebar_frame());
         let overlay = self.palette.open.then(|| self.build_palette_frame());
+        let settings = self.settings.open.then(|| self.build_settings_frame());
 
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_panes(&views);
@@ -387,6 +396,17 @@ impl App {
                     caret: Some(frame.caret),
                 })),
                 None => renderer.set_overlay(None),
+            }
+            match &settings {
+                Some(frame) => renderer.set_settings(Some(&SettingsView {
+                    panel: frame.panel,
+                    text_origin: frame.origin,
+                    rows: &frame.rows,
+                    nav_cols: frame.nav_cols,
+                    nav_active_row: frame.nav_active_row,
+                    selected_row: frame.selected_row,
+                })),
+                None => renderer.set_settings(None),
             }
             if let Err(err) = renderer.render() {
                 tracing::error!(%err, "frame render failed");
@@ -460,6 +480,70 @@ impl App {
             rows: view.rows,
             active_row: view.active_row,
         }
+    }
+
+    /// Lay out the settings view: a full-window panel, its nav + control grid rendered
+    /// in UI tokens and clipped to the window.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the settings cell width is a small, non-negative value"
+    )]
+    fn build_settings_frame(&self) -> SettingsFrame {
+        let (cell_w, _) = self.cell_size();
+        let pad = SETTINGS_PAD * scale32(self.scale);
+        let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
+
+        let cols = ((surface_w - 2.0 * pad) / cell_w).floor().max(1.0) as usize;
+        let view = self.settings.view(cols, &self.config, &self.theme);
+
+        SettingsFrame {
+            panel: PxRect {
+                x: 0.0,
+                y: 0.0,
+                w: surface_w,
+                h: surface_h,
+            },
+            origin: (pad, pad),
+            rows: view.rows,
+            nav_cols: view.nav_cols,
+            nav_active_row: view.nav_active_row,
+            selected_row: view.selected_row,
+        }
+    }
+
+    /// Open the settings view (`⌘,` or the palette command).
+    fn open_settings(&mut self) {
+        self.settings.open();
+        self.request_redraw();
+    }
+
+    /// Persist the config to disk after a settings edit - the file is the source of
+    /// truth (Hard rule 1). A write failure is logged, not fatal (the in-memory config
+    /// still reflects the change for this session).
+    fn persist_config(&self) {
+        if let Err(err) = self.config.save_default() {
+            tracing::warn!(%err, "failed to persist config");
+        }
+    }
+
+    /// Apply a settings change: the live effects Skelly can do cheaply now (theme and
+    /// sidebar re-layout), then persist the file and repaint. Font / cursor / opacity
+    /// changes are persisted and take effect on the next launch (live font re-shaping is
+    /// a later slice).
+    fn apply_setting_change(&mut self, key: &str) {
+        match key {
+            "appearance.theme" => self.set_theme_live(),
+            "sidebar.mode" => {
+                self.sidebar.visible = !matches!(self.config.sidebar.mode, SidebarMode::Hidden);
+                self.sync_layout();
+            }
+            "sidebar.width" => self.sync_layout(),
+            _ => {}
+        }
+        self.persist_config();
+        self.request_redraw();
     }
 
     /// Toggle the sidebar (`⌘B`). The pane viewport changes width, so re-fit the shells.
@@ -561,21 +645,28 @@ impl App {
         }
     }
 
-    /// Switch the active UI theme by name, live. Updates the config (the source of
-    /// truth, Hard rule 1), the resolved UI tokens, and the ANSI palette, then repaints
-    /// everything in the new theme (Hard rule 2). The ANSI palette stays a separate
-    /// concept from the UI tokens; both currently key off the one theme name.
+    /// Re-resolve every theme-derived surface from the current `config.appearance.theme`
+    /// and repaint (Hard rule 2: switching theme repaints everything live). The ANSI
+    /// palette stays a separate concept from the UI tokens; both currently key off the
+    /// one theme name. Assumes the config already holds the desired theme.
+    fn set_theme_live(&mut self) {
+        let name = self.config.appearance.theme.clone();
+        self.theme = Theme::resolve(&name);
+        self.ansi_palette = AnsiPalette::resolve(&name);
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_theme(&name);
+        }
+        self.request_redraw();
+    }
+
+    /// Switch the active UI theme by name (the palette theme commands). Writes the
+    /// config (the source of truth, Hard rule 1) then repaints live.
     fn apply_theme(&mut self, name: &str) {
         if self.config.appearance.theme == name {
             return;
         }
         name.clone_into(&mut self.config.appearance.theme);
-        self.theme = Theme::resolve(name);
-        self.ansi_palette = AnsiPalette::resolve(name);
-        if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_theme(name);
-        }
-        self.request_redraw();
+        self.set_theme_live();
     }
 
     /// Open a new tab (its own pane tree + fresh shell) and switch to it.
@@ -696,9 +787,63 @@ impl App {
             Action::NextTab => self.cycle_tab(true),
             Action::PrevTab => self.cycle_tab(false),
             Action::ToggleSidebar => self.toggle_sidebar(),
+            Action::OpenSettings => self.open_settings(),
             Action::ThemeDark => self.apply_theme("ossein-dark"),
             Action::ThemeLight => self.apply_theme("ossein-light"),
             Action::Quit => event_loop.exit(),
+        }
+    }
+
+    /// Handle a key while the settings view is open: it captures all input. `↑/↓` move
+    /// between controls, `←/→` change the focused value, `Tab` / `Shift+Tab` switch
+    /// category, `Enter` activates (flip / cycle), `Esc` (or `⌘,`) closes, `⌘Q` quits.
+    fn on_settings_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
+        if self.modifiers.super_key() {
+            if let Key::Character(ch) = key_event.logical_key.as_ref() {
+                if ch == "," {
+                    self.settings.close();
+                    self.request_redraw();
+                    return;
+                }
+                if ch.eq_ignore_ascii_case("q") {
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
+        match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape) => {
+                self.settings.close();
+                self.request_redraw();
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.settings.move_selection(-1);
+                self.request_redraw();
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.settings.move_selection(1);
+                self.request_redraw();
+            }
+            Key::Named(NamedKey::ArrowLeft) => {
+                if let Some(key) = self.settings.adjust(&mut self.config, -1) {
+                    self.apply_setting_change(key);
+                }
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                if let Some(key) = self.settings.adjust(&mut self.config, 1) {
+                    self.apply_setting_change(key);
+                }
+            }
+            Key::Named(NamedKey::Tab) => {
+                self.settings.cycle_category(!self.modifiers.shift_key());
+                self.request_redraw();
+            }
+            Key::Named(NamedKey::Enter) => {
+                if let Some(key) = self.settings.activate(&mut self.config) {
+                    self.apply_setting_change(key);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -708,7 +853,11 @@ impl App {
         if key_event.state != ElementState::Pressed {
             return;
         }
-        // The command palette captures all input while open.
+        // The settings view and command palette each capture all input while open.
+        if self.settings.open {
+            self.on_settings_key(event_loop, key_event);
+            return;
+        }
         if self.palette.open {
             self.on_palette_key(event_loop, key_event);
             return;
@@ -744,6 +893,10 @@ impl App {
                 }
                 if ch.eq_ignore_ascii_case("b") {
                     self.toggle_sidebar();
+                    return;
+                }
+                if ch == "," {
+                    self.open_settings();
                     return;
                 }
             }
@@ -884,6 +1037,16 @@ struct SidebarFrame {
     origin: (f32, f32),
     rows: Vec<Vec<GridCell>>,
     active_row: Option<usize>,
+}
+
+/// Owned settings-view frame data the borrowed [`SettingsView`] points at.
+struct SettingsFrame {
+    panel: PxRect,
+    origin: (f32, f32),
+    rows: Vec<Vec<GridCell>>,
+    nav_cols: usize,
+    nav_active_row: Option<usize>,
+    selected_row: Option<usize>,
 }
 
 /// Resolve a terminal cell into a render cell against the active ANSI palette,
