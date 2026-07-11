@@ -11,11 +11,11 @@ use std::sync::Arc;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use skelly_config::Appearance;
 
-use crate::cells::QuadLayer;
+use crate::cells::{grid_quads, push_outline, QuadLayer};
 use crate::error::RenderError;
-use crate::text::TextLayer;
+use crate::text::{PaneTextInput, TextLayer};
 use crate::theme::Theme;
-use crate::GridCell;
+use crate::PaneView;
 
 /// Owns the GPU device and surface and presents painted frames.
 pub struct Renderer {
@@ -145,26 +145,60 @@ impl Renderer {
         self.text.cell_metrics()
     }
 
-    /// Set the colored grid to display next frame, with the cursor at `cursor`
-    /// `(column, row)` and `selection` the highlighted cells. Lays out the glyphs and
-    /// builds the background, selection, and cursor quads.
-    pub fn set_grid(
-        &mut self,
-        rows: &[Vec<GridCell>],
-        cursor: (usize, usize),
-        selection: &[(usize, usize)],
-    ) {
-        self.text.set_cells(rows);
-        let (cell_w, cell_h, pad) = self.text.cell_metrics();
-        let quads = crate::cells::grid_quads(
-            cell_w,
-            cell_h,
-            pad,
-            rows,
-            cursor,
-            self.theme.accent,
-            selection,
-        );
+    /// Set the panes to display next frame. Each pane's grid is filled at its
+    /// `origin` and clipped to its `rect`; with more than one pane a `border` divider
+    /// is drawn around each and an `accent` ring around the focused one. Only the
+    /// focused pane draws a cursor.
+    pub fn set_panes(&mut self, panes: &[PaneView]) {
+        let (cell_w, cell_h, _) = self.text.cell_metrics();
+        let scale = self.text.scale();
+        let mut quads = Vec::new();
+        let mut text_inputs = Vec::with_capacity(panes.len());
+        for pane in panes {
+            let cursor = pane.focused.then_some(pane.cursor);
+            quads.extend(grid_quads(
+                cell_w,
+                cell_h,
+                pane.origin,
+                pane.rows,
+                cursor,
+                self.theme.accent,
+                pane.selection,
+            ));
+            text_inputs.push(PaneTextInput {
+                rows: pane.rows,
+                left: pane.origin.0,
+                top: pane.origin.1,
+                clip: (pane.rect.x, pane.rect.y, pane.rect.w, pane.rect.h),
+            });
+        }
+        // A lone pane stays borderless (just the window margin), like a single shell.
+        // With splits, draw the dividers, then the focused ring on top.
+        if panes.len() > 1 {
+            let divider = self.theme.border.to_linear();
+            for pane in panes {
+                push_outline(
+                    &mut quads,
+                    pane.rect.x,
+                    pane.rect.y,
+                    pane.rect.w,
+                    pane.rect.h,
+                    scale,
+                    divider,
+                );
+            }
+            if let Some(pane) = panes.iter().find(|p| p.focused) {
+                push_outline(
+                    &mut quads,
+                    pane.rect.x,
+                    pane.rect.y,
+                    pane.rect.w,
+                    pane.rect.h,
+                    2.0 * scale,
+                    self.theme.accent.to_linear(),
+                );
+            }
+        }
         self.quads.set(
             &self.device,
             &self.queue,
@@ -172,6 +206,7 @@ impl Renderer {
             self.config.height,
             &quads,
         );
+        self.text.set_panes(&text_inputs);
     }
 
     /// Acquire the next surface frame, paint it, and present.

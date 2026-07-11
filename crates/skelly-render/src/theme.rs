@@ -60,8 +60,11 @@ pub struct Theme {
     pub bg_base: Rgba,
     /// `fg.primary` - primary UI/terminal text (sRGB, for glyph rendering).
     pub fg_primary: Srgb,
-    /// `accent` - brand / cursor color (sRGB).
+    /// `accent` - brand / cursor color (sRGB). Also the focused pane's `border.strong`
+    /// ring per the design guide.
     pub accent: Srgb,
+    /// `border` - the subtle divider drawn between tiled panes (sRGB).
+    pub border: Srgb,
 }
 
 impl Theme {
@@ -70,7 +73,9 @@ impl Theme {
     #[must_use]
     pub fn resolve(name: &str) -> Self {
         match name {
-            // Ossein Light: bg.base #EFF1F5, fg.primary #4C4F69, accent #8839EF.
+            // Ossein Light: bg.base #EFF1F5, fg.primary #4C4F69, accent #8839EF,
+            // border #BCC0CC (the shared Catppuccin-Latte surface the palette derives
+            // from - see design/README.md).
             "ossein-light" => Self {
                 bg_base: srgb_hex(0xEF, 0xF1, 0xF5),
                 fg_primary: Srgb {
@@ -83,8 +88,14 @@ impl Theme {
                     g: 0x39,
                     b: 0xEF,
                 },
+                border: Srgb {
+                    r: 0xBC,
+                    g: 0xC0,
+                    b: 0xCC,
+                },
             },
-            // Ossein Dark (default): bg.base #181825, fg.primary #CDD6F4, accent #BD93F9.
+            // Ossein Dark (default): bg.base #181825, fg.primary #CDD6F4, accent
+            // #BD93F9, border #313244 (an Ossein surface color used in the guide).
             _ => Self {
                 bg_base: srgb_hex(0x18, 0x18, 0x25),
                 fg_primary: Srgb {
@@ -96,6 +107,11 @@ impl Theme {
                     r: 0xBD,
                     g: 0x93,
                     b: 0xF9,
+                },
+                border: Srgb {
+                    r: 0x31,
+                    g: 0x32,
+                    b: 0x44,
                 },
             },
         }

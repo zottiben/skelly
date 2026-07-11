@@ -2174,6 +2174,7 @@ dependencies = [
  "arboard",
  "png",
  "skelly-config",
+ "skelly-pane",
  "skelly-render",
  "skelly-term",
  "tracing",

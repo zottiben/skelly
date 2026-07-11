@@ -17,25 +17,46 @@ use crate::error::RenderError;
 use crate::theme::{Srgb, Theme};
 use crate::GridCell;
 
-/// Placeholder content proving the shaping -> atlas -> GPU-draw path end-to-end,
-/// used by [`TextLayer::set_content`] callers (the plain-text capture example).
-const DEMO_TEXT: &str = "skelly\na barebones terminal, built in rust.\n\ntext rendering online: glyphon + cosmic-text on wgpu.";
-
-/// Logical padding (px) from the top-left, matching the design's content pad.
+/// Logical padding (px) from a pane's top-left, matching the design's content pad.
 const CONTENT_PAD: f32 = 12.0;
 
-/// A `glyphon` text pipeline bound to a texture format.
+/// One pane's shaped text buffer plus where it draws: the pixel position of its
+/// top-left cell (`left`, `top`) and its clip rectangle `(x, y, w, h)` (so a row
+/// wider than the pane is clipped rather than spilling into a neighbor).
+struct PaneBuf {
+    buffer: Buffer,
+    left: f32,
+    top: f32,
+    clip: (f32, f32, f32, f32),
+}
+
+/// One pane's text input to [`TextLayer::set_panes`]: the cell grid plus the pixel
+/// origin of cell `(0, 0)` and the clip rectangle.
+pub(crate) struct PaneTextInput<'a> {
+    pub rows: &'a [Vec<GridCell>],
+    pub left: f32,
+    pub top: f32,
+    pub clip: (f32, f32, f32, f32),
+}
+
+/// A `glyphon` text pipeline bound to a texture format. Holds one shaped buffer per
+/// visible pane, all drawn in a single prepare/render pass.
 pub struct TextLayer {
     scale: f32,
     default_fg: Srgb,
     cell_w: f32,
     cell_h: f32,
+    /// Font size + line height, for building each pane's buffer.
+    metrics: Metrics,
+    /// Current render-target size (physical px), used as the single-pane clip.
+    target_w: f32,
+    target_h: f32,
     font_system: FontSystem,
     swash_cache: SwashCache,
     viewport: Viewport,
     atlas: TextAtlas,
     renderer: TextRenderer,
-    buffer: Buffer,
+    panes: Vec<PaneBuf>,
     /// The configured font family when installed; `None` falls back to monospace.
     family_name: Option<String>,
 }
@@ -75,32 +96,21 @@ impl TextLayer {
             family_of(family_name.as_deref()),
         );
 
-        let mut buffer = Buffer::new(&mut font_system, Metrics::new(font_px, line_px));
-        // A terminal grid never reflows: each row is exactly one visual line. Without
-        // this, full-width rows (80 columns, trailing spaces included) exceed the
-        // buffer width and wrap, doubling the line pitch and desyncing the glyphs from
-        // the cell-background / cursor / underline quads.
-        buffer.set_wrap(Wrap::None);
-        buffer.set_size(Some(dim_to_f32(width)), Some(dim_to_f32(height)));
-        buffer.set_text(
-            DEMO_TEXT,
-            &Attrs::new().family(family_of(family_name.as_deref())),
-            Shaping::Advanced,
-            None,
-        );
-        buffer.shape_until_scroll(&mut font_system, false);
-
+        // Panes are created lazily by the first `set_panes` / `set_cells` call.
         Self {
             scale,
             default_fg: Theme::resolve(&appearance.theme).fg_primary,
             cell_w,
             cell_h: line_px,
+            metrics: Metrics::new(font_px, line_px),
+            target_w: dim_to_f32(width),
+            target_h: dim_to_f32(height),
             font_system,
             swash_cache,
             viewport,
             atlas,
             renderer,
-            buffer,
+            panes: Vec::new(),
             family_name,
         }
     }
@@ -112,38 +122,121 @@ impl TextLayer {
         (self.cell_w, self.cell_h, CONTENT_PAD * self.scale)
     }
 
-    /// Replace the displayed text with a plain string in the configured cell font.
-    pub fn set_content(&mut self, text: &str) {
-        let attrs = Attrs::new().family(family_of(self.family_name.as_deref()));
-        self.buffer.set_text(text, &attrs, Shaping::Advanced, None);
-        self.buffer.shape_until_scroll(&mut self.font_system, false);
+    /// The DPI scale factor (physical px per logical px), for sizing pane dividers.
+    #[must_use]
+    pub(crate) fn scale(&self) -> f32 {
+        self.scale
     }
 
-    /// Replace the display with a colored grid, drawing each cell's glyph in its
-    /// foreground color and weight/style, in the configured font (monospace
-    /// fallback). Consecutive cells with the same color and attributes merge into
-    /// runs to keep the span count down.
-    pub fn set_cells(&mut self, rows: &[Vec<GridCell>]) {
-        let runs = text_runs(rows);
-        let family = family_of(self.family_name.as_deref());
+    /// Grow or shrink the pane-buffer pool to exactly `n` buffers, reusing existing
+    /// ones. New buffers inherit the no-reflow policy (each grid row is one visual
+    /// line - see the width note below).
+    fn ensure_panes(&mut self, n: usize) {
+        let Self {
+            panes,
+            font_system,
+            metrics,
+            ..
+        } = self;
+        while panes.len() < n {
+            // A terminal grid never reflows: each row is exactly one visual line.
+            // Without this, full-width rows (trailing spaces included) exceed the
+            // buffer width and wrap, doubling the line pitch and desyncing the glyphs
+            // from the cell-background / cursor / underline quads.
+            let mut buffer = Buffer::new(font_system, *metrics);
+            buffer.set_wrap(Wrap::None);
+            panes.push(PaneBuf {
+                buffer,
+                left: 0.0,
+                top: 0.0,
+                clip: (0.0, 0.0, 0.0, 0.0),
+            });
+        }
+        panes.truncate(n);
+    }
+
+    /// Shape each pane's grid into its own buffer, recording where it draws. One
+    /// buffer per input; consecutive cells with the same color and attributes merge
+    /// into runs to keep the span count down.
+    pub(crate) fn set_panes(&mut self, inputs: &[PaneTextInput]) {
+        self.ensure_panes(inputs.len());
+        let Self {
+            panes,
+            font_system,
+            family_name,
+            ..
+        } = self;
+        let family = family_of(family_name.as_deref());
         let default = Attrs::new().family(family);
-        let spans = runs
-            .iter()
-            .map(|run| (run.text.as_str(), run.attrs(family)));
-        self.buffer
-            .set_rich_text(spans, &default, Shaping::Advanced, None);
-        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        for (pane, input) in panes.iter_mut().zip(inputs) {
+            pane.left = input.left;
+            pane.top = input.top;
+            pane.clip = input.clip;
+            pane.buffer
+                .set_size(Some(input.clip.2.max(1.0)), Some(input.clip.3.max(1.0)));
+            let runs = text_runs(input.rows);
+            if runs.is_empty() {
+                pane.buffer.set_text("", &default, Shaping::Advanced, None);
+            } else {
+                let spans = runs
+                    .iter()
+                    .map(|run| (run.text.as_str(), run.attrs(family)));
+                pane.buffer
+                    .set_rich_text(spans, &default, Shaping::Advanced, None);
+            }
+            pane.buffer.shape_until_scroll(font_system, false);
+        }
     }
 
-    /// Re-layout the text for a new target size.
+    /// Replace the display with a single pane of plain `text` at the content pad, in
+    /// the configured cell font. (The plain-text capture path.)
+    pub fn set_content(&mut self, text: &str) {
+        self.ensure_panes(1);
+        let pad = CONTENT_PAD * self.scale;
+        let Self {
+            panes,
+            font_system,
+            family_name,
+            target_w,
+            target_h,
+            ..
+        } = self;
+        let pane = &mut panes[0];
+        pane.left = pad;
+        pane.top = pad;
+        pane.clip = (0.0, 0.0, *target_w, *target_h);
+        pane.buffer
+            .set_size(Some(target_w.max(1.0)), Some(target_h.max(1.0)));
+        let attrs = Attrs::new().family(family_of(family_name.as_deref()));
+        pane.buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        pane.buffer.shape_until_scroll(font_system, false);
+    }
+
+    /// Replace the display with a single colored grid at the content pad, filling the
+    /// whole target. (The headless cell-capture path; the windowed renderer drives
+    /// multiple panes through `set_panes`.)
+    pub fn set_cells(&mut self, rows: &[Vec<GridCell>]) {
+        let pad = CONTENT_PAD * self.scale;
+        let clip = (0.0, 0.0, self.target_w, self.target_h);
+        self.set_panes(&[PaneTextInput {
+            rows,
+            left: pad,
+            top: pad,
+            clip,
+        }]);
+    }
+
+    /// Record a new target size. The windowed renderer re-runs `set_panes` with
+    /// fresh clips every frame, so this only keeps the single-pane capture/plain
+    /// paths' clip in sync.
     pub fn resize(&mut self, width: u32, height: u32) {
-        self.buffer
-            .set_size(Some(dim_to_f32(width)), Some(dim_to_f32(height)));
-        self.buffer.shape_until_scroll(&mut self.font_system, false);
+        self.target_w = dim_to_f32(width);
+        self.target_h = dim_to_f32(height);
     }
 
-    /// Draw the text into `view`, *loading* the existing contents (the quad pass has
-    /// already cleared and filled backgrounds). Submits its own command buffer.
+    /// Draw every pane's text into `view`, *loading* the existing contents (the quad
+    /// pass has already cleared and filled backgrounds). Each pane clips to its own
+    /// rectangle. Submits its own command buffer.
     ///
     /// # Errors
     /// Returns [`RenderError::Text`] if shaping/preparing or drawing the glyphs
@@ -159,7 +252,27 @@ impl TextLayer {
         self.viewport.update(queue, Resolution { width, height });
 
         let fg = self.default_fg;
-        let pad = CONTENT_PAD * self.scale;
+        let areas: Vec<TextArea> = self
+            .panes
+            .iter()
+            .map(|pane| {
+                let (cx, cy, cw, ch) = pane.clip;
+                TextArea {
+                    buffer: &pane.buffer,
+                    left: pane.left,
+                    top: pane.top,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: px_to_i32(cx),
+                        top: px_to_i32(cy),
+                        right: px_to_i32(cx + cw),
+                        bottom: px_to_i32(cy + ch),
+                    },
+                    default_color: Color::rgb(fg.r, fg.g, fg.b),
+                    custom_glyphs: &[],
+                }
+            })
+            .collect();
         self.renderer
             .prepare(
                 device,
@@ -167,20 +280,7 @@ impl TextLayer {
                 &mut self.font_system,
                 &mut self.atlas,
                 &self.viewport,
-                [TextArea {
-                    buffer: &self.buffer,
-                    left: pad,
-                    top: pad,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: dim_to_i32(width),
-                        bottom: dim_to_i32(height),
-                    },
-                    default_color: Color::rgb(fg.r, fg.g, fg.b),
-                    custom_glyphs: &[],
-                }],
+                areas,
                 &mut self.swash_cache,
             )
             .map_err(|err| RenderError::Text(err.to_string()))?;
@@ -283,6 +383,25 @@ fn text_runs(rows: &[Vec<GridCell>]) -> Vec<Run> {
     runs
 }
 
+/// Measure the cell size `(width, height)` in physical px for `appearance` at
+/// `scale_factor`, with no GPU - the exact metrics the grid tiles to. Lets headless
+/// callers (captures, tests) size a grid to the same cells the renderer draws.
+#[must_use]
+pub fn measure_cell(appearance: &Appearance, scale_factor: f64) -> (f32, f32) {
+    let mut font_system = FontSystem::new();
+    let scale = scale_to_f32(scale_factor);
+    let font_px = f32::from(appearance.font_size) * scale;
+    let line_px = font_px * appearance.line_height;
+    let family_name = installed_family(&font_system, &appearance.font_family);
+    let cell_w = measure_cell_width(
+        &mut font_system,
+        font_px,
+        line_px,
+        family_of(family_name.as_deref()),
+    );
+    (cell_w, line_px)
+}
+
 /// Measure the advance width of a glyph in `family` at `font_px`, in physical px.
 fn measure_cell_width(
     font_system: &mut FontSystem,
@@ -335,13 +454,13 @@ fn dim_to_f32(value: u32) -> f32 {
     value as f32
 }
 
-/// Cast a pixel dimension to `i32` for text-clip bounds.
+/// Convert a pixel coordinate to a non-negative `i32` for a text-clip bound.
 #[allow(
-    clippy::cast_possible_wrap,
-    reason = "window pixel dimensions are far below i32::MAX"
+    clippy::cast_possible_truncation,
+    reason = "clip coordinates are small, non-negative pixel values"
 )]
-fn dim_to_i32(value: u32) -> i32 {
-    value as i32
+fn px_to_i32(value: f32) -> i32 {
+    value.max(0.0).round() as i32
 }
 
 #[cfg(test)]

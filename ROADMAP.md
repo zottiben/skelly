@@ -76,14 +76,22 @@ opportunistically rather than block M3 on, since the terminal already works. M3
       named colors in `map_color` instead of falling back to the default foreground.
 - [~] **M3 - Skelly shell UX.** Sidebar + tabs/groups/pinning; pane tree
   (split/focus/resize/zoom, <=8); command palette; settings view; live theming.
-  - [~] Pane tree (split/focus/resize/zoom, <=8).
+  - [x] Pane tree (split/focus/resize/zoom, <=8).
     - [x] The pane-tree **model** - a leaf crate `skelly-pane` (ADR-0005): nested
       uneven binary splits, directional focus, keyboard resize, zoom, even-out, and
       exact viewport tiling, capped at 8 panes. Pure logic, unit + `proptest`
       tiling-invariant tested; no UI/GPU/PTY deps.
-    - [ ] Wire it into the window: a live terminal per pane, the renderer drawing
-      each pane at its rect with dividers + the focused `border.strong` ring, input
-      routed to the focused pane, and the split/close/focus/zoom keybindings.
+    - [x] Wired into the window: a live terminal per pane (`HashMap<PaneId,
+      Terminal>` reconciled by `sync_layout`: spawn / resize / prune), the renderer
+      drawing every pane via `Renderer::set_panes` at its rect with a `border`
+      divider + the focused `accent` ring and a cursor only in the focused pane,
+      input routed to the focused pane (pointer->pane->cell for clicks/selection/
+      wheel), and the `⌥` pane keybindings (split `⌥|`/`⌥-`, focus `⌥h/j/k/l` +
+      `⌥1..8`, resize `⌥⇧h/j/k/l`, zoom `⌥Z`, close `⌥w`, even-out `⌥=`). Verified
+      by the `pane_capture` headless PNG (real 2-pane split, two live shells) + unit
+      tests for the geometry and chord decode. Follow-ups: configurable
+      `panes.leader` + remappable `[keys]` + palette surfacing (command-palette
+      slice); draggable dividers.
 - [ ] **M4 - Signature features.** Per-repo git diff dock with hunk staging;
   session timeline with non-destructive rewind (shadow worktree).
 - [ ] **M5 - Hardening & release.** Edge/empty/error states, perf budgets,

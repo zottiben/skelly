@@ -25,11 +25,47 @@ mod text;
 mod theme;
 
 pub use ansi::AnsiPalette;
-pub use capture::{capture_cells_rgba, capture_rgba};
+pub use capture::{capture_cells_rgba, capture_panes_rgba, capture_rgba, CapturePane};
 pub use error::RenderError;
 pub use renderer::Renderer;
-pub use text::TextLayer;
+pub use text::{measure_cell, TextLayer};
 pub use theme::{Rgba, Srgb, Theme};
+
+/// A rectangle in physical pixels, positioning a pane on the render surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PxRect {
+    /// Left edge.
+    pub x: f32,
+    /// Top edge.
+    pub y: f32,
+    /// Width.
+    pub w: f32,
+    /// Height.
+    pub h: f32,
+}
+
+/// One pane to draw this frame.
+///
+/// The renderer tiles any number of these onto the surface: it fills each pane's
+/// cell backgrounds/underlines/selection, draws the glyphs clipped to `rect`, and -
+/// when more than one pane is present - a subtle `border` divider around each with
+/// an `accent` ring around the focused one. The cursor is drawn only in the focused
+/// pane. The binary owns the geometry (`rect` and the cell `origin`); the renderer
+/// just paints where told.
+pub struct PaneView<'a> {
+    /// The pane's rectangle on the surface (border + text clip), physical px.
+    pub rect: PxRect,
+    /// Pixel position of cell `(0, 0)`'s top-left corner, physical px.
+    pub origin: (f32, f32),
+    /// The pane's cell grid, top to bottom.
+    pub rows: &'a [Vec<GridCell>],
+    /// Cursor position `(column, row)` - drawn only when `focused`.
+    pub cursor: (usize, usize),
+    /// Selected cells `(column, row)` in this pane.
+    pub selection: &'a [(usize, usize)],
+    /// Whether this is the focused pane (accent ring + drawn cursor).
+    pub focused: bool,
+}
 
 /// One cell to render: its character, foreground, optional background fill, and
 /// resolved text attributes.

@@ -47,6 +47,24 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-11 - **Pane keybindings (M3 wiring).** Pane control uses `Alt` (`⌥`) as a
+  direct, leader-less modifier, matched on the *physical* key (so macOS Option-key
+  glyph remapping doesn't interfere). The guide shows `⌥|` split-right, `⌥-`
+  split-down, `⌥Z` zoom, and `⌥1..⌥8` focus-by-number; these are honored exactly.
+  The guide is silent on the rest, so decided here: `⌥h/j/k/l` directional focus,
+  `⌥⇧h/j/k/l` resize the enclosing divider, `⌥w` close (the guide's `⌘W` is
+  close-*tab*), and `⌥=` even-out. The configurable tmux-style leader
+  (`panes.leader`, default `ctrl+a`) and the full remappable `[keys]` registry +
+  command-palette surfacing are deferred to the command-palette slice; the built-in
+  `⌥` chords ship first.
+- 2026-07-11 - **Pane dividers + focus ring.** With more than one pane, each pane
+  gets a subtle 1px `border` divider and the focused pane a 2px `accent` ring
+  (`border.strong` in the guide == accent `#BD93F9`). A lone pane stays borderless.
+  Added a `border` UI token: Ossein Dark `#313244` (a surface color present in the
+  guide), Ossein Light `#BCC0CC` (the matching Catppuccin-Latte surface the Ossein
+  Light palette derives from - the guide's light tokens are sparse). Geometry: a
+  12px logical window margin around the pane area, a 6px logical inset inside each
+  pane between its border and cells.
 - 2026-07-11 - Architecture decisions are recorded as ADRs in `docs/adr/`
   (ADR-0000). Foundation-stack choices are proposed in ADR-0001..0004, pending
   maintainer ratification before the M1 walking skeleton lands them.

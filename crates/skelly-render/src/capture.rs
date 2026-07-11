@@ -9,10 +9,10 @@
 
 use skelly_config::Appearance;
 
-use crate::cells::{grid_quads, Quad, QuadLayer};
-use crate::text::TextLayer;
+use crate::cells::{grid_quads, push_outline, Quad, QuadLayer};
+use crate::text::{PaneTextInput, TextLayer};
 use crate::theme::{Rgba, Theme};
-use crate::GridCell;
+use crate::{GridCell, PxRect};
 
 /// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
@@ -68,7 +68,106 @@ pub fn capture_cells_rgba(
         |text| {
             text.set_cells(rows);
             let (cell_w, cell_h, pad) = text.cell_metrics();
-            grid_quads(cell_w, cell_h, pad, rows, cursor, theme.accent, selection)
+            grid_quads(
+                cell_w,
+                cell_h,
+                (pad, pad),
+                rows,
+                Some(cursor),
+                theme.accent,
+                selection,
+            )
+        },
+    ))
+}
+
+/// One pane for [`capture_panes_rgba`]: its rectangle and cell origin (physical px),
+/// its grid, cursor, and whether it is focused.
+pub struct CapturePane {
+    /// The pane's rectangle on the target (border + text clip).
+    pub rect: PxRect,
+    /// Pixel position of cell `(0, 0)`'s top-left corner.
+    pub origin: (f32, f32),
+    /// The pane's cell grid.
+    pub rows: Vec<Vec<GridCell>>,
+    /// Cursor position `(column, row)` - drawn only when `focused`.
+    pub cursor: (usize, usize),
+    /// Whether this is the focused pane (accent ring + drawn cursor).
+    pub focused: bool,
+}
+
+/// Render a tiled set of `panes` headlessly - the exact multi-pane path the windowed
+/// [`Renderer::set_panes`](crate::Renderer::set_panes) uses (dividers, focus ring,
+/// and per-pane cursor) - to an offscreen `width` x `height` sRGB target, returning
+/// tight RGBA8 bytes. The verification twin of the live pane workspace.
+///
+/// # Panics
+/// Panics if no GPU adapter/device is available or the readback fails.
+#[must_use]
+pub fn capture_panes_rgba(
+    appearance: &Appearance,
+    width: u32,
+    height: u32,
+    scale: f64,
+    panes: &[CapturePane],
+) -> Vec<u8> {
+    let theme = Theme::resolve(&appearance.theme);
+    pollster::block_on(capture_async(
+        appearance,
+        width,
+        height,
+        scale,
+        color(theme.bg_base),
+        |text| {
+            let (cell_w, cell_h, _) = text.cell_metrics();
+            let stroke = text.scale();
+            let mut quads = Vec::new();
+            let mut inputs = Vec::with_capacity(panes.len());
+            for pane in panes {
+                let cursor = pane.focused.then_some(pane.cursor);
+                quads.extend(grid_quads(
+                    cell_w,
+                    cell_h,
+                    pane.origin,
+                    &pane.rows,
+                    cursor,
+                    theme.accent,
+                    &[],
+                ));
+                inputs.push(PaneTextInput {
+                    rows: &pane.rows,
+                    left: pane.origin.0,
+                    top: pane.origin.1,
+                    clip: (pane.rect.x, pane.rect.y, pane.rect.w, pane.rect.h),
+                });
+            }
+            if panes.len() > 1 {
+                let divider = theme.border.to_linear();
+                for pane in panes {
+                    push_outline(
+                        &mut quads,
+                        pane.rect.x,
+                        pane.rect.y,
+                        pane.rect.w,
+                        pane.rect.h,
+                        stroke,
+                        divider,
+                    );
+                }
+                if let Some(pane) = panes.iter().find(|p| p.focused) {
+                    push_outline(
+                        &mut quads,
+                        pane.rect.x,
+                        pane.rect.y,
+                        pane.rect.w,
+                        pane.rect.h,
+                        2.0 * stroke,
+                        theme.accent.to_linear(),
+                    );
+                }
+            }
+            text.set_panes(&inputs);
+            quads
         },
     ))
 }

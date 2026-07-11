@@ -32,24 +32,26 @@ impl Quad {
 /// Alpha applied to the accent color for the (translucent) selection highlight.
 const SELECTION_ALPHA: f32 = 0.30;
 
-/// Build the quads for a grid, given the cell metrics (physical px), in draw order:
-/// opaque cell backgrounds, then per-cell underline rules, then translucent
-/// selection fills, then the accent cursor block. All sit *beneath* the glyphs (the
-/// text pass loads over them). `selection` is the list of selected `(column, row)`
-/// cells.
+/// Build the quads for one pane's grid, given the cell metrics (physical px) and the
+/// pixel position of cell `(0, 0)`'s top-left corner (`origin`), in draw order:
+/// opaque cell backgrounds, then per-cell underline rules, then
+/// translucent selection fills, then the accent cursor block (only when `cursor` is
+/// `Some`, i.e. the focused pane). All sit *beneath* the glyphs (the text pass loads
+/// over them). `selection` is the list of selected `(column, row)` cells.
 pub(crate) fn grid_quads(
     cell_w: f32,
     cell_h: f32,
-    pad: f32,
+    origin: (f32, f32),
     rows: &[Vec<crate::GridCell>],
-    cursor: (usize, usize),
+    cursor: Option<(usize, usize)>,
     accent: crate::theme::Srgb,
     selection: &[(usize, usize)],
 ) -> Vec<Quad> {
+    let (origin_x, origin_y) = origin;
     let cell_quad = |col: usize, row: usize, color: [f32; 4]| {
         Quad::new(
-            pad + col as f32 * cell_w,
-            pad + row as f32 * cell_h,
+            origin_x + col as f32 * cell_w,
+            origin_y + row as f32 * cell_h,
             cell_w,
             cell_h,
             color,
@@ -61,8 +63,8 @@ pub(crate) fn grid_quads(
     let underline_top = (cell_h - underline_thickness * 2.0).max(0.0);
     let underline_quad = |col: usize, row: usize, color: [f32; 4]| {
         Quad::new(
-            pad + col as f32 * cell_w,
-            pad + row as f32 * cell_h + underline_top,
+            origin_x + col as f32 * cell_w,
+            origin_y + row as f32 * cell_h + underline_top,
             cell_w,
             underline_thickness,
             color,
@@ -91,9 +93,29 @@ pub(crate) fn grid_quads(
         quads.push(cell_quad(col, row, selection_color));
     }
 
-    let (cursor_col, cursor_row) = cursor;
-    quads.push(cell_quad(cursor_col, cursor_row, accent.to_linear()));
+    if let Some((cursor_col, cursor_row)) = cursor {
+        quads.push(cell_quad(cursor_col, cursor_row, accent.to_linear()));
+    }
     quads
+}
+
+/// Append a rectangular outline (four `thickness`-px bars) around the pixel rect
+/// `(x, y, w, h)` in linear `color`, drawn *inside* the rect's edges so it never
+/// escapes the pane. Used for the per-pane divider and the focused pane's ring.
+pub(crate) fn push_outline(
+    quads: &mut Vec<Quad>,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    thickness: f32,
+    color: [f32; 4],
+) {
+    let stroke = thickness.min(w).min(h);
+    quads.push(Quad::new(x, y, w, stroke, color)); // top
+    quads.push(Quad::new(x, y + h - stroke, w, stroke, color)); // bottom
+    quads.push(Quad::new(x, y, stroke, h, color)); // left
+    quads.push(Quad::new(x + w - stroke, y, stroke, h, color)); // right
 }
 
 #[repr(C)]
@@ -317,3 +339,62 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     return in.color;
 }
 ";
+
+#[cfg(test)]
+mod tests {
+    use super::{grid_quads, push_outline, Quad};
+    use crate::{GridCell, Srgb};
+
+    fn plain(c: char) -> GridCell {
+        GridCell {
+            c,
+            fg: Srgb {
+                r: 255,
+                g: 255,
+                b: 255,
+            },
+            bg: None,
+            bold: false,
+            italic: false,
+            underline: false,
+        }
+    }
+
+    const ACCENT: Srgb = Srgb {
+        r: 0xBD,
+        g: 0x93,
+        b: 0xF9,
+    };
+
+    /// Exact-match a quad rect (all values here are integer-valued in f32).
+    fn rect_eq(rect: [f32; 4], expected: [f32; 4]) -> bool {
+        rect.iter().zip(expected).all(|(a, b)| (a - b).abs() < 1e-3)
+    }
+
+    #[test]
+    fn focused_pane_draws_a_cursor_quad_at_the_offset_origin() {
+        let rows = vec![vec![plain('a'), plain('b')]];
+        let quads = grid_quads(10.0, 20.0, (100.0, 200.0), &rows, Some((1, 0)), ACCENT, &[]);
+        // No backgrounds/underlines/selection here, so the only quad is the cursor.
+        assert_eq!(quads.len(), 1);
+        // Cursor at column 1, row 0: origin + (1 * cell_w, 0).
+        assert!(rect_eq(quads[0].rect, [110.0, 200.0, 10.0, 20.0]));
+    }
+
+    #[test]
+    fn unfocused_pane_draws_no_cursor() {
+        let rows = vec![vec![plain('a')]];
+        let quads = grid_quads(10.0, 20.0, (0.0, 0.0), &rows, None, ACCENT, &[]);
+        assert!(quads.is_empty(), "a None cursor emits no quad");
+    }
+
+    #[test]
+    fn push_outline_emits_four_edge_bars() {
+        let mut quads: Vec<Quad> = Vec::new();
+        push_outline(&mut quads, 5.0, 6.0, 40.0, 30.0, 2.0, ACCENT.to_linear());
+        assert_eq!(quads.len(), 4);
+        // Bottom bar sits at y + h - thickness; right bar at x + w - thickness.
+        assert!(rect_eq(quads[1].rect, [5.0, 6.0 + 30.0 - 2.0, 40.0, 2.0]));
+        assert!(rect_eq(quads[3].rect, [5.0 + 40.0 - 2.0, 6.0, 2.0, 30.0]));
+    }
+}
