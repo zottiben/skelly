@@ -34,6 +34,40 @@ fn shell_executes_a_command_and_output_reaches_the_grid() {
 }
 
 #[test]
+fn scrollback_reveals_history() {
+    let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
+
+    // Print 60 numbered lines (more than the 24-row screen). The split quotes make
+    // the marker appear only in the executed output, not the echoed command.
+    term.write(b"for i in $(seq 1 60); do printf 'SCROLL''TEST%03d\\n' \"$i\"; done\n");
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !term
+        .snapshot()
+        .iter()
+        .any(|line| line.contains("SCROLLTEST060"))
+    {
+        assert!(Instant::now() < deadline, "output never completed");
+        sleep(Duration::from_millis(50));
+    }
+
+    // The first line has scrolled off the visible screen into history.
+    let visible = term.snapshot().join("\n");
+    assert!(
+        !visible.contains("SCROLLTEST001"),
+        "first line should be off-screen:\n{visible}"
+    );
+
+    // Scrolling up into history brings it back into view.
+    term.scroll_lines(60);
+    let scrolled = term.snapshot().join("\n");
+    assert!(
+        scrolled.contains("SCROLLTEST001"),
+        "scrollback should reveal the first line:\n{scrolled}"
+    );
+}
+
+#[test]
 fn background_color_escape_reaches_the_grid() {
     let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
 

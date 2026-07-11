@@ -15,7 +15,7 @@ use skelly_render::{AnsiPalette, GridCell, Renderer, Srgb};
 use skelly_term::{CellColor, Terminal};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, WindowEvent};
+use winit::event::{ElementState, KeyEvent, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
@@ -195,9 +195,40 @@ impl ApplicationHandler<Wakeup> for App {
                         }
                     }
                 }
+                // Shift + PageUp/PageDown scrolls the scrollback (not sent to the shell).
+                if self.modifiers.shift_key() {
+                    match key_event.logical_key.as_ref() {
+                        Key::Named(NamedKey::PageUp) => {
+                            if let Some(terminal) = self.terminal.as_mut() {
+                                terminal.scroll_page(true);
+                            }
+                            return;
+                        }
+                        Key::Named(NamedKey::PageDown) => {
+                            if let Some(terminal) = self.terminal.as_mut() {
+                                terminal.scroll_page(false);
+                            }
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 if let Some(bytes) = key_to_bytes(&key_event, self.modifiers) {
                     if let Some(terminal) = self.terminal.as_mut() {
+                        // Typing jumps back to the live prompt.
+                        terminal.scroll_to_bottom();
                         terminal.write(&bytes);
+                    }
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => wheel_lines(f64::from(y)),
+                    MouseScrollDelta::PixelDelta(pos) => wheel_lines(pos.y / 20.0),
+                };
+                if lines != 0 {
+                    if let Some(terminal) = self.terminal.as_mut() {
+                        terminal.scroll_lines(lines);
                     }
                 }
             }
@@ -215,6 +246,16 @@ impl ApplicationHandler<Wakeup> for App {
             _ => {}
         }
     }
+}
+
+/// Convert a wheel delta (in lines, or approximated from pixels) to a line count.
+/// Positive scrolls up into history, matching winit's convention.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a wheel step is a small number of lines"
+)]
+fn wheel_lines(delta: f64) -> i32 {
+    delta.round() as i32
 }
 
 /// Translate a key press into the bytes a terminal expects, or `None` if it has no

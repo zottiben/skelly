@@ -17,9 +17,11 @@ via an instanced colored-quad `wgpu` pipeline, two passes: quads then text) have
 landed. M2c is partly done: the renderer now honors the configured font (Nerd Fonts) with a
 monospace fallback, so Nerd glyphs render aligned. Still remaining in M2c: the real
 fixed-metric cell renderer (own glyph atlas + instanced glyph quads) replacing
-glyphon's reflowed text, for exact wide-char/fallback alignment. Then M2d: VT/ANSI
-conformance + scrollback + selection. The build target is native Rust, not the mockup
-HTML. See `ROADMAP.md`.
+glyphon's reflowed text, for exact wide-char/fallback alignment. M2d is in progress: scrollback landed (10k-line history, mouse-wheel + Shift+PageUp/
+Down, scroll-to-bottom on input; the renderer uses the grid display offset).
+Remaining in M2d: selection + copy/paste, VT/ANSI conformance (vttest/esctest +
+fuzz), reflow polish. The build target is native Rust, not the mockup HTML. See
+`ROADMAP.md`.
 
 **Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
 workspace. Foundation crates are *proposed* in ADR-0001..0004 (terminal core

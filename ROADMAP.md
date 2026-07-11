@@ -40,8 +40,13 @@ ADRs (0001-0004) are ratified.
     - [ ] The real fixed-metric cell renderer (own glyph atlas + instanced glyph
       quads) replacing glyphon's reflowed text, so cells align exactly for wide
       chars / fallback glyphs regardless of natural advance.
-  - [ ] **M2d** - VT/ANSI conformance (vttest / esctest in CI, fuzz the parser),
-    scrollback, selection + copy/paste, resize/reflow, live theme-token resolution.
+  - [~] **M2d** - terminal capabilities.
+    - [x] Scrollback: 10k-line history with mouse-wheel + Shift+PageUp/Down
+      scrolling and scroll-to-bottom on input; renders the scrolled view via the
+      display offset. (Engine support from `alacritty_terminal`.)
+    - [ ] Selection + copy/paste (clipboard).
+    - [ ] VT/ANSI conformance (vttest / esctest in CI, fuzz the parser).
+    - [ ] Resize/reflow polish, live theme-token resolution.
 - [ ] **M3 - Skelly shell UX.** Sidebar + tabs/groups/pinning; pane tree
   (split/focus/resize/zoom, <=8); command palette; settings view; live theming.
 - [ ] **M4 - Signature features.** Per-repo git diff dock with hunk staging;

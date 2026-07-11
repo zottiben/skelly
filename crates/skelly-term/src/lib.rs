@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, Processor};
@@ -159,10 +159,11 @@ impl Terminal {
         let grid = term.grid();
         let columns = grid.columns();
         let lines = grid.screen_lines();
+        let offset = i32::try_from(grid.display_offset()).unwrap_or(0);
 
         let mut out = Vec::with_capacity(lines);
         for line in 0..lines {
-            let row = Line(i32::try_from(line).unwrap_or(0));
+            let row = Line(i32::try_from(line).unwrap_or(0) - offset);
             let mut text = String::with_capacity(columns);
             for column in 0..columns {
                 text.push(grid[row][Column(column)].c);
@@ -184,10 +185,11 @@ impl Terminal {
         let grid = term.grid();
         let columns = grid.columns();
         let lines = grid.screen_lines();
+        let offset = i32::try_from(grid.display_offset()).unwrap_or(0);
 
         let mut out = Vec::with_capacity(lines);
         for line in 0..lines {
-            let row = Line(i32::try_from(line).unwrap_or(0));
+            let row = Line(i32::try_from(line).unwrap_or(0) - offset);
             let mut cells = Vec::with_capacity(columns);
             for column in 0..columns {
                 let cell = &grid[row][Column(column)];
@@ -209,8 +211,35 @@ impl Terminal {
     #[must_use]
     pub fn cursor(&self) -> (usize, usize) {
         let term = self.term.lock().expect("terminal mutex poisoned");
-        let point = term.grid().cursor.point;
-        (point.column.0, usize::try_from(point.line.0).unwrap_or(0))
+        let grid = term.grid();
+        let offset = i32::try_from(grid.display_offset()).unwrap_or(0);
+        let point = grid.cursor.point;
+        (
+            point.column.0,
+            usize::try_from(point.line.0 + offset).unwrap_or(0),
+        )
+    }
+
+    /// Scroll the view by `delta` lines (positive scrolls up into history).
+    pub fn scroll_lines(&mut self, delta: i32) {
+        self.scroll(Scroll::Delta(delta));
+    }
+
+    /// Scroll one page up (`true`) or down (`false`).
+    pub fn scroll_page(&mut self, up: bool) {
+        self.scroll(if up { Scroll::PageUp } else { Scroll::PageDown });
+    }
+
+    /// Jump back to the live bottom of the buffer.
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll(Scroll::Bottom);
+    }
+
+    fn scroll(&mut self, scroll: Scroll) {
+        if let Ok(mut term) = self.term.lock() {
+            term.scroll_display(scroll);
+        }
+        self.dirty.store(true, Ordering::Relaxed);
     }
 }
 

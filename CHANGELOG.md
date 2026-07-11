@@ -9,6 +9,10 @@ Conventional Commits - do not hand-edit it.
 
 ### Added
 
+- M2d (core terminal, scrollback): a 10k-line scrollback history with mouse-wheel
+  and Shift+PageUp/PageDown scrolling, and scroll-to-bottom on keypress. The
+  renderer draws the scrolled view via the grid's display offset. `skelly-term`
+  exposes `scroll_lines`/`scroll_page`/`scroll_to_bottom`.
 - M2c (core terminal, fonts): honor the configured font family when it is installed
   (Nerd Fonts included), falling back to a system monospace face otherwise, so
   columns still align. Cell metrics are measured from the chosen face. The full

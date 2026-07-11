@@ -24,18 +24,22 @@ fn main() {
     });
     sleep(Duration::from_millis(400));
 
-    // Emit Nerd Font icons (to exercise the configured font) plus an ANSI
-    // background, ending in the marker. The adjacent quotes concatenate only when
-    // the shell *executes* the command, so the marker appears in the output only.
+    // Print 40 numbered lines (past the 24-row screen), each with a Nerd Font icon
+    // and colored index, ending in the marker. The split quotes make the marker
+    // appear only in the executed output.
     let cmd = format!(
-        "clear; printf ' {}  {}  {}  nerd  \\033[44m blue-bg \\033[0m  COLORS''_LIVE\\n'\n",
-        '\u{e0b0}', '\u{f07c}', '\u{f115}',
+        "clear; for i in $(seq 1 40); do printf '{}  \\033[36mline %02d\\033[0m  scrollback demo\\n' \"$i\"; done; printf 'COLORS''_LIVE\\n'\n",
+        '\u{f07c}',
     );
     term.write(cmd.as_bytes());
-    wait_until(&term, Duration::from_secs(10), |t| {
+    wait_until(&term, Duration::from_secs(15), |t| {
         snapshot_has(t, "COLORS_LIVE")
     });
-    sleep(Duration::from_millis(500));
+    sleep(Duration::from_millis(400));
+
+    // Scroll up into history so the capture shows the scrollback view, not the tail.
+    term.scroll_lines(20);
+    sleep(Duration::from_millis(100));
 
     println!("--- captured grid ---");
     for line in &term.snapshot() {
