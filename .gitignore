@@ -1,0 +1,18 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+
+# Backtraces / crash dumps
+*.orig
+
+# macOS
+.DS_Store
+
+# Local editor / tool state (keep .claude/ - it is the shared knowledge pack)
+*.swp
+.idea/
+.vscode/
+
+# Local env overrides
+.env
+.env.local

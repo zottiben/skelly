@@ -1,0 +1,19 @@
+[package]
+name = "skelly"
+description = "Skelly - a barebones, keyboard-driven terminal emulator built natively in Rust."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+skelly-config = { path = "../skelly-config" }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

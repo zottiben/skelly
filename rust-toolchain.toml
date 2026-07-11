@@ -1,0 +1,5 @@
+[toolchain]
+# Pinned so every machine and CI build with the identical compiler. Bump
+# deliberately, via a commit; keep it in sync with the CI matrix.
+channel = "1.97.0"
+components = ["rustfmt", "clippy"]

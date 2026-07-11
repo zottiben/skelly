@@ -1,0 +1,15 @@
+[package]
+name = "skelly-render"
+description = "GPU cell-grid renderer, font shaping/fallback, and semantic theme-token resolution."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]

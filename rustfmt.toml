@@ -1,0 +1,2 @@
+edition = "2021"
+# Default rustfmt is the house style. Add only deliberate, agreed deviations here.
