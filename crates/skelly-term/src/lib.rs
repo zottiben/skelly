@@ -28,7 +28,7 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, Processor};
-use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
 type SharedTerm = Arc<Mutex<Term<VoidListener>>>;
 
@@ -80,6 +80,31 @@ bitflags::bitflags! {
     }
 }
 
+/// How the shell ended, reported once the child process has exited.
+///
+/// The shell runs until the user exits it (`exit`, Ctrl-D), it is killed, or it
+/// crashes; when that happens the reader thread reaps the child and records this. The
+/// binary reads it via [`Terminal::exit_status`] to draw the shell-exit overlay.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExitStatus {
+    /// The process exit code (`0` is a clean exit).
+    pub code: u32,
+    /// The terminating signal's name (Unix), if the shell was killed by one.
+    pub signal: Option<String>,
+}
+
+impl ExitStatus {
+    /// Whether the shell ended cleanly (exit code `0`, no terminating signal).
+    #[must_use]
+    pub fn success(&self) -> bool {
+        self.signal.is_none() && self.code == 0
+    }
+}
+
+/// The shell's exit status, shared between the reader thread (which records it once
+/// the child is reaped) and the UI thread (which polls it via [`Terminal::exit_status`]).
+type SharedExit = Arc<Mutex<Option<ExitStatus>>>;
+
 /// One grid cell: its character, colors, and SGR text attributes.
 #[derive(Clone, Copy, Debug)]
 pub struct TermCell {
@@ -98,13 +123,20 @@ pub struct TermCell {
 ///
 /// The shell runs until it exits or the `Terminal` is dropped. New output sets a
 /// dirty flag ([`Terminal::take_dirty`]) so the UI only repaints when something
-/// changed.
+/// changed; when the shell itself ends, its [`exit_status`](Terminal::exit_status)
+/// becomes `Some` and one final wakeup fires so the UI can draw the exit overlay.
+///
+/// Dropping a `Terminal` kills the shell (via a cloned [`ChildKiller`]) so the reader
+/// thread's `wait()` reaps it and exits - no lingering process or thread.
 pub struct Terminal {
     term: SharedTerm,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     dirty: Arc<AtomicBool>,
-    _child: Box<dyn Child + Send + Sync>,
+    /// Set once the shell exits (the reader thread reaps the child and records it).
+    exit: SharedExit,
+    /// Kills the shell on drop so the reader thread unblocks, `wait()`s, and exits.
+    killer: Box<dyn ChildKiller + Send + Sync>,
     _reader: JoinHandle<()>,
 }
 
@@ -140,6 +172,9 @@ impl Terminal {
         }
         let child = pair.slave.spawn_command(cmd).map_err(to_io)?;
         drop(pair.slave); // close the parent's slave handle so the master sees EOF.
+                          // A killer we keep on the UI side so dropping the `Terminal` can stop the shell
+                          // even mid-job; the child itself moves into the reader thread to be reaped.
+        let killer = child.clone_killer();
 
         let reader = pair.master.try_clone_reader().map_err(to_io)?;
         let writer = pair.master.take_writer().map_err(to_io)?;
@@ -151,17 +186,29 @@ impl Terminal {
             VoidListener,
         )));
         let dirty = Arc::new(AtomicBool::new(true));
+        let exit: SharedExit = Arc::new(Mutex::new(None));
 
         let reader_term = Arc::clone(&term);
         let reader_dirty = Arc::clone(&dirty);
-        let handle = thread::spawn(move || read_loop(reader, &reader_term, &reader_dirty, wakeup));
+        let reader_exit = Arc::clone(&exit);
+        let handle = thread::spawn(move || {
+            read_loop(
+                reader,
+                &reader_term,
+                &reader_dirty,
+                &reader_exit,
+                child,
+                wakeup,
+            );
+        });
 
         Ok(Self {
             term,
             master: pair.master,
             writer,
             dirty,
-            _child: child,
+            exit,
+            killer,
             _reader: handle,
         })
     }
@@ -191,6 +238,14 @@ impl Terminal {
     #[must_use]
     pub fn take_dirty(&self) -> bool {
         self.dirty.swap(false, Ordering::Relaxed)
+    }
+
+    /// The shell's exit status, or `None` while it is still running. Becomes `Some`
+    /// once the shell exits (or is killed / crashes); the reader thread fires one final
+    /// wakeup at that point so the UI repaints and can show the shell-exit overlay.
+    #[must_use]
+    pub fn exit_status(&self) -> Option<ExitStatus> {
+        self.exit.lock().ok().and_then(|status| status.clone())
     }
 
     /// Snapshot the visible grid as trimmed text lines (top to bottom).
@@ -246,6 +301,22 @@ impl Terminal {
             term.scroll_display(scroll);
         }
         self.dirty.store(true, Ordering::Relaxed);
+    }
+}
+
+impl Drop for Terminal {
+    /// Stop the shell so it can't outlive its pane. Killing it closes the PTY slave,
+    /// which unblocks the reader thread's `read` (EOF); the thread then `wait()`s -
+    /// reaping the child - and exits.
+    ///
+    /// Only kill while the shell is still unreaped (no recorded exit): once the reader
+    /// thread has `wait()`ed, the pid is free to be reused, so signalling it could hit an
+    /// unrelated process. An unreaped pid (running or zombie) is still reserved, so killing
+    /// it is safe; an already-exited shell needs no killing anyway.
+    fn drop(&mut self) {
+        if self.exit_status().is_none() {
+            let _ = self.killer.kill();
+        }
     }
 }
 
@@ -429,11 +500,18 @@ impl Dimensions for GridSize {
     }
 }
 
-/// Read PTY bytes and advance the parser until EOF (shell exit) or a read error.
+/// Read PTY bytes and advance the parser until EOF (shell exit) or a read error, then
+/// reap the child and record its exit status.
+///
+/// Owning `child` here means the shell is `wait()`ed exactly once, when its output ends;
+/// that reaps it (no zombie) and yields the exit code. A final wakeup after that lets the
+/// UI repaint and show the exit overlay even though no more output followed.
 fn read_loop<W: Fn()>(
     mut reader: Box<dyn Read + Send>,
     term: &Mutex<Term<VoidListener>>,
     dirty: &AtomicBool,
+    exit: &Mutex<Option<ExitStatus>>,
+    mut child: Box<dyn Child + Send + Sync>,
     wakeup: W,
 ) {
     // `Processor`'s default sync handler (`StdSyncHandler`) is fine; annotate so the
@@ -452,6 +530,23 @@ fn read_loop<W: Fn()>(
             }
         }
     }
+    // Output has ended: reap the shell and publish how it exited. `wait` returns promptly
+    // since the child closed its PTY, and an errored wait still counts as a failed exit.
+    let status = child.wait().map_or(
+        ExitStatus {
+            code: 1,
+            signal: None,
+        },
+        |status| ExitStatus {
+            code: status.exit_code(),
+            signal: status.signal().map(str::to_owned),
+        },
+    );
+    if let Ok(mut slot) = exit.lock() {
+        *slot = Some(status);
+    }
+    dirty.store(true, Ordering::Relaxed);
+    wakeup();
 }
 
 /// Map any displayable error into an `io::Error` so callers need not depend on the

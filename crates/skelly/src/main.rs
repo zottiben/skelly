@@ -10,6 +10,7 @@
 //! output. Errors are contextualized here with `anyhow`; `wgpu`/`alacritty` types
 //! never leak up.
 
+mod deadpane;
 mod gitdock;
 mod palette;
 mod settings;
@@ -24,8 +25,8 @@ use anyhow::Context as _;
 use skelly_config::{Config, SidebarMode};
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
 use skelly_render::{
-    AnsiPalette, GitDockView, GridCell, OverlayView, PaneView, PxRect, Renderer, SettingsView,
-    SidebarView, Srgb, Theme, TimelineView,
+    AnsiPalette, DeadPaneView, GitDockView, GridCell, OverlayView, PaneView, PxRect, Renderer,
+    SettingsView, SidebarView, Srgb, Theme, TimelineView,
 };
 use skelly_session::{Actor, Repo, SessionEvent, ShadowWorktree};
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
@@ -295,6 +296,27 @@ impl App {
         ws.panes.get_mut(&id)
     }
 
+    /// Whether the focused pane's shell has exited (so it shows the "shell exited" overlay
+    /// and swallows input, waiting for a restart).
+    fn focused_pane_dead(&self) -> bool {
+        let ws = self.active_tab();
+        ws.panes
+            .get(&ws.tree.focused())
+            .is_some_and(|term| term.exit_status().is_some())
+    }
+
+    /// Restart the focused pane's shell in place: drop the exited terminal and let
+    /// `sync_layout` respawn a fresh shell for the same pane (which is still in the tree).
+    /// The pane and its scrollback grid make way for a new prompt.
+    fn restart_focused_pane(&mut self) {
+        let ws = self.active_tab_mut();
+        let id = ws.tree.focused();
+        ws.panes.remove(&id);
+        ws.dims.remove(&id);
+        self.sync_layout();
+        self.request_redraw();
+    }
+
     /// The rectangle of pane `id` in the active tab's current layout, if it is visible.
     fn pane_rect(&self, id: PaneId) -> Option<Rect> {
         let viewport = self.viewport_rect();
@@ -407,6 +429,43 @@ impl App {
             .collect()
     }
 
+    /// Build the "shell exited" overlay for each visible pane whose shell has ended: the
+    /// centered exit-message grid, positioned within the pane's rectangle. Empty while
+    /// every pane's shell is alive (the common case), so it costs nothing then.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the message grid is a handful of small cells; the usize->f32 cast is exact"
+    )]
+    fn dead_pane_frames(&self) -> Vec<DeadPaneFrame> {
+        let (cell_w, cell_h) = self.cell_size();
+        let viewport = self.viewport_rect();
+        let ws = self.active_tab();
+        ws.tree
+            .layout(viewport)
+            .into_iter()
+            .filter_map(|(id, rect)| {
+                let status = ws.panes.get(&id)?.exit_status()?;
+                let rows = deadpane::overlay_grid(&status, &self.theme);
+                // Center the message grid within the pane rect.
+                let grid_w = rows.first().map_or(0, Vec::len) as f32 * cell_w;
+                let grid_h = rows.len() as f32 * cell_h;
+                Some(DeadPaneFrame {
+                    rect: PxRect {
+                        x: rect.x,
+                        y: rect.y,
+                        w: rect.w,
+                        h: rect.h,
+                    },
+                    text_origin: (
+                        rect.x + ((rect.w - grid_w) / 2.0).max(0.0),
+                        rect.y + ((rect.h - grid_h) / 2.0).max(0.0),
+                    ),
+                    rows,
+                })
+            })
+            .collect()
+    }
+
     /// Repaint every visible pane from its terminal grid, resolving cell colors and
     /// overlaying the selection and the focused-pane ring.
     fn redraw(&mut self) {
@@ -424,7 +483,9 @@ impl App {
             })
             .collect();
 
-        // Build the chrome frames before the mutable renderer borrow.
+        // Build the dim overlays for any exited panes and the chrome frames, all before
+        // the mutable renderer borrow.
+        let dead = self.dead_pane_frames();
         let sidebar = self.sidebar.visible.then(|| self.build_sidebar_frame());
         let git_dock = self.git_dock.open.then(|| self.build_git_dock_frame());
         let timeline = self.timeline.open.then(|| self.build_timeline_frame());
@@ -437,6 +498,15 @@ impl App {
 
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_panes(&views);
+            let dead_views: Vec<DeadPaneView> = dead
+                .iter()
+                .map(|f| DeadPaneView {
+                    rect: f.rect,
+                    text_origin: f.text_origin,
+                    rows: &f.rows,
+                })
+                .collect();
+            renderer.set_pane_overlays(&dead_views);
             match &sidebar {
                 Some(frame) => renderer.set_sidebar(Some(&SidebarView {
                     panel: frame.panel,
@@ -1587,6 +1657,15 @@ impl App {
                 _ => {}
             }
         }
+        // A focused pane whose shell has exited shows the "shell exited" overlay: Enter
+        // restarts the shell, and every other key is swallowed (there is no shell to send
+        // it to). Pane/tab/app chords were already handled above, so they still work.
+        if self.focused_pane_dead() {
+            if matches!(key_event.logical_key.as_ref(), Key::Named(NamedKey::Enter)) {
+                self.restart_focused_pane();
+            }
+            return;
+        }
         if let Some(bytes) = key_to_bytes(key_event, self.modifiers) {
             if let Some(term) = self.focused_term() {
                 // Typing jumps back to the live prompt.
@@ -1680,6 +1759,14 @@ struct PaneFrame {
     cursor: (usize, usize),
     selection: Vec<(usize, usize)>,
     focused: bool,
+}
+
+/// Owned "shell exited" overlay data the borrowed [`DeadPaneView`]s point at during a
+/// repaint (the scrimmed pane rect + its centered exit message).
+struct DeadPaneFrame {
+    rect: PxRect,
+    text_origin: (f32, f32),
+    rows: Vec<Vec<GridCell>>,
 }
 
 /// Owned command-palette frame data the borrowed [`OverlayView`] points at.

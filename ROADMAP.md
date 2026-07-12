@@ -4,7 +4,7 @@ Delivery is sequenced in milestones, each a set of thin vertical slices with a
 demoable outcome. We never start a later milestone's polish before the current one
 runs end-to-end. Rationale and detail are in the engineering playbook.
 
-## Current: M4 -> M5
+## Current: M5 (hardening & release)
 
 M0, M1, the core of M2 (core terminal), and all the big M3 slices (sidebar + tabs,
 pane tree, command palette, settings view, live theming) are in place and run
@@ -14,8 +14,10 @@ plus a few M3 follow-ups, which we finish opportunistically rather than block on
 **M4 (signature features) is complete**: the **per-repo git diff dock** (`⇧⌘G`) - the
 diff model, the dock UI, per-file + hunk-level staging, and the commit box - and the
 **session timeline + non-destructive rewind** (`⇧⌘H`, ADR-0007) both land end-to-end.
-Next is M5 (hardening & release): edge/empty/error states, perf budgets, packaging,
-and the first tagged release - plus the tracked M2-M4 follow-ups, finished
+**M5 (hardening & release) is now in progress**: the first edge state - the **shell-exit /
+crash overlay** (design §12; a dim scrim + exit message + `↵ restart` over a pane whose
+shell ended) - has landed. Remaining M5: the other edge/empty states, perf budgets,
+packaging, and the first tagged release - plus the tracked M2-M4 follow-ups, finished
 opportunistically.
 
 - [x] **M0 - Foundation.** Workspace, quality gates, CI, docs, ADR log, and the
@@ -218,8 +220,21 @@ opportunistically.
     the `Agent` actor's transport (the still-open AI-actions contract), the
     launch-time layout restore (`session.persist`), fork-on-edit, off-thread git,
     and global `⌥⌘←/→/0` while the dock is closed.
-- [ ] **M5 - Hardening & release.** Edge/empty/error states, perf budgets,
+- [~] **M5 - Hardening & release.** Edge/empty/error states, perf budgets,
   packaging (signed macOS `.app`, Linux artifacts), first tagged release.
+  - [x] **Shell-exit / crash overlay** (design §12 "Shell exits / crashes"). A pane
+    whose shell ends no longer dies silently: `skelly-term` reaps the child and reports
+    its `ExitStatus` (and kills the shell on drop, so the reader thread reaps it - closing
+    a latent process/zombie leak); the renderer dims the pane with a translucent `bg.base`
+    scrim over its preserved scrollback and centers an exit message + `↵ restart` / `⌥w
+    close` hint (a layer above the terminal text, beneath the docks/overlays). `↵` respawns
+    the shell in place via `sync_layout`; a focused dead pane swallows other input. Verified
+    by an e2e exit-detection test, the pure `deadpane` message unit tests, and the
+    `dead_pane_capture` PNG in both themes.
+  - [ ] Remaining edge/empty states: close-last-pane -> close-tab, close-last-tab ->
+    empty state, process-running-on-close confirm, sidebar collapse rail, tab overflow.
+  - [ ] Perf budgets (`criterion` on the parser/renderer hot paths).
+  - [ ] Packaging (`cargo-dist` + `cargo-release`) and the first tagged release.
 
 ## Open product decisions
 

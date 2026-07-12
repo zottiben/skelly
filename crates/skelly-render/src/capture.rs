@@ -11,7 +11,7 @@ use skelly_config::Appearance;
 
 use crate::cells::{
     gitdock_quads as build_gitdock_quads, grid_quads, overlay_quads as build_overlay_quads,
-    push_outline, settings_quads as build_settings_quads, sidebar_quads,
+    push_outline, scrim_quad, settings_quads as build_settings_quads, sidebar_quads,
     timeline_quads as build_timeline_quads, Quad, QuadLayer,
 };
 use crate::text::{measure_cell, PaneTextInput, TextLayer};
@@ -168,10 +168,23 @@ pub struct CaptureOverlay {
     pub caret: Option<(usize, usize)>,
 }
 
+/// A dim "shell exited" overlay for [`capture_panes_rgba`], mirroring
+/// [`DeadPaneView`](crate::DeadPaneView) but owning its rows.
+pub struct CaptureDeadPane {
+    /// The exited pane's rectangle (the scrim fills it), physical px.
+    pub rect: PxRect,
+    /// Pixel position of the centered message grid's cell `(0, 0)` top-left.
+    pub text_origin: (f32, f32),
+    /// The exit message as a monospace grid (UI-token colored).
+    pub rows: Vec<Vec<GridCell>>,
+}
+
 /// The optional chrome layers to composite over the panes in [`capture_panes_rgba`],
 /// mirroring the windowed renderer's base-chrome + overlay passes.
 #[derive(Default)]
 pub struct Chrome<'a> {
+    /// The dim "shell exited" overlays, one per exited pane (drawn just above the panes).
+    pub dead_panes: &'a [CaptureDeadPane],
     /// The left sidebar (passes 3-4).
     pub sidebar: Option<&'a CaptureSidebar>,
     /// The git diff dock (passes 5-6).
@@ -205,6 +218,18 @@ pub fn capture_panes_rgba(
 ) -> Vec<u8> {
     let theme = Theme::resolve(&appearance.theme);
     let (cell_w, cell_h) = measure_cell(appearance, scale);
+    // The "shell exited" scrims + messages, drawn just above the panes (before the sidebar).
+    let dead_pane_scenes: Vec<Scene> = chrome
+        .dead_panes
+        .iter()
+        .map(|dp| Scene {
+            quads: vec![scrim_quad(dp.rect, &theme)],
+            rows: &dp.rows,
+            left: dp.text_origin.0,
+            top: dp.text_origin.1,
+            clip: (dp.rect.x, dp.rect.y, dp.rect.w, dp.rect.h),
+        })
+        .collect();
     let sidebar_scene = chrome.sidebar.map(|sb| {
         let view = SidebarView {
             panel: sb.panel,
@@ -279,11 +304,16 @@ pub fn capture_panes_rgba(
         scale,
         color(theme.bg_base),
         |text| paint_panes(text, panes, &theme),
-        // In the windowed renderer's order: sidebar (3-4), then the git dock / timeline
-        // dock (5-6, mutually exclusive), then the palette overlay (7-8) on top.
-        [sidebar_scene, gitdock_scene, timeline_scene, overlay_scene]
+        // In the windowed renderer's order: the exited-pane overlays just above the panes,
+        // then the sidebar (3-4), the git dock / timeline dock (5-6, mutually exclusive),
+        // and the palette overlay (7-8) on top.
+        dead_pane_scenes
             .into_iter()
-            .flatten()
+            .chain(
+                [sidebar_scene, gitdock_scene, timeline_scene, overlay_scene]
+                    .into_iter()
+                    .flatten(),
+            )
             .collect(),
     ))
 }

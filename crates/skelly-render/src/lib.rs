@@ -26,8 +26,9 @@ mod theme;
 
 pub use ansi::AnsiPalette;
 pub use capture::{
-    capture_cells_rgba, capture_panes_rgba, capture_rgba, capture_settings_rgba, CaptureGitDock,
-    CaptureOverlay, CapturePane, CaptureSettings, CaptureSidebar, CaptureTimeline, Chrome,
+    capture_cells_rgba, capture_panes_rgba, capture_rgba, capture_settings_rgba, CaptureDeadPane,
+    CaptureGitDock, CaptureOverlay, CapturePane, CaptureSettings, CaptureSidebar, CaptureTimeline,
+    Chrome,
 };
 pub use error::RenderError;
 pub use renderer::Renderer;
@@ -68,6 +69,23 @@ pub struct PaneView<'a> {
     pub selection: &'a [(usize, usize)],
     /// Whether this is the focused pane (accent ring + drawn cursor).
     pub focused: bool,
+}
+
+/// A dim overlay over a pane whose shell has exited (the design "Shell exits / crashes"
+/// edge state).
+///
+/// The renderer draws a translucent `bg.base` scrim over `rect` - dimming the pane's
+/// preserved grid, which stays faintly visible beneath - then paints the centered
+/// `rows` (an exit message + restart / close hint) on top at `text_origin`. It draws
+/// after the terminal text but beneath every other chrome layer, so an open palette or
+/// dock still sits above it. The caller bakes the UI-token colors into `rows`.
+pub struct DeadPaneView<'a> {
+    /// The exited pane's rectangle on the surface (the scrim fills it), physical px.
+    pub rect: PxRect,
+    /// Pixel position of the centered message grid's cell `(0, 0)` top-left, physical px.
+    pub text_origin: (f32, f32),
+    /// The exit message as a monospace grid (rows top to bottom), UI-token colored.
+    pub rows: &'a [Vec<GridCell>],
 }
 
 /// The command-palette / modal overlay to draw over the live terminal.

@@ -10,6 +10,30 @@ use std::time::{Duration, Instant};
 use skelly_term::{CellAttrs, CellColor, Terminal};
 
 #[test]
+fn shell_exit_is_reported() {
+    let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
+    // A live shell has not exited yet.
+    assert!(term.exit_status().is_none(), "fresh shell reports no exit");
+
+    // Ask the shell to exit; its status should become available shortly after.
+    term.write(b"exit 0\n");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(status) = term.exit_status() {
+            assert_eq!(status.code, 0, "clean exit reports code 0");
+            assert!(status.success(), "exit 0 is a success");
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "shell exit was never reported after `exit 0`"
+        );
+        sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
 fn shell_executes_a_command_and_output_reaches_the_grid() {
     let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
 

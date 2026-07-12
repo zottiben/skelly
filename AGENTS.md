@@ -57,8 +57,17 @@ with a viewing banner + actor legend + session summary - `↑/↓` (or `⌥⌘�
 to now, and selecting a past **commit** rewinds to it read-only (staging events are recorded but
 not restorable; the `Agent` actor's transport stays the open AI-actions contract). Event times
 are session-relative (`M:SS`), avoiding a date dependency. Renderer chrome layers (sidebar / git
-dock / timeline / palette / settings) now share a `ChromeLayer` (quads + text + active). The build
-target is native Rust, not the mockup HTML. See `ROADMAP.md`.
+dock / timeline / palette / settings) now share a `ChromeLayer` (quads + text + active). **M5
+(hardening & release) is in progress**: the first edge state - the **shell-exit / crash overlay**
+(design §12) - has landed. When a pane's shell ends, `skelly-term` reaps the child + reports an
+`ExitStatus` (and now kills the shell on drop so the reader thread reaps it, closing a latent
+process/zombie leak); the renderer draws a translucent `bg.base` scrim (72%) over the pane's
+preserved scrollback + a centered `shell exited` / exit-code-or-signal / `↵ restart   ⌥w close`
+message (a 6th `ChromeLayer`, `set_pane_overlays`, above the terminal text but beneath the
+docks/overlays). `↵` respawns the shell in place (drop the exited `Terminal`, `sync_layout`
+respawns); a focused dead pane swallows other input. Pure `deadpane` module (unit-tested), an e2e
+exit-detection test, and a `dead_pane_capture` PNG (both themes). The build target is native Rust,
+not the mockup HTML. See `ROADMAP.md`.
 
 **Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
 workspace. Foundation crates are *proposed* in ADR-0001..0004 (terminal core

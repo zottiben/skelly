@@ -11,11 +11,13 @@ use std::sync::Arc;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use skelly_config::Appearance;
 
-use crate::cells::{grid_quads, push_outline, Quad, QuadLayer};
+use crate::cells::{grid_quads, push_outline, scrim_quad, Quad, QuadLayer};
 use crate::error::RenderError;
 use crate::text::{PaneTextInput, TextLayer};
 use crate::theme::Theme;
-use crate::{GitDockView, OverlayView, PaneView, SettingsView, SidebarView, TimelineView};
+use crate::{
+    DeadPaneView, GitDockView, OverlayView, PaneView, SettingsView, SidebarView, TimelineView,
+};
 
 /// One chrome layer drawn over the terminal with `LoadOp::Load`: a quad pass then a text
 /// pass, gated by whether it is currently shown. The sidebar, git dock, command palette,
@@ -64,9 +66,23 @@ impl ChromeLayer {
         quads: &[Quad],
         text: PaneTextInput,
     ) {
-        self.active = true;
+        self.set_all(device, queue, surface, quads, &[text]);
+    }
+
+    /// Like [`set`](Self::set) but for a layer made of several independently positioned
+    /// text grids (e.g. one exit message per pane); active only when there is something
+    /// to draw.
+    fn set_all(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface: (u32, u32),
+        quads: &[Quad],
+        texts: &[PaneTextInput],
+    ) {
+        self.active = !texts.is_empty() || !quads.is_empty();
         self.quads.set(device, queue, surface.0, surface.1, quads);
-        self.text.set_panes(&[text]);
+        self.text.set_panes(texts);
     }
 
     /// Hide the layer (nothing drawn next frame).
@@ -102,6 +118,9 @@ pub struct Renderer {
     /// The terminal base layer: this quad pass clears the surface, then the text draws.
     quads: QuadLayer,
     text: TextLayer,
+    /// The dim "shell exited" overlay drawn over any pane whose shell ended, above the
+    /// terminal text but beneath every other chrome layer.
+    pane_overlay: ChromeLayer,
     /// The persistent left sidebar, drawn as base chrome when shown.
     sidebar: ChromeLayer,
     /// The per-repo git diff dock, drawn as base chrome on the right when open.
@@ -212,15 +231,16 @@ impl Renderer {
                 appearance,
             )
         };
-        // Bind the five chrome layers before the struct literal so the closure's borrows
+        // Bind the six chrome layers before the struct literal so the closure's borrows
         // of `device`/`queue`/`config` end (NLL) before those move into `Self`.
-        let (sidebar, gitdock, timeline, overlay, settings) =
-            (chrome(), chrome(), chrome(), chrome(), chrome());
+        let (pane_overlay, sidebar, gitdock, timeline, overlay, settings) =
+            (chrome(), chrome(), chrome(), chrome(), chrome(), chrome());
 
         Self {
             theme: Theme::resolve(&appearance.theme),
             quads,
             text,
+            pane_overlay,
             sidebar,
             gitdock,
             timeline,
@@ -243,6 +263,7 @@ impl Renderer {
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
         self.text.resize(width, height);
+        self.pane_overlay.resize(width, height);
         self.sidebar.resize(width, height);
         self.gitdock.resize(width, height);
         self.timeline.resize(width, height);
@@ -264,6 +285,7 @@ impl Renderer {
     pub fn set_theme(&mut self, name: &str) {
         self.theme = Theme::resolve(name);
         self.text.set_default_fg(self.theme.fg_primary);
+        self.pane_overlay.set_default_fg(self.theme.fg_primary);
         self.sidebar.set_default_fg(self.theme.fg_primary);
         self.gitdock.set_default_fg(self.theme.fg_primary);
         self.timeline.set_default_fg(self.theme.fg_primary);
@@ -333,6 +355,36 @@ impl Renderer {
             &quads,
         );
         self.text.set_panes(&text_inputs);
+    }
+
+    /// Set the dim "shell exited" overlays to draw next frame (one per pane whose shell
+    /// ended), or clear them with an empty slice. Each draws a translucent `bg.base` scrim
+    /// over the pane's rect - dimming its preserved grid - then its centered message on top.
+    /// Drawn above the terminal text but beneath every other chrome layer (Hard rule 4 - a
+    /// layer; the panes never unmount, so a restart just respawns the shell in place).
+    pub fn set_pane_overlays(&mut self, overlays: &[DeadPaneView]) {
+        if overlays.is_empty() {
+            self.pane_overlay.clear();
+            return;
+        }
+        let mut quads = Vec::with_capacity(overlays.len());
+        let mut texts = Vec::with_capacity(overlays.len());
+        for view in overlays {
+            quads.push(scrim_quad(view.rect, &self.theme));
+            texts.push(PaneTextInput {
+                rows: view.rows,
+                left: view.text_origin.0,
+                top: view.text_origin.1,
+                clip: (view.rect.x, view.rect.y, view.rect.w, view.rect.h),
+            });
+        }
+        self.pane_overlay.set_all(
+            &self.device,
+            &self.queue,
+            (self.config.width, self.config.height),
+            &quads,
+            &texts,
+        );
     }
 
     /// Set the persistent left sidebar to draw next frame, or clear it with `None`
@@ -515,6 +567,10 @@ impl Renderer {
             self.config.height,
         )?;
         let (w, h) = (self.config.width, self.config.height);
+        // The "shell exited" scrims + messages, loaded over the terminal text so the dimmed
+        // scrollback shows through; beneath the sidebar/docks/overlays so those stay on top.
+        self.pane_overlay
+            .draw(&self.device, &self.queue, &view, w, h)?;
         // Passes 3-4: the sidebar chrome, loaded over the cleared left strip.
         self.sidebar.draw(&self.device, &self.queue, &view, w, h)?;
         // Passes 5-6: the git diff dock, loaded over the cleared right strip (base

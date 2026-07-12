@@ -32,6 +32,18 @@ impl Quad {
 /// Alpha applied to the accent color for the (translucent) selection highlight.
 const SELECTION_ALPHA: f32 = 0.30;
 
+/// Alpha of the dim scrim drawn over an exited pane. High enough to read as "inactive"
+/// yet translucent, so the preserved scrollback stays faintly visible beneath.
+const SCRIM_ALPHA: f32 = 0.72;
+
+/// A translucent `bg.base` scrim filling `rect`, dimming an exited pane's preserved grid.
+/// Shared by the windowed [`Renderer`](crate::Renderer) and the headless capture.
+pub(crate) fn scrim_quad(rect: crate::PxRect, theme: &crate::theme::Theme) -> Quad {
+    let mut color = theme.bg_base.to_array();
+    color[3] = SCRIM_ALPHA;
+    Quad::new(rect.x, rect.y, rect.w, rect.h, color)
+}
+
 /// Build the quads for one pane's grid, given the cell metrics (physical px) and the
 /// pixel position of cell `(0, 0)`'s top-left corner (`origin`), in draw order:
 /// opaque cell backgrounds, then per-cell underline rules, then

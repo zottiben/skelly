@@ -55,6 +55,24 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-12 - **Shell-exit overlay (M5 edge state "Shell exits / crashes").** When a
+  pane's shell ends (`exit`, Ctrl-D, a kill, or a crash), the pane does **not** silently
+  die: `skelly-term` reports the exit (its reader thread reaps the child and records an
+  `ExitStatus`; the `Terminal` also holds a `clone_killer()` so drop kills the shell and
+  the thread reaps it - fixing a latent leak). The renderer draws a translucent `bg.base`
+  scrim (72% alpha) over the pane's **preserved** grid - the scrollback stays faintly
+  visible - plus a centered message: `shell exited` / the exit code (green) or signal
+  (red) / a `↵ restart   ⌥w close` hint (accent chords, `fg.muted` words), drawn as a
+  layer above the terminal text but beneath every dock/overlay (Hard rule 4). Decided here
+  (the guide's §12 line leaves the keys/mechanism implied): **`↵` restarts** the shell in
+  place (drop the exited terminal, `sync_layout` respawns a fresh one for the same
+  still-in-tree pane; scrollback makes way for a new prompt), and while a focused pane is
+  dead it swallows all other input; **close is `⌥w`** (this app's pane-close chord - the
+  design's `⌘W` is tab-close here, per the 2026-07-11 pane-keybindings decision). A lone
+  exited shell shows the overlay rather than quitting the app (the "close last pane ->
+  empty state" behavior is its own M5 slice). Fork-on-edit / editable rewind stays out of
+  scope. _(was: the guide specifies the edge state but not the restart/close keys or the
+  read-only mechanism for this app's tab/pane model.)_
 - 2026-07-12 - **Session timeline + non-destructive rewind (v1 scope).** The three
   "Confirm first" timeline questions are settled for v1: **(1) what the timeline
   records** - an in-session **event log** Skelly records itself: a System event at
