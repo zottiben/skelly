@@ -679,6 +679,7 @@ fn push_centered_pl(
 // capture reproduces the real proportional tab list.
 const SB_PAD_TOP: f32 = 10.0;
 const SB_IND_H: f32 = 16.0;
+const SB_GROUP_H: f32 = 22.0;
 const SB_TAB_H: f32 = 30.0;
 const SB_PAD_BOTTOM: f32 = 10.0;
 const SB_LABEL_INSET: f32 = 12.0;
@@ -882,6 +883,22 @@ fn sidebar_panel(
         );
     }
 
+    // Group header (§08 #5): the "repo · branch" context above the tab list, full panel only.
+    if !rail {
+        let group_top = cmd_top + (SB_CMD_H + SB_CMD_GAP) * scale;
+        push_pl(
+            &mut labels,
+            &mut measure,
+            "SKELLY \u{b7} MAIN",
+            FontRole::Micro,
+            theme.fg_faint,
+            panel.x + SB_LABEL_INSET * scale,
+            group_top,
+            SB_GROUP_H,
+            scale,
+        );
+    }
+
     push_sb_body(
         &mut quads,
         &mut labels,
@@ -956,14 +973,14 @@ fn push_sb_body(
     theme: &Theme,
 ) {
     let (count, active) = tabs;
-    // The content clears the control strip + the workspace-chip block (logical), mirroring the
-    // binary's top_inset + chips_block.
-    let chip_block = if rail {
-        0.0
+    // The content clears the control strip + the workspace-chip block + the group header
+    // (logical), mirroring the binary's top_inset + chips_block + the group row.
+    let (chip_block, group_h) = if rail {
+        (0.0, 0.0)
     } else {
-        SB_CHIP_SIZE + SB_CHIP_BLOCK_GAP
+        (SB_CHIP_SIZE + SB_CHIP_BLOCK_GAP, SB_GROUP_H)
     };
-    let top = strip / scale + SB_PAD_TOP + chip_block;
+    let top = strip / scale + SB_PAD_TOP + chip_block + group_h;
     let reserved_below = SB_IND_H + SB_TAB_H + SB_PAD_BOTTOM;
     let cmd_block = SB_CMD_H + SB_CMD_GAP;
     let avail = panel.h / scale - SB_UTIL_H - top - cmd_block - SB_IND_H - reserved_below;

@@ -765,6 +765,18 @@ impl App {
     /// Lay out the left sidebar (design §08): a full-height panel of `sidebar.width` (or
     /// the 56px rail), its tab list built as a proportional display list in the guide's
     /// fonts + UI tokens and clipped to the panel.
+    /// The sidebar group header (design §08 #5): the active repo's `name · branch` context, or
+    /// `None` outside a git repo. Derived from the cached status context.
+    fn group_label(&self) -> Option<String> {
+        let branch = self.status_branch.as_deref()?;
+        let repo = self
+            .status_cwd
+            .rsplit('/')
+            .find(|s| !s.is_empty())
+            .unwrap_or(self.status_cwd.as_str());
+        Some(format!("{repo} \u{b7} {branch}"))
+    }
+
     /// The workspace chip glyphs (each workspace's name's first letter, uppercased).
     fn workspace_chips(&self) -> Vec<char> {
         self.workspaces
@@ -777,11 +789,13 @@ impl App {
         let scale = scale32(self.scale);
         // The sidebar bg fills the whole column (traffic lights sit on it); its content clears
         // the control strip via `top_inset` (logical px, macOS only).
+        let group = self.group_label();
         let view = sidebar::View {
             tab_count: self.tabs.len(),
             active_tab: self.active,
             chips: &self.workspace_chips(),
             active_chip: self.active_workspace,
+            group_label: group.as_deref(),
             rail: self.sidebar.is_rail(),
             top_inset: self.content_top() / scale,
         };
@@ -1132,11 +1146,13 @@ impl App {
             return None;
         }
         let scale = scale32(self.scale);
+        let group = self.group_label();
         let view = sidebar::View {
             tab_count: self.tabs.len(),
             active_tab: self.active,
             chips: &self.workspace_chips(),
             active_chip: self.active_workspace,
+            group_label: group.as_deref(),
             rail: self.sidebar.is_rail(),
             top_inset: self.content_top() / scale,
         };

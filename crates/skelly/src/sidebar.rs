@@ -40,6 +40,9 @@ const CMD_RADIUS: f32 = 8.0;
 /// The command well's search glyph + placeholder (design §08 #3).
 const CMD_ICON: &str = "\u{2315}";
 const CMD_PLACEHOLDER: &str = "Search or run\u{2026}";
+/// Height of the group header row (design §08 #5: the "repo · branch" context label above the
+/// tab list), an uppercase micro label with breathing room.
+const GROUP_H: f32 = 22.0;
 /// Height of an overflow indicator row (`↑ N more` / `↓ N more`).
 const IND_H: f32 = 16.0;
 /// Height of a tab row (and the "+ New tab" action), per the §09 "Sidebar tab item" (Height 30).
@@ -97,6 +100,9 @@ pub(crate) struct View<'a> {
     pub(crate) chips: &'a [char],
     /// Index of the active workspace (highlighted chip).
     pub(crate) active_chip: usize,
+    /// The group header above the tab list (design §08 #5: the "repo · branch" context), or
+    /// `None` outside a git repo. Shown uppercase.
+    pub(crate) group_label: Option<&'a str>,
     /// Whether the sidebar is the slim icon rail.
     pub(crate) rail: bool,
     /// The macOS control-strip inset in **logical** px (0 elsewhere); content clears it.
@@ -211,6 +217,8 @@ fn visible_or(mode: SidebarMode, fallback: SidebarMode) -> SidebarMode {
 enum RowKind {
     /// The command-input well (design §08 #3), which opens the palette.
     Command,
+    /// The group header (design §08 #5), drawn only when there is a group label.
+    Group,
     /// A tab at this 0-based index.
     Tab(usize),
     /// The "N tabs hidden above" indicator (drawn only when `> 0`).
@@ -240,7 +248,13 @@ struct Row {
     clippy::cast_sign_loss,
     reason = "the tab-row capacity is a small, non-negative count"
 )]
-fn rows_layout(count: usize, active: usize, panel_h: f32, top_inset: f32) -> Vec<Row> {
+fn rows_layout(
+    count: usize,
+    active: usize,
+    panel_h: f32,
+    top_inset: f32,
+    has_group: bool,
+) -> Vec<Row> {
     // Reserve the bottom-anchored utility bar so the top-down flow stops above it.
     let flow_h = panel_h - UTIL_H;
     let mut rows = Vec::new();
@@ -253,6 +267,16 @@ fn rows_layout(count: usize, active: usize, panel_h: f32, top_inset: f32) -> Vec
         kind: RowKind::Command,
     });
     y += CMD_H + CMD_GAP;
+
+    // The group header (design §08 #5), above the tab list, when there is one.
+    if has_group {
+        rows.push(Row {
+            top: y,
+            height: GROUP_H,
+            kind: RowKind::Group,
+        });
+        y += GROUP_H;
+    }
 
     // Capacity for tab rows, reserving both overflow-indicator slots + the new-tab action.
     // Each tab occupies its pill height plus the inter-tab gap.
@@ -324,7 +348,13 @@ pub(crate) fn hit(view: &View, panel: PxRect, scale: f32, px: f32, py: f32) -> O
     }
     let top_inset = view.top_inset + chips_block_h(view);
     let y_logical = (py - panel.y) / scale;
-    for row in rows_layout(view.tab_count, view.active_tab, panel.h / scale, top_inset) {
+    for row in rows_layout(
+        view.tab_count,
+        view.active_tab,
+        panel.h / scale,
+        top_inset,
+        view.group_label.is_some(),
+    ) {
         if y_logical >= row.top && y_logical < row.top + row.height {
             return match row.kind {
                 RowKind::Command => Some(Hit::CommandInput),
@@ -399,6 +429,7 @@ pub(crate) fn build(
         panel,
         active: view.active_tab,
         rail: view.rail,
+        group_label: view.group_label,
         scale,
         theme,
     };
@@ -407,6 +438,7 @@ pub(crate) fn build(
         view.active_tab,
         panel.h / scale,
         view.top_inset + chips_block,
+        view.group_label.is_some(),
     ) {
         push_row(&mut quads, &mut labels, row, &ctx, measure);
     }
@@ -441,6 +473,7 @@ struct RowCtx<'a> {
     panel: PxRect,
     active: usize,
     rail: bool,
+    group_label: Option<&'a str>,
     scale: f32,
     theme: &'a Theme,
 }
@@ -467,6 +500,26 @@ fn push_row(
     };
     match row.kind {
         RowKind::Command => push_command_well(quads, labels, top, height, ctx, measure),
+        RowKind::Group => {
+            // The "repo · branch" group header (design §08 #5): an uppercase micro label,
+            // quiet (fg.faint), inset like the tab labels.
+            if let Some(label) = ctx.group_label {
+                if !ctx.rail {
+                    push_label(
+                        labels,
+                        measure,
+                        &label.to_uppercase(),
+                        FontRole::Micro,
+                        ctx.theme.fg_faint,
+                        ctx.panel,
+                        top,
+                        height,
+                        false,
+                        ctx.scale,
+                    );
+                }
+            }
+        }
         RowKind::Tab(index) => {
             let is_active = index == ctx.active;
             if is_active {
@@ -831,6 +884,7 @@ mod tests {
             active_tab: active,
             chips: &[],
             active_chip: 0,
+            group_label: None,
             rail,
             top_inset: 0.0,
         }
@@ -964,6 +1018,7 @@ mod tests {
             active_tab: 0,
             chips: &chips,
             active_chip: 0,
+            group_label: None,
             rail: false,
             top_inset: 0.0,
         };

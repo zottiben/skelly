@@ -55,6 +55,17 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Sidebar group header (§08 #5): the "repo · branch" context.** The guide's
+  "SKELLY · MAIN" header above the tab list is real data, not a fabricated group: it renders the
+  active repo's `name · branch` (from the cached status context - the cwd basename + the git
+  branch), uppercase in `fg.faint` micro, and only inside a git repo (else no header). It sits as
+  a `RowKind::Group` row between the command well and the tabs, shifting the tab flow down. This
+  is the section-header half of §08 #5; the collapsible-groups *interaction* (collapse/expand,
+  multiple named groups, drag-between) is the deferred real feature. With this + the workspace
+  chips, the sidebar now reads top-to-bottom exactly like the guide: control strip -> chips ->
+  command input -> group header -> tabs -> new tab -> utility bar. Only the pinned grid (#4)
+  remains, and it is empty by default (nothing pinned) so it adds no default chrome.
+
 - 2026-07-13 - **Workspace switcher (§08 #2), built as a real feature.** The sidebar now shows
   the `P W +` chips - not fabricated UI, a genuine workspaces feature (Hard rule 5). A `Workspace`
   is a named, isolated tab set; the active one's tabs live in `App.tabs`/`active`, the others are
