@@ -9,11 +9,13 @@
 //! control declares its key path (for the round-trip contract) and a getter/setter
 //! pair, so reading and writing always go through the config, never a shadow copy.
 //!
-//! This first slice is keyboard-driven: a left category nav, a right control list,
-//! `↑/↓` to move between controls, `←/→` (and Enter) to change a value. The mockup's
-//! richer widgets (theme cards, sliders) are represented textually. Deferred: the
-//! keybindings / shell / advanced categories (they need config keys or the `[keys]`
-//! registry we do not have yet) and mouse hit-testing.
+//! Keyboard-driven: a left category nav, a right control list, `↑/↓` to move between
+//! controls, `←/→` (and Enter) to change a value. Each control renders its §09 widget - a
+//! toggle switch, a segmented control, or a slider (see [`push_control`]) - so the view
+//! matches the guide's §10.9 controls. Deferred: mouse hit-testing on those widgets (the
+//! keyboard model still drives edits); the guide's 4-up theme *cards* (a `Choice` shows as a
+//! segmented control instead - cards need per-theme swatch colors); and the keybindings /
+//! shell / advanced categories (they need config keys or the `[keys]` registry we lack).
 
 use skelly_config::{Config, CursorStyle, DiffView, SidebarMode, TabTitle};
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
@@ -31,8 +33,24 @@ const CONTENT_PAD: f32 = 24.0;
 const HEADER_H: f32 = 44.0;
 /// Category nav row height.
 const NAV_ROW_H: f32 = 32.0;
-/// Control row height.
-const CTRL_ROW_H: f32 = 34.0;
+/// Control row height (tall enough to seat the §09 widgets).
+const CTRL_ROW_H: f32 = 40.0;
+/// Toggle-switch dimensions (design §09: 38x22 pill, 18px knob, 2px inset).
+const TOGGLE_W: f32 = 38.0;
+const TOGGLE_H: f32 = 22.0;
+const TOGGLE_KNOB: f32 = 18.0;
+const TOGGLE_INSET: f32 = 2.0;
+/// Segmented-control dimensions (§09: 3px container pad, per-segment 4x11 pad, radii 7/5).
+const SEG_PAD: f32 = 3.0;
+const SEG_ITEM_PAD_X: f32 = 11.0;
+const SEG_H: f32 = 24.0;
+const SEG_RADIUS: f32 = 7.0;
+const SEG_ITEM_RADIUS: f32 = 5.0;
+/// Slider dimensions (§09: a 6px track with a 14px knob, plus a mono value readout).
+const SLIDER_W: f32 = 116.0;
+const SLIDER_TRACK_H: f32 = 6.0;
+const SLIDER_KNOB: f32 = 14.0;
+const SLIDER_VALUE_GAP: f32 = 12.0;
 /// The footer hint line.
 const FOOTER: &str = "up/down move   left/right change   tab category   esc close";
 
@@ -724,6 +742,7 @@ impl Settings {
                 ));
             }
             push_control(
+                quads,
                 labels,
                 measure,
                 control,
@@ -746,11 +765,17 @@ impl Default for Settings {
     }
 }
 
-/// Push one control row: its `label` at the content inset and its value right-anchored. The
-/// focused control brackets the value in guillemets and paints it in `accent`; otherwise the
-/// value is a quiet secondary.
-#[allow(clippy::too_many_arguments, reason = "one focused control-row builder")]
+/// Push one control row: its `label` at the content inset and its value rendered as the §09
+/// widget for its [`Kind`] - a toggle switch, a segmented control, or a slider - right-aligned
+/// to `content_right`. The keyboard model still drives edits (`←/→`); the focused row's fill
+/// (drawn by the caller) is the focus cue. Mouse hit-testing on the widgets is a follow-up.
+#[allow(
+    clippy::too_many_arguments,
+    clippy::cast_precision_loss,
+    reason = "one focused control-row builder; range bounds are small config values (u8/u16)"
+)]
 fn push_control(
+    quads: &mut Vec<ChromeQuad>,
     labels: &mut Vec<ProseLabel>,
     measure: &mut TextMeasure,
     control: &Control,
@@ -762,86 +787,228 @@ fn push_control(
     scale: f32,
     theme: &Theme,
 ) {
-    let label_fg = if focused {
-        theme.fg_primary
-    } else {
-        theme.fg_secondary
-    };
     push_row(
         labels,
         measure,
         control.label,
         FontRole::Label,
-        label_fg,
+        if focused {
+            theme.fg_primary
+        } else {
+            theme.fg_secondary
+        },
         content_x,
         top,
         CTRL_ROW_H,
         scale,
     );
-
-    let value = control.kind.value(config);
-    let value_fg = if focused {
-        theme.accent
-    } else {
-        theme.fg_secondary
-    };
-    if focused {
-        // `value ›` bracketed by guillemets: signals the value is adjustable with `←/→`.
-        let close = " \u{203a}";
-        let close_w = measure.width(close, FontRole::Label, None);
-        let value_w = measure.width(&value, FontRole::Label, None);
-        let open = "\u{2039} ";
-        let open_w = measure.width(open, FontRole::Label, None);
-        let mut x = content_right - close_w;
-        push_row(
-            labels,
-            measure,
-            close,
-            FontRole::Label,
-            theme.fg_muted,
-            x,
-            top,
-            CTRL_ROW_H,
-            scale,
-        );
-        x -= value_w;
-        push_row(
-            labels,
-            measure,
-            &value,
-            FontRole::Label,
-            value_fg,
-            x,
-            top,
-            CTRL_ROW_H,
-            scale,
-        );
-        x -= open_w;
-        push_row(
-            labels,
-            measure,
-            open,
-            FontRole::Label,
-            theme.fg_muted,
-            x,
-            top,
-            CTRL_ROW_H,
-            scale,
-        );
-    } else {
-        let x = content_right - measure.width(&value, FontRole::Label, None);
-        push_row(
-            labels,
-            measure,
-            &value,
-            FontRole::Label,
-            value_fg,
-            x,
-            top,
-            CTRL_ROW_H,
-            scale,
-        );
+    match &control.kind {
+        Kind::Toggle { get, .. } => {
+            push_toggle(quads, get(config), content_right, top, scale, theme);
+        }
+        Kind::Choice { options, get, .. } => {
+            let selected = get(config).min(options.len().saturating_sub(1));
+            push_segmented(
+                quads,
+                labels,
+                measure,
+                options,
+                selected,
+                content_right,
+                top,
+                scale,
+                theme,
+            );
+        }
+        Kind::Range { min, max, get, .. } => {
+            let fraction = if max > min {
+                (get(config) - min) as f32 / (max - min) as f32
+            } else {
+                0.0
+            };
+            push_slider(
+                quads,
+                labels,
+                measure,
+                &control.kind.value(config),
+                fraction.clamp(0.0, 1.0),
+                content_right,
+                top,
+                scale,
+                theme,
+            );
+        }
     }
+}
+
+/// A §09 toggle switch, right-anchored: a 38x22 pill (`accent` on / `border` off) with an
+/// 18px knob sprung to the right (on) or left (off).
+fn push_toggle(
+    quads: &mut Vec<ChromeQuad>,
+    on: bool,
+    content_right: f32,
+    top: f32,
+    scale: f32,
+    theme: &Theme,
+) {
+    let w = TOGGLE_W * scale;
+    let h = TOGGLE_H * scale;
+    let x = content_right - w;
+    let y = top + (CTRL_ROW_H * scale - h) * 0.5;
+    let track = if on { theme.accent } else { theme.border };
+    quads.push(ChromeQuad::rounded(PxRect { x, y, w, h }, track, h * 0.5));
+    let knob = TOGGLE_KNOB * scale;
+    let inset = TOGGLE_INSET * scale;
+    let knob_x = if on { x + w - inset - knob } else { x + inset };
+    // Knob-on reads as `bg.base`; `bg.inset` is the same near-black in `Srgb` at knob size.
+    let knob_color = if on { theme.bg_inset } else { theme.fg_muted };
+    quads.push(ChromeQuad::rounded(
+        PxRect {
+            x: knob_x,
+            y: y + inset,
+            w: knob,
+            h: knob,
+        },
+        knob_color,
+        knob * 0.5,
+    ));
+}
+
+/// A §09 segmented control, right-anchored: a `bg.inset` container (with a `border.subtle`
+/// ring) holding one padded segment per option; the selected one gets a `bg.elevated` fill.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one focused segmented-control builder"
+)]
+fn push_segmented(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    options: &[&str],
+    selected: usize,
+    content_right: f32,
+    top: f32,
+    scale: f32,
+    theme: &Theme,
+) {
+    let pad = SEG_PAD * scale;
+    let item_pad = SEG_ITEM_PAD_X * scale;
+    let seg_h = SEG_H * scale;
+    let line_h = measure.line_height(FontRole::Caption);
+    // Measure each segment (text + horizontal padding) to size the container.
+    let widths: Vec<f32> = options
+        .iter()
+        .map(|o| measure.width(o, FontRole::Caption, None) + 2.0 * item_pad)
+        .collect();
+    let total: f32 = widths.iter().sum::<f32>() + 2.0 * pad;
+    let cx = content_right - total;
+    let cy = top + (CTRL_ROW_H * scale - (seg_h + 2.0 * pad)) * 0.5;
+    // Container.
+    quads.push(ChromeQuad::rounded(
+        PxRect {
+            x: cx,
+            y: cy,
+            w: total,
+            h: seg_h + 2.0 * pad,
+        },
+        theme.bg_inset,
+        SEG_RADIUS * scale,
+    ));
+    let mut x = cx + pad;
+    for (i, option) in options.iter().enumerate() {
+        let w = widths[i];
+        let active = i == selected;
+        if active {
+            quads.push(ChromeQuad::rounded(
+                PxRect {
+                    x,
+                    y: cy + pad,
+                    w,
+                    h: seg_h,
+                },
+                theme.bg_elevated,
+                SEG_ITEM_RADIUS * scale,
+            ));
+        }
+        labels.push(ProseLabel {
+            text: (*option).to_owned(),
+            x: x + item_pad,
+            y: cy + pad + (seg_h - line_h) * 0.5,
+            role: FontRole::Caption,
+            color: if active {
+                theme.fg_primary
+            } else {
+                theme.fg_secondary
+            },
+            weight: None,
+            max_w: f32::MAX,
+        });
+        x += w;
+    }
+}
+
+/// A §09 slider, right-anchored: a mono `accent` value readout, then a 6px `border.subtle`
+/// track with an `accent` fill up to `fraction` and a 14px `fg.primary` knob at that point.
+#[allow(clippy::too_many_arguments, reason = "one focused slider builder")]
+fn push_slider(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    value: &str,
+    fraction: f32,
+    content_right: f32,
+    top: f32,
+    scale: f32,
+    theme: &Theme,
+) {
+    // The value readout (mono accent), right-aligned.
+    let value_w = measure.width(value, FontRole::Mono, None);
+    let vline = measure.line_height(FontRole::Mono);
+    labels.push(ProseLabel {
+        text: value.to_owned(),
+        x: content_right - value_w,
+        y: top + (CTRL_ROW_H * scale - vline) * 0.5,
+        role: FontRole::Mono,
+        color: theme.accent,
+        weight: None,
+        max_w: f32::MAX,
+    });
+    // The track, to the left of the value.
+    let track_w = SLIDER_W * scale;
+    let track_h = SLIDER_TRACK_H * scale;
+    let track_x = content_right - value_w - SLIDER_VALUE_GAP * scale - track_w;
+    let track_y = top + (CTRL_ROW_H * scale - track_h) * 0.5;
+    quads.push(ChromeQuad::rounded(
+        PxRect {
+            x: track_x,
+            y: track_y,
+            w: track_w,
+            h: track_h,
+        },
+        theme.border_subtle,
+        track_h * 0.5,
+    ));
+    quads.push(ChromeQuad::rounded(
+        PxRect {
+            x: track_x,
+            y: track_y,
+            w: (track_w * fraction).max(track_h),
+            h: track_h,
+        },
+        theme.accent,
+        track_h * 0.5,
+    ));
+    let knob = SLIDER_KNOB * scale;
+    quads.push(ChromeQuad::rounded(
+        PxRect {
+            x: track_x + track_w * fraction - knob * 0.5,
+            y: top + (CTRL_ROW_H * scale - knob) * 0.5,
+            w: knob,
+            h: knob,
+        },
+        theme.fg_primary,
+        knob * 0.5,
+    ));
 }
 
 /// Push one label vertically centered in a row of `row_h` logical px whose top is physical

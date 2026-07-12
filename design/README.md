@@ -55,6 +55,20 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Settings view: real §09 widgets (§10.9).** The settings controls now render the
+  guide's actual widgets instead of the placeholder `‹ value ›` text: `Kind::Toggle` -> a 38x22
+  toggle switch (accent on / border off, sprung knob), `Kind::Choice` -> a segmented control
+  (`bg.inset` container, selected segment `bg.elevated`), `Kind::Range` -> a slider (6px
+  `border.subtle` track, `accent` fill, `fg.primary` knob, mono `accent` value readout). CTRL_ROW_H
+  30 -> 40 to seat them. **Kept keyboard-driven:** `←/→` still drive edits and the focused row's
+  `accent.subtle` fill is the focus cue - mouse hit-testing on the widgets is a deliberate
+  follow-up (the widgets are the visual layer; the control model is unchanged, so the round-trip
+  contract + Hard rule 1 hold). **Substitutions (not fabrication):** every `Choice` renders as a
+  segmented control (all our choices are <=3 options), not the guide's `Select` dropdown or 4-up
+  theme *cards* - cards need per-theme swatch colors, a data addition, deferred. The toggle
+  knob-on reads `bg.base`; `bg.inset` stands in as the `Srgb` near-black (bg.base is stored linear
+  `Rgba`). settings_capture mirrors all three widgets for verification.
+
 - 2026-07-13 - **Command palette: per-command icons + category grouping (§10.8).** The palette
   now renders the guide's grouped list: each command carries a §07 reference-glyph `icon` (drawn
   left of the label, `accent` when selected else `fg.muted`) and a `category`; a small uppercase

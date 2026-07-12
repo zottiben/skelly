@@ -27,7 +27,28 @@ const S_NAV_PAD: f32 = 16.0;
 const S_CONTENT_PAD: f32 = 24.0;
 const S_HEADER_H: f32 = 44.0;
 const S_NAV_ROW_H: f32 = 32.0;
-const S_CTRL_ROW_H: f32 = 34.0;
+const S_CTRL_ROW_H: f32 = 40.0;
+// §09 widget dimensions - mirror the binary's `settings` module.
+const S_TOGGLE_W: f32 = 38.0;
+const S_TOGGLE_H: f32 = 22.0;
+const S_TOGGLE_KNOB: f32 = 18.0;
+const S_TOGGLE_INSET: f32 = 2.0;
+const S_SEG_PAD: f32 = 3.0;
+const S_SEG_ITEM_PAD_X: f32 = 11.0;
+const S_SEG_H: f32 = 24.0;
+const S_SEG_RADIUS: f32 = 7.0;
+const S_SEG_ITEM_RADIUS: f32 = 5.0;
+const S_SLIDER_W: f32 = 116.0;
+const S_SLIDER_TRACK_H: f32 = 6.0;
+const S_SLIDER_KNOB: f32 = 14.0;
+const S_SLIDER_VALUE_GAP: f32 = 12.0;
+
+/// A representative control widget for the capture (mirrors the binary's `Kind` render).
+enum Widget {
+    Segmented(&'static [&'static str], usize),
+    Toggle(bool),
+    Slider(&'static str, f32),
+}
 
 fn main() {
     let path = std::env::args()
@@ -88,14 +109,20 @@ fn build_settings(theme: &Theme, width: u32, height: u32, scale: f32) -> Capture
         ('%', "Git"),
     ];
     let controls = [
-        ("Theme", "Ossein Dark"),
-        ("Font size", "14px"),
-        ("Line height", "1.2"),
-        ("Cursor style", "Block"),
-        ("Font ligatures", "On"),
-        ("Bold uses bright colors", "On"),
-        ("Background blur", "18"),
-        ("Window opacity", "0.98"),
+        (
+            "Theme",
+            Widget::Segmented(&["Ossein Dark", "Ossein Light"], 0),
+        ),
+        ("Font size", Widget::Slider("14px", 0.25)),
+        ("Line height", Widget::Slider("1.2", 0.18)),
+        (
+            "Cursor style",
+            Widget::Segmented(&["Block", "Bar", "Underline"], 0),
+        ),
+        ("Font ligatures", Widget::Toggle(true)),
+        ("Bold uses bright colors", Widget::Toggle(true)),
+        ("Background blur", Widget::Slider("18", 0.18)),
+        ("Window opacity", Widget::Slider("0.98", 0.98)),
     ];
     let active = 0usize;
     let selected = 3usize; // "Cursor style"
@@ -169,9 +196,9 @@ fn build_settings(theme: &Theme, width: u32, height: u32, scale: f32) -> Capture
         ny += S_NAV_ROW_H * scale;
     }
 
-    // Controls.
+    // Controls, each rendered as its §09 widget.
     let mut cy = hy + S_HEADER_H * scale;
-    for (i, (label, value)) in controls.iter().enumerate() {
+    for (i, (label, widget)) in controls.iter().enumerate() {
         let focused = i == selected;
         if focused {
             quads.push(ChromeQuad::tint(
@@ -186,74 +213,47 @@ fn build_settings(theme: &Theme, width: u32, height: u32, scale: f32) -> Capture
                 0.0,
             ));
         }
-        let label_fg = if focused {
-            theme.fg_primary
-        } else {
-            theme.fg_secondary
-        };
         s_row(
             &mut labels,
             &mut m,
             label,
             FontRole::Label,
-            label_fg,
+            if focused {
+                theme.fg_primary
+            } else {
+                theme.fg_secondary
+            },
             content_x,
             cy,
             S_CTRL_ROW_H,
             scale,
         );
-        if focused {
-            let close = " \u{203a}";
-            let open = "\u{2039} ";
-            let mut x = content_right - m.width(close, FontRole::Label, None);
-            s_row(
+        match widget {
+            Widget::Toggle(on) => {
+                s_toggle(&mut quads, *on, content_right, cy, scale, theme);
+            }
+            Widget::Segmented(options, sel) => s_segmented(
+                &mut quads,
                 &mut labels,
                 &mut m,
-                close,
-                FontRole::Label,
-                theme.fg_muted,
-                x,
+                options,
+                *sel,
+                content_right,
                 cy,
-                S_CTRL_ROW_H,
                 scale,
-            );
-            x -= m.width(value, FontRole::Label, None);
-            s_row(
-                &mut labels,
-                &mut m,
-                value,
-                FontRole::Label,
-                theme.accent,
-                x,
-                cy,
-                S_CTRL_ROW_H,
-                scale,
-            );
-            x -= m.width(open, FontRole::Label, None);
-            s_row(
-                &mut labels,
-                &mut m,
-                open,
-                FontRole::Label,
-                theme.fg_muted,
-                x,
-                cy,
-                S_CTRL_ROW_H,
-                scale,
-            );
-        } else {
-            let x = content_right - m.width(value, FontRole::Label, None);
-            s_row(
+                theme,
+            ),
+            Widget::Slider(value, fraction) => s_slider(
+                &mut quads,
                 &mut labels,
                 &mut m,
                 value,
-                FontRole::Label,
-                theme.fg_secondary,
-                x,
+                *fraction,
+                content_right,
                 cy,
-                S_CTRL_ROW_H,
                 scale,
-            );
+                theme,
+            ),
         }
         cy += S_CTRL_ROW_H * scale;
     }
@@ -320,4 +320,165 @@ fn s_right(
 ) {
     let x = right - m.width(text, role, None);
     s_row(labels, m, text, role, color, x, top, row_h, scale);
+}
+
+/// A §09 toggle switch, right-anchored - mirrors the binary's `push_toggle`.
+fn s_toggle(
+    quads: &mut Vec<ChromeQuad>,
+    on: bool,
+    content_right: f32,
+    top: f32,
+    scale: f32,
+    theme: &Theme,
+) {
+    let w = S_TOGGLE_W * scale;
+    let h = S_TOGGLE_H * scale;
+    let x = content_right - w;
+    let y = top + (S_CTRL_ROW_H * scale - h) * 0.5;
+    quads.push(ChromeQuad::rounded(
+        PxRect { x, y, w, h },
+        if on { theme.accent } else { theme.border },
+        h * 0.5,
+    ));
+    let knob = S_TOGGLE_KNOB * scale;
+    let inset = S_TOGGLE_INSET * scale;
+    let knob_x = if on { x + w - inset - knob } else { x + inset };
+    quads.push(ChromeQuad::rounded(
+        PxRect {
+            x: knob_x,
+            y: y + inset,
+            w: knob,
+            h: knob,
+        },
+        if on { theme.bg_inset } else { theme.fg_muted },
+        knob * 0.5,
+    ));
+}
+
+/// A §09 segmented control, right-anchored - mirrors the binary's `push_segmented`.
+#[allow(clippy::too_many_arguments, reason = "one focused example helper")]
+fn s_segmented(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    m: &mut TextMeasure,
+    options: &[&str],
+    selected: usize,
+    content_right: f32,
+    top: f32,
+    scale: f32,
+    theme: &Theme,
+) {
+    let pad = S_SEG_PAD * scale;
+    let item_pad = S_SEG_ITEM_PAD_X * scale;
+    let seg_h = S_SEG_H * scale;
+    let line_h = m.line_height(FontRole::Caption);
+    let widths: Vec<f32> = options
+        .iter()
+        .map(|o| m.width(o, FontRole::Caption, None) + 2.0 * item_pad)
+        .collect();
+    let total: f32 = widths.iter().sum::<f32>() + 2.0 * pad;
+    let cx = content_right - total;
+    let cy = top + (S_CTRL_ROW_H * scale - (seg_h + 2.0 * pad)) * 0.5;
+    quads.push(ChromeQuad::rounded(
+        PxRect {
+            x: cx,
+            y: cy,
+            w: total,
+            h: seg_h + 2.0 * pad,
+        },
+        theme.bg_inset,
+        S_SEG_RADIUS * scale,
+    ));
+    let mut x = cx + pad;
+    for (i, option) in options.iter().enumerate() {
+        let w = widths[i];
+        let active = i == selected;
+        if active {
+            quads.push(ChromeQuad::rounded(
+                PxRect {
+                    x,
+                    y: cy + pad,
+                    w,
+                    h: seg_h,
+                },
+                theme.bg_elevated,
+                S_SEG_ITEM_RADIUS * scale,
+            ));
+        }
+        labels.push(ProseLabel {
+            text: (*option).to_owned(),
+            x: x + item_pad,
+            y: cy + pad + (seg_h - line_h) * 0.5,
+            role: FontRole::Caption,
+            color: if active {
+                theme.fg_primary
+            } else {
+                theme.fg_secondary
+            },
+            weight: None,
+            max_w: f32::MAX,
+        });
+        x += w;
+    }
+}
+
+/// A §09 slider, right-anchored - mirrors the binary's `push_slider`.
+#[allow(clippy::too_many_arguments, reason = "one focused example helper")]
+fn s_slider(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    m: &mut TextMeasure,
+    value: &str,
+    fraction: f32,
+    content_right: f32,
+    top: f32,
+    scale: f32,
+    theme: &Theme,
+) {
+    let value_w = m.width(value, FontRole::Mono, None);
+    let vline = m.line_height(FontRole::Mono);
+    labels.push(ProseLabel {
+        text: value.to_owned(),
+        x: content_right - value_w,
+        y: top + (S_CTRL_ROW_H * scale - vline) * 0.5,
+        role: FontRole::Mono,
+        color: theme.accent,
+        weight: None,
+        max_w: f32::MAX,
+    });
+    let track_w = S_SLIDER_W * scale;
+    let track_h = S_SLIDER_TRACK_H * scale;
+    let track_x = content_right - value_w - S_SLIDER_VALUE_GAP * scale - track_w;
+    let track_y = top + (S_CTRL_ROW_H * scale - track_h) * 0.5;
+    quads.push(ChromeQuad::rounded(
+        PxRect {
+            x: track_x,
+            y: track_y,
+            w: track_w,
+            h: track_h,
+        },
+        theme.border_subtle,
+        track_h * 0.5,
+    ));
+    quads.push(ChromeQuad::rounded(
+        PxRect {
+            x: track_x,
+            y: track_y,
+            w: (track_w * fraction).max(track_h),
+            h: track_h,
+        },
+        theme.accent,
+        track_h * 0.5,
+    ));
+    let knob = S_SLIDER_KNOB * scale;
+    quads.push(ChromeQuad::rounded(
+        PxRect {
+            x: track_x + track_w * fraction - knob * 0.5,
+            y: top + (S_CTRL_ROW_H * scale - knob) * 0.5,
+            w: knob,
+            h: knob,
+        },
+        theme.fg_primary,
+        knob * 0.5,
+    ));
 }
