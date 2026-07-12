@@ -23,13 +23,21 @@ The guide flags these as "Confirm first" - genuine product/architecture calls to
 settle before or as the relevant code lands. Resolve each, then replace its line
 with the decision + date.
 
-- [ ] **Timeline AI-actions contract** - how the session timeline receives AI
-  actions. Needs an explicit integration hook/contract, not shell heuristics.
+- [~] **Timeline AI-actions contract** - _v1 resolved 2026-07-12: the timeline is
+  an in-session event log Skelly records itself (see decision log); the model
+  carries an `Agent` actor and a `record()` API, but the **transport** by which
+  external AI actions reach the timeline stays open - a future additive hook (an
+  explicit append-only event log the agent writes), never a shell heuristic._
 - [x] **Windowing** - single OS window for v0.1 via `winit`; multi-window is a
   later additive decision. _Resolved 2026-07-11 (ADR-0004)._
-- [ ] **Rewind + edit** - when viewing a past state, fork a branch on edit, or
-  block edits while detached?
-- [ ] **Persist scope** - restore layout only, or attempt to re-run processes?
+- [x] **Rewind + edit** - _Resolved 2026-07-12: v1 rewind is **read-only
+  inspection**. Restoring materializes the commit in a shadow worktree
+  (HEAD/refs untouched, Hard rule 3) and shows the viewed state; Skelly never
+  auto-forks or moves panes into it. Editable rewind / fork-on-edit is deferred._
+- [x] **Persist scope** - _Resolved 2026-07-12: **layout only** (restore tabs +
+  pinned on launch), never re-run processes, per the guide's own `[session]
+  persist` comment. The launch-time restore itself is a follow-up, separate from
+  the in-session timeline._
 - [ ] **Scrollback search scope** - active pane only, or all panes?
 
 Deferred stack/foundation choices (from init; keep TBD until crates are picked):
@@ -47,6 +55,28 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-12 - **Session timeline + non-destructive rewind (v1 scope).** The three
+  "Confirm first" timeline questions are settled for v1: **(1) what the timeline
+  records** - an in-session **event log** Skelly records itself: a System event at
+  session start, and the Human git events it witnesses through the diff dock
+  (commits, and stage / unstage / stage-all). Each event may carry a **restore
+  target** (a commit SHA); only commit events are restorable, because the
+  non-destructive mechanism can only check out a real git object. The model has an
+  `Agent` actor and a `Timeline::record` API so agent events slot in later, but the
+  transport (how external AI actions arrive) is the still-open AI-actions contract -
+  a future additive hook, not a shell heuristic. **(2) rewind + edit** - v1 rewind
+  is **read-only inspection**: selecting a restorable event runs `git worktree add
+  --detach <sha>` into a Skelly-owned shadow worktree (a temp dir), so HEAD, the
+  branch, and every ref are untouched (Hard rule 3, adversarially tested); the dock
+  shows "viewing state at <event>" and the past state's files; Skelly never
+  auto-forks or repoints panes. `⌥⌘0` / "Return to now" runs `git worktree remove
+  --force` and snaps back to HEAD. Fork-on-edit is deferred. **(3) persist scope** -
+  **layout only** (restore tabs + pinned on launch), never re-run processes, per the
+  guide's `[session] persist` comment; the launch-restore implementation is a
+  separate follow-up. The timeline opens as a right dock with `⇧⌘H` (Hard rule 4 -
+  mutually exclusive with the git dock, only one right-dock surface at a time);
+  `↑/↓` select an event, `⌥⌘←`/`⌥⌘→` step, `⌥⌘0` return to now, `Esc` closes. _(was:
+  the timeline AI-actions contract, rewind+edit, and persist-scope open questions.)_
 - 2026-07-12 - **Git diff dock (read-only) layout.** The dock opens on the right edge
   (`⇧⌘G`, `Esc` to close) as base chrome over the live terminal (Hard rule 4; the pane
   viewport insets to its left, like the sidebar insets from the left). Fixed at the

@@ -12,14 +12,17 @@
 //! so the parsing is fully unit-tested without a git process.
 //!
 //! Status: M4 - the git diff **model** ([`Repo`] discovery, working status, per-file
-//! unified diff), **per-file staging** ([`Repo::stage`] / [`Repo::unstage`] /
-//! [`Repo::stage_all`]), and **committing** ([`Repo::commit`] / [`Repo::head_short`] /
-//! [`Repo::undo_commit`]). Hunk-level staging and the timeline / shadow-worktree rewind
-//! are follow-up slices.
+//! unified diff), **per-file / hunk staging** ([`Repo::stage`] / [`Repo::unstage`] /
+//! [`Repo::stage_all`] / [`Repo::apply_hunk`]), **committing** ([`Repo::commit`] /
+//! [`Repo::head_short`] / [`Repo::undo_commit`]), the **session timeline** model
+//! ([`Timeline`]), and the **non-destructive rewind** ([`Repo::shadow_checkout`] ->
+//! [`ShadowWorktree`], `git worktree add --detach`; HEAD/refs untouched, Hard rule 3,
+//! ADR-0007).
 
 #![doc(test(attr(deny(warnings))))]
 
 mod diff;
+mod timeline;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -28,6 +31,7 @@ use std::process::Command;
 use thiserror::Error;
 
 pub use diff::{DiffLine, FileDiff, Hunk, LineKind};
+pub use timeline::{Actor, SessionEvent, Timeline};
 
 /// Anything that can go wrong talking to git.
 #[derive(Debug, Error)]
@@ -225,6 +229,35 @@ impl Repo {
         self.git_apply(&args, &buf)
     }
 
+    /// Restore the codebase at `committish` (a commit SHA / ref) into a fresh **shadow
+    /// worktree** for non-destructive rewind: `git worktree add --detach <tmp> <committish>`.
+    ///
+    /// This is the session timeline's trust contract (Hard rule 3, ADR-0007). By
+    /// construction it creates a *separate* checkout in detached HEAD under a Skelly-owned
+    /// temp directory and **never** moves the main worktree's HEAD, branch, or any ref -
+    /// enforced structurally by git, re-checked by adversarial tests. The returned
+    /// [`ShadowWorktree`] removes itself (`git worktree remove --force`) on
+    /// [`ShadowWorktree::discard`] or drop.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git worktree add` cannot be run or fails (an invalid
+    /// committish, or a repo with no commits). On failure no worktree is created and refs
+    /// stay untouched.
+    pub fn shadow_checkout(&self, committish: &str) -> Result<ShadowWorktree, GitError> {
+        let path = unique_shadow_path();
+        let path_str = path.to_string_lossy();
+        run_git(
+            &self.root,
+            &["worktree", "add", "--detach", &path_str, committish],
+        )?;
+        Ok(ShadowWorktree {
+            repo_root: self.root.clone(),
+            path,
+            committish: committish.to_owned(),
+            active: true,
+        })
+    }
+
     /// Run `git -C <root> <args>` feeding `stdin` to it, erroring on a non-zero exit. Used
     /// for `git apply`, which reads its patch from standard input.
     fn git_apply(&self, args: &[&str], stdin: &str) -> Result<(), GitError> {
@@ -257,20 +290,102 @@ impl Repo {
 
     /// Run `git -C <root> <args>` and return its stdout, erroring on a non-zero exit.
     fn git_stdout(&self, args: &[&str]) -> Result<String, GitError> {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(&self.root)
-            .args(args)
-            .output()
-            .map_err(GitError::Spawn)?;
-        if !output.status.success() {
-            return Err(GitError::Command {
-                args: args.join(" "),
-                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            });
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        run_git(&self.root, args)
     }
+}
+
+/// Run `git -C <root> <args>` and return its stdout, erroring on a non-zero exit. The
+/// shared runner behind [`Repo::git_stdout`] and [`ShadowWorktree`] (which has no `Repo`).
+fn run_git(root: &Path, args: &[&str]) -> Result<String, GitError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .map_err(GitError::Spawn)?;
+    if !output.status.success() {
+        return Err(GitError::Command {
+            args: args.join(" "),
+            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// A live shadow worktree from [`Repo::shadow_checkout`]: a detached checkout of a past
+/// commit under a temp directory, for read-only rewind inspection (ADR-0007). Removing it
+/// (`git worktree remove --force`) leaves the main worktree and every ref untouched. The
+/// handle cleans itself up on [`Self::discard`] or drop, so a leaked one still tidies.
+#[derive(Debug)]
+pub struct ShadowWorktree {
+    /// The main repository root (to run `git worktree remove` against).
+    repo_root: PathBuf,
+    /// The temp directory the past state is checked out into.
+    path: PathBuf,
+    /// The committish this worktree is checked out to (for the dock's "viewing" banner).
+    committish: String,
+    /// Whether the worktree still needs removing (false once discarded, so drop is a no-op).
+    active: bool,
+}
+
+impl ShadowWorktree {
+    /// The temp directory the past state is checked out into.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// The committish (commit SHA / ref) this worktree is checked out to.
+    #[must_use]
+    pub fn committish(&self) -> &str {
+        &self.committish
+    }
+
+    /// Discard the worktree now: `git worktree remove --force`, then remove any leftover
+    /// directory. Consuming `self` so the drop guard does not run it again.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git worktree remove` cannot be run or fails.
+    pub fn discard(mut self) -> Result<(), GitError> {
+        self.remove()
+    }
+
+    /// The shared removal path used by both [`Self::discard`] and [`Drop`]. Idempotent:
+    /// after the first call `active` is cleared so it never double-removes.
+    fn remove(&mut self) -> Result<(), GitError> {
+        if !self.active {
+            return Ok(());
+        }
+        self.active = false;
+        let path_str = self.path.to_string_lossy();
+        let result = run_git(
+            &self.repo_root,
+            &["worktree", "remove", "--force", &path_str],
+        );
+        // Best-effort: if git left the directory (or was never fully set up), remove it so
+        // the temp dir does not leak.
+        let _ = std::fs::remove_dir_all(&self.path);
+        result.map(|_| ())
+    }
+}
+
+impl Drop for ShadowWorktree {
+    /// Safety net: tidy the worktree even if the handle is dropped without an explicit
+    /// [`Self::discard`] (e.g. on app exit). Errors are swallowed - there is nothing to do
+    /// with them in a destructor; `git worktree prune` reclaims anything that still leaks.
+    fn drop(&mut self) {
+        let _ = self.remove();
+    }
+}
+
+/// A unique temp path for a shadow worktree, outside the repo (git refuses a path inside
+/// `.git`). Unique per process via the pid plus a monotonic counter - no wall clock or
+/// randomness needed, and `git worktree add` creates the directory itself.
+fn unique_shadow_path() -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    std::env::temp_dir().join(format!("skelly-rewind-{}-{n}", std::process::id()))
 }
 
 /// The repository's working status: branch, upstream distance, and changed files.
