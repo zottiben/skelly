@@ -12,12 +12,13 @@
 
 /// One instanced quad: a pixel rectangle, a linear RGBA fill, and shape params.
 ///
-/// `params` is `[radius, blur, _, _]` in physical pixels and drives the fragment
-/// shader: `radius == 0 && blur == 0` is a plain sharp fill (every cell background,
-/// divider, cursor, underline, and flush panel - identical to the old flat pipeline);
-/// `radius > 0` rounds the corners with a signed-distance box and a 1px anti-aliased
-/// edge (floating panels); `blur > 0` marks the quad a soft drop shadow, its coverage
-/// feathered over `blur` px around the inset panel box (the guide's elevation tokens).
+/// `params` is `[radius, blur, diamond, _]` in physical pixels and drives the fragment
+/// shader: all-zero is a plain sharp fill (every cell background, divider, cursor,
+/// underline, and flush panel - identical to the old flat pipeline); `radius > 0` rounds
+/// the corners with a signed-distance box and a 1px anti-aliased edge (floating panels);
+/// `blur > 0` marks the quad a soft drop shadow, its coverage feathered over `blur` px
+/// around the inset panel box (the guide's elevation tokens); `diamond > 0` marks a
+/// rounded square rotated 45° (a "diamond" disc of the vertebra logo, §02).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct Quad {
@@ -25,7 +26,7 @@ pub(crate) struct Quad {
     rect: [f32; 4],
     /// Linear RGBA.
     color: [f32; 4],
-    /// `[radius, blur, _, _]` in physical pixels (see the type docs).
+    /// `[radius, blur, diamond, _]` in physical pixels (see the type docs).
     params: [f32; 4],
 }
 
@@ -75,6 +76,21 @@ impl Quad {
             rect: [x, y, w, h],
             color,
             params: [radius, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// A rounded-square "diamond" disc: a square of side `size` (physical px) rotated 45°
+    /// about `(cx, cy)`, its corners rounded by `radius` px in the pre-rotation (axis-aligned)
+    /// frame - the vertebra logo's discs (the guide's §02 mark). The quad's rect is the
+    /// diamond's axis-aligned bounding box (side `size·√2`); the fragment shader rotates the
+    /// sample point 45° back into that frame and evaluates the rounded-box SDF at half-size
+    /// `size/2` (the AABB half divided by √2). `params.z == 1` selects that shader branch.
+    pub(crate) fn diamond(cx: f32, cy: f32, size: f32, color: [f32; 4], radius: f32) -> Self {
+        let aabb = size * std::f32::consts::SQRT_2;
+        Self {
+            rect: [cx - aabb * 0.5, cy - aabb * 0.5, aabb, aabb],
+            color,
+            params: [radius, 0.0, 1.0, 0.0],
         }
     }
 
@@ -248,6 +264,68 @@ pub(crate) fn overlay_quads(
         ));
     }
     quads
+}
+
+/// The vertebra logo mark's own spine opacity (the guide draws the spine at `accent`
+/// opacity 0.3, beneath the mark's container opacity).
+const LOGO_SPINE_ALPHA: f32 = 0.3;
+
+/// Container opacity for the faint empty-state brand watermark (the guide's §10.2 mark,
+/// `opacity:0.32`). The one place a pane paints the vertebra mark, so the value lives here
+/// with the mark's other transcribed geometry.
+pub(crate) const LOGO_WATERMARK_OPACITY: f32 = 0.32;
+
+/// Build the vertebra logo mark (the guide's §02 brand mark): a faint `accent` spine (a
+/// vertical rounded pill) threading three rounded-diamond discs - two small `fg.primary`
+/// discs at top and bottom and a large `accent` disc at the center. `bounds` is the mark's
+/// square bounding box (physical px); every quad's alpha is scaled by `opacity` (the guide's
+/// container opacity, e.g. 0.32 for the faint empty-state watermark). Resolving the two-tone
+/// colors from theme tokens makes the mark correct in both themes for free - on light the
+/// guide's "on-light" variant falls out (accent = deep mauve, `fg.primary` = slate). The
+/// disc geometry (fractions of the box) is transcribed from the mockup: spine `top 9% h 82%
+/// w 6%`; discs centered horizontally at `cy` 16% / 50% / 84%, sides 26% / 42% / 26%, corner
+/// radii 26% / 22% / 26%. Shared by the windowed [`Renderer`](crate::Renderer) and the
+/// headless capture.
+pub(crate) fn logo_quads(
+    bounds: crate::PxRect,
+    theme: &crate::theme::Theme,
+    opacity: f32,
+) -> Vec<Quad> {
+    // The mark is drawn square, centered horizontally in `bounds`.
+    let mark_px = bounds.w.min(bounds.h);
+    let cx = bounds.x + bounds.w * 0.5;
+    let tint = |c: crate::theme::Srgb, alpha: f32| {
+        let mut linear = c.to_linear();
+        linear[3] = alpha;
+        linear
+    };
+    // A rounded-diamond disc: center `(cx, bounds.y + cy_frac·mark)`, square side
+    // `size_frac·mark`, corners rounded by `radius_frac` of that side.
+    let disc = |cy_frac: f32, size_frac: f32, radius_frac: f32, color: [f32; 4]| {
+        let size = size_frac * mark_px;
+        Quad::diamond(
+            cx,
+            bounds.y + cy_frac * mark_px,
+            size,
+            color,
+            radius_frac * size,
+        )
+    };
+
+    let spine_w = 0.06 * mark_px;
+    vec![
+        Quad::rounded(
+            cx - spine_w * 0.5,
+            bounds.y + 0.09 * mark_px,
+            spine_w,
+            0.82 * mark_px,
+            tint(theme.accent, LOGO_SPINE_ALPHA * opacity),
+            spine_w * 0.5,
+        ),
+        disc(0.16, 0.26, 0.26, tint(theme.fg_primary, opacity)),
+        disc(0.50, 0.42, 0.22, tint(theme.accent, opacity)),
+        disc(0.84, 0.26, 0.26, tint(theme.fg_primary, opacity)),
+    ]
 }
 
 /// Build the decorative quads for the left sidebar: the `bg.sidebar` panel fill (one step
@@ -843,14 +921,25 @@ fn sd_round_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
     let radius = in.params.x;
     let blur = in.params.y;
+    let diamond = in.params.z;
     // Fast path: a plain sharp fill (cell backgrounds, dividers, cursors, underlines,
     // selection, flush panels) - identical to the old flat pipeline.
-    if (radius <= 0.0 && blur <= 0.0) {
+    if (radius <= 0.0 && blur <= 0.0 && diamond <= 0.0) {
         return in.color;
     }
     let half = in.rect.zw * 0.5;
     let center = in.rect.xy + half;
     let p = in.pos.xy - center;
+    if (diamond > 0.0) {
+        // A rounded square rotated 45deg (a logo disc): rotate the sample point back into
+        // the square's axis-aligned frame, where the inner half-size is the AABB half
+        // divided by sqrt(2) (a square's diagonal bound).
+        let c = 0.70710678;
+        let pr = vec2<f32>(c * (p.x + p.y), c * (p.y - p.x));
+        let d = sd_round_box(pr, half * c, radius);
+        let cov = clamp(0.5 - d, 0.0, 1.0);
+        return vec4<f32>(in.color.rgb, in.color.a * cov);
+    }
     if (blur > 0.0) {
         // Soft drop shadow: the SDF of the inset panel box, feathered over `blur`.
         let inner = half - vec2<f32>(blur, blur);
@@ -867,8 +956,8 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{grid_quads, push_outline, Quad};
-    use crate::{GridCell, Srgb};
+    use super::{grid_quads, logo_quads, push_outline, Quad};
+    use crate::{GridCell, PxRect, Srgb, Theme};
 
     fn plain(c: char) -> GridCell {
         GridCell {
@@ -938,6 +1027,55 @@ mod tests {
         // radius too large for a 40px-tall quad: clamped to 20 (half the height).
         let clamped = super::Quad::rounded(0.0, 0.0, 100.0, 40.0, ACCENT.to_linear(), 999.0);
         assert!((clamped.params[0] - 20.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn diamond_rect_is_the_rotated_squares_bounding_box() {
+        // A 10px square rotated 45° has an axis-aligned bounding box of side 10·√2, centered
+        // on the disc center; params flag the shader's rotated-box branch.
+        let q = super::Quad::diamond(100.0, 200.0, 10.0, ACCENT.to_linear(), 2.6);
+        let aabb = 10.0 * std::f32::consts::SQRT_2;
+        assert!(rect_eq(
+            q.rect,
+            [100.0 - aabb / 2.0, 200.0 - aabb / 2.0, aabb, aabb]
+        ));
+        assert!((q.params[0] - 2.6).abs() < 1e-3, "corner radius recorded");
+        assert!((q.params[2] - 1.0).abs() < 1e-3, "diamond flag set");
+    }
+
+    #[test]
+    fn logo_quads_is_a_spine_pill_and_three_two_tone_discs() {
+        let theme = Theme::resolve("ossein-dark");
+        let bounds = PxRect {
+            x: 40.0,
+            y: 60.0,
+            w: 56.0,
+            h: 56.0,
+        };
+        let quads = logo_quads(bounds, &theme, 0.32);
+        // The spine (a rounded pill, not a diamond) then the three discs (rotated).
+        assert_eq!(quads.len(), 4);
+        assert!(quads[0].params[2].abs() < 1e-3, "spine is not a diamond");
+        assert!(quads[1..].iter().all(|q| (q.params[2] - 1.0).abs() < 1e-3));
+        // Two-tone: spine + center disc are `accent`; the small top/bottom discs `fg.primary`.
+        let accent = theme.accent.to_linear();
+        let primary = theme.fg_primary.to_linear();
+        assert_eq!(quads[0].color[..3], accent[..3], "spine is accent");
+        assert_eq!(quads[2].color[..3], accent[..3], "center disc is accent");
+        assert_eq!(quads[1].color[..3], primary[..3], "top disc is fg.primary");
+        assert_eq!(
+            quads[3].color[..3],
+            primary[..3],
+            "bottom disc is fg.primary"
+        );
+        // The container opacity scales every quad; the spine carries its extra 0.3 factor.
+        assert!((quads[2].color[3] - 0.32).abs() < 1e-3, "center disc alpha");
+        assert!((quads[0].color[3] - 0.3 * 0.32).abs() < 1e-3, "spine alpha");
+        // The discs are centered horizontally on the box's vertical axis.
+        let cx = bounds.x + bounds.w / 2.0;
+        for disc in &quads[1..] {
+            assert!((disc.rect[0] + disc.rect[2] / 2.0 - cx).abs() < 1e-3);
+        }
     }
 
     #[test]

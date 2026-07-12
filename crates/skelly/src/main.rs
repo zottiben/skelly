@@ -422,6 +422,8 @@ impl App {
     /// resolved cell grid, cursor, selection, rectangle, and focus flag.
     fn pane_frames(&self) -> Vec<PaneFrame> {
         let inset = self.pane_inset();
+        let (cell_w, cell_h) = self.cell_size();
+        let scale = scale32(self.scale);
         let viewport = self.viewport_rect();
         let ws = self.active_tab();
         let focused = ws.tree.focused();
@@ -442,26 +444,32 @@ impl App {
                             .collect()
                     })
                     .collect();
-                if empty_state && term.exit_status().is_none() {
-                    emptystate::overlay_onto(&mut rows, &self.theme);
-                }
+                let origin = (rect.x + inset, rect.y + inset);
+                let rect = PxRect {
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                };
                 let cols = rows.first().map_or(0, Vec::len);
+                let logo = if empty_state && term.exit_status().is_none() {
+                    emptystate::overlay_onto(&mut rows, &self.theme);
+                    empty_state_logo(origin, cols, rows.len(), cell_w, cell_h, scale)
+                } else {
+                    None
+                };
                 let selection = match ws.selection {
                     Some((sid, sel)) if sid == id => selection_cells(sel, rows.len(), cols),
                     _ => Vec::new(),
                 };
                 Some(PaneFrame {
-                    rect: PxRect {
-                        x: rect.x,
-                        y: rect.y,
-                        w: rect.w,
-                        h: rect.h,
-                    },
-                    origin: (rect.x + inset, rect.y + inset),
+                    rect,
+                    origin,
                     rows,
                     cursor: term.cursor(),
                     selection,
                     focused: id == focused,
+                    logo,
                 })
             })
             .collect()
@@ -509,17 +517,7 @@ impl App {
     fn redraw(&mut self) {
         let frames = self.pane_frames();
 
-        let views: Vec<PaneView> = frames
-            .iter()
-            .map(|f| PaneView {
-                rect: f.rect,
-                origin: f.origin,
-                rows: &f.rows,
-                cursor: f.cursor,
-                selection: &f.selection,
-                focused: f.focused,
-            })
-            .collect();
+        let views: Vec<PaneView> = frames.iter().map(PaneFrame::view).collect();
 
         // Build the dim overlays for any exited panes and the chrome frames, all before
         // the mutable renderer borrow.
@@ -2020,6 +2018,23 @@ struct PaneFrame {
     cursor: (usize, usize),
     selection: Vec<(usize, usize)>,
     focused: bool,
+    /// The empty-state brand watermark's bounding box, for a pristine tab (design §10.2).
+    logo: Option<PxRect>,
+}
+
+impl PaneFrame {
+    /// Borrow this owned frame as a [`PaneView`] for the renderer / headless capture.
+    fn view(&self) -> PaneView<'_> {
+        PaneView {
+            rect: self.rect,
+            origin: self.origin,
+            rows: &self.rows,
+            cursor: self.cursor,
+            selection: &self.selection,
+            focused: self.focused,
+            logo: self.logo,
+        }
+    }
 }
 
 /// Owned "shell exited" overlay data the borrowed [`DeadPaneView`]s point at during a
@@ -2380,6 +2395,39 @@ fn dim_f32(value: u32) -> f32 {
     value as f32
 }
 
+/// The empty-state brand watermark's square bounding box for a pristine pane: a
+/// `MARK_SIZE` square (physical px) seated `MARK_GAP` above the hint-chip row (design
+/// §10.2), so the vector mark and the chip text read as one lockup. It is centered on the
+/// *cell grid* (`origin.x + cols·cell_w/2`), not the pane rect - the chips are centered on
+/// the grid too, and a pane's content width is rarely an exact multiple of `cell_w`, so
+/// centering on the rect would leave the mark up to half a cell off from the chips. `origin`
+/// is the pane's cell `(0,0)` top-left; `cols`/`rows_len` the grid dimensions. `None` when
+/// the grid is too small to seat the lockup (mirrors [`emptystate::chip_row`]).
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "grid row/column counts are small non-negative values, exact as f32"
+)]
+fn empty_state_logo(
+    origin: (f32, f32),
+    cols: usize,
+    rows_len: usize,
+    cell_w: f32,
+    cell_h: f32,
+    scale: f32,
+) -> Option<PxRect> {
+    let chip_row = emptystate::chip_row(rows_len)?;
+    let mark = emptystate::MARK_SIZE * scale;
+    let gap = emptystate::MARK_GAP * scale;
+    let chip_top = origin.1 + chip_row as f32 * cell_h;
+    let grid_center_x = origin.0 + cols as f32 * cell_w / 2.0;
+    Some(PxRect {
+        x: grid_center_x - mark / 2.0,
+        y: (chip_top - gap - mark).max(origin.1),
+        w: mark,
+        h: mark,
+    })
+}
+
 /// Cast a pointer position to `f32`.
 #[allow(
     clippy::cast_possible_truncation,
@@ -2614,9 +2662,9 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cycle_index, dim, index_after_close, order, pane_action, pane_dims, panic_message,
-        pointer_cell_in, process_name, resolve_cell, selection_cells, selection_text, tab_action,
-        PaneAction, Selection, TabAction,
+        cycle_index, dim, empty_state_logo, index_after_close, order, pane_action, pane_dims,
+        panic_message, pointer_cell_in, process_name, resolve_cell, selection_cells,
+        selection_text, tab_action, PaneAction, Selection, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -2637,6 +2685,25 @@ mod tests {
             .iter()
             .map(|line| line.chars().map(plain).collect())
             .collect()
+    }
+
+    #[test]
+    fn empty_state_logo_centers_the_mark_on_the_grid_above_the_chips() {
+        // 80x24 grid, cell (0,0) at (12,12), 8x16 cells, scale 1: a roomy grid seats a mark.
+        let bounds = empty_state_logo((12.0, 12.0), 80, 24, 8.0, 16.0, 1.0).expect("seats a mark");
+        // A MARK_SIZE (56) square at scale 1.
+        assert!((bounds.w - 56.0).abs() < 1e-3 && (bounds.h - 56.0).abs() < 1e-3);
+        // Centered on the grid content (origin.x + cols*cell_w/2) so it lines up with the
+        // grid-centered chips, NOT on the pane rect.
+        let grid_center_x = 12.0 + 80.0 * 8.0 / 2.0;
+        assert!((bounds.x + bounds.w / 2.0 - grid_center_x).abs() < 1e-3);
+        // Seated in the upper half, above the (centered) chip row.
+        assert!(bounds.y + bounds.h < 12.0 + 24.0 * 16.0 / 2.0);
+    }
+
+    #[test]
+    fn empty_state_logo_is_none_when_the_grid_is_too_small() {
+        assert!(empty_state_logo((0.0, 0.0), 20, 3, 8.0, 16.0, 1.0).is_none());
     }
 
     #[test]

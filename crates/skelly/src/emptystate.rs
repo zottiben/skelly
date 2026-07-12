@@ -1,20 +1,15 @@
 //! The empty-state overlay content (the design §10.2 "Empty state" screen).
 //!
-//! A fresh tab with no history shows a faint brand mark and a row of hint chips, centered
-//! over the (blank) terminal, until the user runs their first command. This module is the
-//! pure part: it bakes that content - in UI tokens - into a pane's cell grid. The binary
-//! gates it (a pristine single-pane tab, see `Tab::is_empty_state`) and the "fade on first
-//! command" flip; kept here so the layout is unit-testable without a GPU.
-//!
-//! It writes into the grid rather than a separate layer because a fresh tab's grid is
-//! essentially blank (just the shell prompt at the top), so the centered mark and chips sit
-//! on empty cells and ride the existing pane text + background passes - no new render path.
+//! A fresh tab with no history shows a faint vertebra brand mark and a row of hint chips,
+//! centered over the (blank) terminal, until the user runs their first command. The mark
+//! itself is a vector overlay the renderer paints (the guide's §02 logo, via
+//! `skelly_render`'s `PaneView::logo`); this module owns the part that lives in the cell
+//! grid - the hint chips - plus the shared layout (see [`chip_row`] / [`MARK_SIZE`]) the
+//! binary uses to seat the vector mark above them. The binary gates the whole overlay (a
+//! pristine single-pane tab, see `Tab::is_empty_state`) and the "fade on first command"
+//! flip; kept here so the layout is unit-testable without a GPU.
 
 use skelly_render::{GridCell, Srgb, Theme};
-
-/// The faint brand mark shown centered (a wordmark; the bespoke big-logo waits on the
-/// fixed-metric cell renderer, like the other Nerd-glyph placeholders).
-const MARK: &str = "skelly";
 
 /// The hint chips (key chord + label), from the guide's empty-state mockup: the palette,
 /// a new tab, and a split - the three keys that matter first.
@@ -28,29 +23,34 @@ const CHIPS: [(&str, &str); 3] = [
 const CHIP_PAD: usize = 1;
 const CHIP_GAP: usize = 2;
 
-/// Bake the empty-state content (a faint mark + hint chips) into the center of a fresh
-/// tab's grid `rows`, in UI tokens (Hard rule 2). A no-op on a grid too small to hold it.
-pub(crate) fn overlay_onto(rows: &mut [Vec<GridCell>], theme: &Theme) {
-    let height = rows.len();
-    let width = rows.first().map_or(0, Vec::len);
-    // Need room for the mark and, two rows below, the chips.
-    let mark_row = height * 9 / 20; // a touch above center
-    let chip_row = mark_row + 2;
-    if width == 0 || chip_row >= height {
-        return;
-    }
-    write_centered(&mut rows[mark_row], MARK, theme.fg_faint);
-    write_chips(&mut rows[chip_row], width, theme);
+/// Logical size (px) of the empty-state vertebra brand mark - the guide's §10.2 mark is a
+/// 56px square. The renderer paints the mark (from `PaneView::logo`); the binary sizes it
+/// with this and seats it above [`chip_row`].
+pub(crate) const MARK_SIZE: f32 = 56.0;
+/// Logical gap (px) between the brand mark's bottom edge and the hint-chip row.
+pub(crate) const MARK_GAP: f32 = 14.0;
+
+/// The grid row of the hint chips (a touch below center), or `None` when `height` is too
+/// small to seat the mark and chips. Shared by [`overlay_onto`] and the binary's mark
+/// placement so the vector mark and the chip text stay aligned as one lockup.
+pub(crate) fn chip_row(height: usize) -> Option<usize> {
+    let chip_row = height * 9 / 20 + 2; // the nominal mark row, two rows down
+    (chip_row < height).then_some(chip_row)
 }
 
-/// Write `text` centered in `row`, in `fg`, leaving other cells untouched.
-fn write_centered(row: &mut [GridCell], text: &str, fg: Srgb) {
-    let start = row.len().saturating_sub(text.chars().count()) / 2;
-    for (i, ch) in text.chars().enumerate() {
-        if let Some(slot) = row.get_mut(start + i) {
-            *slot = cell(ch, fg, None);
-        }
+/// Bake the empty-state hint chips into a fresh tab's grid `rows`, in UI tokens (Hard rule
+/// 2). The faint vertebra mark above them is a vector overlay the renderer paints (see
+/// [`MARK_SIZE`]); this module owns only the chip text. A no-op on a grid too small to hold
+/// the layout.
+pub(crate) fn overlay_onto(rows: &mut [Vec<GridCell>], theme: &Theme) {
+    let width = rows.first().map_or(0, Vec::len);
+    let Some(chip_row) = chip_row(rows.len()) else {
+        return;
+    };
+    if width == 0 {
+        return;
     }
+    write_chips(&mut rows[chip_row], width, theme);
 }
 
 /// Paint the hint chips centered in `row`: each chip is a `bg.elevated` pill with its key
@@ -127,7 +127,7 @@ fn cell(c: char, fg: Srgb, bg: Option<Srgb>) -> GridCell {
 
 #[cfg(test)]
 mod tests {
-    use super::{overlay_onto, CHIPS, MARK};
+    use super::{chip_row, overlay_onto, CHIPS};
     use skelly_render::{GridCell, Srgb, Theme};
 
     fn blank(cols: usize, rows: usize) -> Vec<Vec<GridCell>> {
@@ -150,15 +150,22 @@ mod tests {
     }
 
     #[test]
-    fn overlays_the_mark_and_chip_labels() {
+    fn overlays_the_hint_chip_labels() {
         let theme = Theme::resolve("ossein-dark");
         let mut grid = blank(60, 24);
         overlay_onto(&mut grid, &theme);
         let text = joined(&grid);
-        assert!(text.contains(MARK), "mark: {text}");
         for (_, label) in CHIPS {
             assert!(text.contains(label), "chip label {label:?}: {text}");
         }
+    }
+
+    #[test]
+    fn chip_row_seats_below_center_and_bails_on_a_tiny_grid() {
+        // A roomy grid places the chips a touch below center (with headroom for the mark).
+        assert_eq!(chip_row(24), Some(24 * 9 / 20 + 2));
+        // Too short to seat the mark + chips: no overlay row.
+        assert_eq!(chip_row(3), None);
     }
 
     #[test]
@@ -172,19 +179,6 @@ mod tests {
             .flatten()
             .any(|c| c.bg == Some(theme.bg_elevated));
         assert!(pill, "expected a bg.elevated chip pill");
-    }
-
-    #[test]
-    fn mark_uses_the_faint_watermark_token() {
-        let theme = Theme::resolve("ossein-dark");
-        let mut grid = blank(60, 24);
-        overlay_onto(&mut grid, &theme);
-        // The mark's first glyph is drawn in fg.faint (the guide's watermark token).
-        let mark_glyph = grid
-            .iter()
-            .flatten()
-            .find(|c| c.c == MARK.chars().next().unwrap());
-        assert_eq!(mark_glyph.map(|c| c.fg), Some(theme.fg_faint));
     }
 
     #[test]

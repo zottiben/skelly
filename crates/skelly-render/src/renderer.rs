@@ -11,7 +11,9 @@ use std::sync::Arc;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use skelly_config::Appearance;
 
-use crate::cells::{grid_quads, push_outline, scrim_quad, Quad, QuadLayer};
+use crate::cells::{
+    grid_quads, logo_quads, push_outline, scrim_quad, Quad, QuadLayer, LOGO_WATERMARK_OPACITY,
+};
 use crate::error::RenderError;
 use crate::text::{PaneTextInput, TextLayer};
 use crate::theme::Theme;
@@ -313,6 +315,10 @@ impl Renderer {
                 self.theme.accent,
                 pane.selection,
             ));
+            // The empty-state brand watermark (a pristine tab), beneath the glyphs.
+            if let Some(bounds) = pane.logo {
+                quads.extend(logo_quads(bounds, &self.theme, LOGO_WATERMARK_OPACITY));
+            }
             text_inputs.push(PaneTextInput {
                 rows: pane.rows,
                 left: pane.origin.0,

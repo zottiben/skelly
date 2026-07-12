@@ -23,7 +23,6 @@ const WINDOW_PAD: f32 = 12.0;
 const PANE_INSET: f32 = 6.0;
 
 // Mirrors the binary's `emptystate` module (examples cannot import the binary crate).
-const MARK: &str = "skelly";
 const CHIPS: [(&str, &str); 3] = [
     ("\u{2318}K", "palette"),
     ("\u{2318}T", "new tab"),
@@ -31,6 +30,9 @@ const CHIPS: [(&str, &str); 3] = [
 ];
 const CHIP_PAD: usize = 1;
 const CHIP_GAP: usize = 2;
+/// The vertebra brand mark's logical size + its gap above the chips (design §10.2).
+const MARK_SIZE: f32 = 56.0;
+const MARK_GAP: f32 = 14.0;
 
 fn main() {
     let path = std::env::args()
@@ -78,18 +80,29 @@ fn main() {
         .map(|row| row.iter().map(|c| resolve_cell(c, &palette)).collect())
         .collect();
     overlay_empty_state(&mut grid, &theme);
+    let px_rect = PxRect {
+        x: rect.x,
+        y: rect.y,
+        w: rect.w,
+        h: rect.h,
+    };
+    let cols = grid.first().map_or(0, Vec::len);
+    let logo = empty_state_logo(
+        (rect.x + inset, rect.y + inset),
+        cols,
+        grid.len(),
+        cell_w,
+        cell_h,
+        sc,
+    );
 
     let panes = vec![CapturePane {
-        rect: PxRect {
-            x: rect.x,
-            y: rect.y,
-            w: rect.w,
-            h: rect.h,
-        },
+        rect: px_rect,
         origin: (rect.x + inset, rect.y + inset),
         rows: grid,
         cursor: term.cursor(),
         focused: true,
+        logo,
     }];
 
     let rgba = skelly_render::capture_panes_rgba(
@@ -104,23 +117,47 @@ fn main() {
     println!("wrote {path}");
 }
 
-/// Bake the empty-state mark + chips into the center of `grid` - a faithful copy of the
-/// binary's `emptystate::overlay_onto`.
+/// Bake the empty-state hint chips into `grid` - a faithful copy of the binary's
+/// `emptystate::overlay_onto`. The vertebra mark above them is a vector overlay the renderer
+/// paints from `CapturePane::logo` (see [`empty_state_logo`]), not grid text.
 fn overlay_empty_state(rows: &mut [Vec<GridCell>], theme: &Theme) {
-    let height = rows.len();
     let width = rows.first().map_or(0, Vec::len);
-    let mark_row = height * 9 / 20;
-    let chip_row = mark_row + 2;
-    if width == 0 || chip_row >= height {
+    let Some(chip_row) = chip_row(rows.len()) else {
+        return;
+    };
+    if width == 0 {
         return;
     }
-    let start = width.saturating_sub(MARK.chars().count()) / 2;
-    for (i, ch) in MARK.chars().enumerate() {
-        if let Some(slot) = rows[mark_row].get_mut(start + i) {
-            *slot = ui_cell(ch, theme.fg_muted, None);
-        }
-    }
     write_chips(&mut rows[chip_row], width, theme);
+}
+
+/// The chip row (mirrors `emptystate::chip_row`).
+fn chip_row(height: usize) -> Option<usize> {
+    let chip_row = height * 9 / 20 + 2;
+    (chip_row < height).then_some(chip_row)
+}
+
+/// The brand mark's square bounding box, centered on the cell grid and seated above the
+/// chips (mirrors the binary's `empty_state_logo`).
+fn empty_state_logo(
+    origin: (f32, f32),
+    cols: usize,
+    rows_len: usize,
+    cell_w: f32,
+    cell_h: f32,
+    scale: f32,
+) -> Option<PxRect> {
+    let chip_row = chip_row(rows_len)?;
+    let mark = MARK_SIZE * scale;
+    let gap = MARK_GAP * scale;
+    let chip_top = origin.1 + chip_row as f32 * cell_h;
+    let grid_center_x = origin.0 + cols as f32 * cell_w / 2.0;
+    Some(PxRect {
+        x: grid_center_x - mark / 2.0,
+        y: (chip_top - gap - mark).max(origin.1),
+        w: mark,
+        h: mark,
+    })
 }
 
 fn write_chips(row: &mut [GridCell], width: usize, theme: &Theme) {

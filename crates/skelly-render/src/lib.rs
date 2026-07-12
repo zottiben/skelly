@@ -69,6 +69,10 @@ pub struct PaneView<'a> {
     pub selection: &'a [(usize, usize)],
     /// Whether this is the focused pane (accent ring + drawn cursor).
     pub focused: bool,
+    /// The empty-state brand watermark's square bounding box (physical px), when this pane
+    /// is a pristine empty-state tab (design §10.2). The renderer paints the vertebra logo
+    /// mark there, beneath the glyphs; `None` for every ordinary pane.
+    pub logo: Option<PxRect>,
 }
 
 /// A dim overlay over a pane whose shell has exited (the design "Shell exits / crashes"

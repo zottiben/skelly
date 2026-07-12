@@ -64,6 +64,7 @@ fn main() {
         rows: terminal_rows(&theme),
         cursor: (11, 2),
         focused: true,
+        logo: None,
     };
 
     // An optional third arg `norepo` renders the "Not a git repo" empty state (the Init

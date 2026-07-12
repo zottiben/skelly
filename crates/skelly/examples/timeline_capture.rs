@@ -68,6 +68,7 @@ fn main() {
         rows: terminal_rows(&theme),
         cursor: (11, 2),
         focused: true,
+        logo: None,
     };
 
     let dock = build_dock(width, height, cell_w, cell_h, sc, &theme);

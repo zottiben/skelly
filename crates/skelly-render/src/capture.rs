@@ -10,9 +10,10 @@
 use skelly_config::Appearance;
 
 use crate::cells::{
-    gitdock_quads as build_gitdock_quads, grid_quads, overlay_quads as build_overlay_quads,
-    push_outline, scrim_quad, settings_quads as build_settings_quads, sidebar_quads,
-    timeline_quads as build_timeline_quads, Quad, QuadLayer,
+    gitdock_quads as build_gitdock_quads, grid_quads, logo_quads,
+    overlay_quads as build_overlay_quads, push_outline, scrim_quad,
+    settings_quads as build_settings_quads, sidebar_quads, timeline_quads as build_timeline_quads,
+    Quad, QuadLayer, LOGO_WATERMARK_OPACITY,
 };
 use crate::text::{measure_cell, PaneTextInput, TextLayer};
 use crate::theme::{Rgba, Theme};
@@ -100,6 +101,9 @@ pub struct CapturePane {
     pub cursor: (usize, usize),
     /// Whether this is the focused pane (accent ring + drawn cursor).
     pub focused: bool,
+    /// The empty-state brand watermark's square bounding box (physical px), when this pane
+    /// is a pristine empty-state tab (design §10.2); `None` for an ordinary pane.
+    pub logo: Option<PxRect>,
 }
 
 /// The left sidebar for [`capture_panes_rgba`], mirroring
@@ -337,6 +341,9 @@ fn paint_panes(text: &mut TextLayer, panes: &[CapturePane], theme: &Theme) -> Ve
             theme.accent,
             &[],
         ));
+        if let Some(bounds) = pane.logo {
+            quads.extend(logo_quads(bounds, theme, LOGO_WATERMARK_OPACITY));
+        }
         inputs.push(PaneTextInput {
             rows: &pane.rows,
             left: pane.origin.0,

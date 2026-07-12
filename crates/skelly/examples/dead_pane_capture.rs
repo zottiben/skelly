@@ -110,6 +110,7 @@ fn main() {
             rows: grid,
             cursor: term.cursor(),
             focused: false, // an exited pane draws no cursor
+            logo: None,
         });
         if *id == right {
             dead_panes.push(exit_overlay(px, cell_w, cell_h, &theme));

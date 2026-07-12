@@ -129,6 +129,7 @@ fn main() {
             rows: grid,
             cursor: term.cursor(),
             focused: *id == focused,
+            logo: None,
         });
     }
 
