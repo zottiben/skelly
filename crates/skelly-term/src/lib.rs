@@ -137,6 +137,9 @@ pub struct Terminal {
     exit: SharedExit,
     /// Kills the shell on drop so the reader thread unblocks, `wait()`s, and exits.
     killer: Box<dyn ChildKiller + Send + Sync>,
+    /// The shell's own pid, captured at spawn - it is the leader of its process group, so
+    /// comparing it to the PTY's foreground process group reveals a running foreground job.
+    shell_pid: Option<u32>,
     _reader: JoinHandle<()>,
 }
 
@@ -175,6 +178,9 @@ impl Terminal {
                           // A killer we keep on the UI side so dropping the `Terminal` can stop the shell
                           // even mid-job; the child itself moves into the reader thread to be reaped.
         let killer = child.clone_killer();
+        // Capture the shell's pid before the child moves into the reader thread; the shell
+        // is its own process-group leader, so this identifies "no foreground job running".
+        let shell_pid = child.process_id();
 
         let reader = pair.master.try_clone_reader().map_err(to_io)?;
         let writer = pair.master.take_writer().map_err(to_io)?;
@@ -209,8 +215,22 @@ impl Terminal {
             dirty,
             exit,
             killer,
+            shell_pid,
             _reader: handle,
         })
+    }
+
+    /// The pid of the foreground job running in this pane, if any - i.e. a process the
+    /// shell has put in the foreground that is not the shell itself (e.g. `vim`, `cargo`).
+    /// Returns `None` when the shell is idle at its prompt (its own process group is in the
+    /// foreground) or when the foreground group can't be read. The binary uses this to warn
+    /// before closing a pane that would kill a running job (design §12 "Process running on
+    /// close").
+    #[must_use]
+    pub fn foreground_job_pid(&self) -> Option<u32> {
+        let foreground = u32::try_from(self.master.process_group_leader()?).ok()?;
+        let shell = self.shell_pid?;
+        (foreground != shell).then_some(foreground)
     }
 
     /// Send bytes to the shell (keyboard input, pastes).

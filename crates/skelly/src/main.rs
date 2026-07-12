@@ -10,6 +10,7 @@
 //! output. Errors are contextualized here with `anyhow`; `wgpu`/`alacritty` types
 //! never leak up.
 
+mod confirm;
 mod deadpane;
 mod emptystate;
 mod gitdock;
@@ -32,6 +33,7 @@ use skelly_render::{
 use skelly_session::{Actor, Repo, SessionEvent, ShadowWorktree};
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 
+use confirm::{CloseTarget, Confirm};
 use gitdock::GitDock;
 use palette::Palette;
 use settings::Settings;
@@ -194,6 +196,9 @@ struct App {
     git_dock: GitDock,
     /// The session-timeline dock (right dock; mutually exclusive with the git dock).
     timeline: TimelineDock,
+    /// A pending "close with a running job" confirm modal (design §12), if any. While set,
+    /// it captures input; `Enter` / a second close-press confirms, `Esc` cancels.
+    confirm: Option<Confirm>,
     /// The live shadow worktree while rewound to a past state (`None` = at HEAD/now). Its
     /// drop removes the worktree, so returning to now / closing just clears it.
     shadow: Option<ShadowWorktree>,
@@ -236,6 +241,7 @@ impl App {
             sidebar,
             git_dock: GitDock::new(),
             timeline: TimelineDock::new(),
+            confirm: None,
             shadow: None,
             session_start: Instant::now(),
             session_started: false,
@@ -519,6 +525,10 @@ impl App {
         let git_dock = self.git_dock.open.then(|| self.build_git_dock_frame());
         let timeline = self.timeline.open.then(|| self.build_timeline_frame());
         let overlay = self.palette.open.then(|| self.build_palette_frame());
+        // The confirm modal reuses the overlay pass; it never coexists with the palette.
+        let confirm = (!self.palette.open)
+            .then(|| self.confirm.as_ref().map(|c| self.build_confirm_frame(c)))
+            .flatten();
         let settings = self.settings.open.then(|| self.build_settings_frame());
         // Write the clamped diff scroll back so repeated paging past the end settles.
         if let Some(frame) = &git_dock {
@@ -569,15 +579,22 @@ impl App {
                 })),
                 None => renderer.set_timeline(None),
             }
-            match &overlay {
-                Some(frame) => renderer.set_overlay(Some(&OverlayView {
+            match (&overlay, &confirm) {
+                (Some(frame), _) => renderer.set_overlay(Some(&OverlayView {
                     panel: frame.panel,
                     text_origin: frame.origin,
                     rows: &frame.rows,
                     selected_row: frame.selected_row,
                     caret: Some(frame.caret),
                 })),
-                None => renderer.set_overlay(None),
+                (None, Some(frame)) => renderer.set_overlay(Some(&OverlayView {
+                    panel: frame.panel,
+                    text_origin: frame.origin,
+                    rows: &frame.rows,
+                    selected_row: frame.selected_row,
+                    caret: None,
+                })),
+                (None, None) => renderer.set_overlay(None),
             }
             match &settings {
                 Some(frame) => renderer.set_settings(Some(&SettingsView {
@@ -631,6 +648,41 @@ impl App {
             rows: view.rows,
             selected_row: view.selected_row,
             caret: view.caret,
+        }
+    }
+
+    /// Lay out the "running job" confirm modal as a centered panel (like the palette, but
+    /// with no input caret), sized to its content.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "confirm grid dimensions are small, non-negative values"
+    )]
+    fn build_confirm_frame(&self, confirm: &Confirm) -> ConfirmFrame {
+        let (cell_w, cell_h) = self.cell_size();
+        let pad = PALETTE_PAD * scale32(self.scale);
+        let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
+
+        let view = confirm.view(&self.theme);
+        let grid_cols = view.rows.first().map_or(0, Vec::len);
+        let rows = view.rows.len();
+
+        let panel_w = grid_cols as f32 * cell_w + 2.0 * pad;
+        let panel_h = rows as f32 * cell_h + 2.0 * pad;
+        let x = ((surface_w - panel_w) / 2.0).max(0.0);
+        let y = (surface_h * 0.16).min((surface_h - panel_h).max(0.0));
+
+        ConfirmFrame {
+            panel: PxRect {
+                x,
+                y,
+                w: panel_w,
+                h: panel_h,
+            },
+            origin: (x + pad, y + pad),
+            rows: view.rows,
+            selected_row: view.selected_row,
         }
     }
 
@@ -1179,6 +1231,61 @@ impl App {
         self.request_redraw();
     }
 
+    /// Request closing the focused pane (`⌥w`). If a foreground job is running in it, arm
+    /// the confirm modal instead of closing (design §12 "Process running on close"); the
+    /// user confirms with `Enter` or a second `⌥w`.
+    fn request_close_pane(&mut self) {
+        self.request_close(CloseTarget::Pane);
+    }
+
+    /// Request closing the active tab (`⌘W`). If any of its panes has a foreground job,
+    /// arm the confirm modal instead of closing.
+    fn request_close_tab(&mut self) {
+        self.request_close(CloseTarget::Tab);
+    }
+
+    /// Shared close gate: close immediately when nothing is running, else arm the confirm.
+    fn request_close(&mut self, target: CloseTarget) {
+        match self.foreground_job_name(target) {
+            Some(process) => {
+                self.confirm = Some(Confirm::new(target, process));
+                self.request_redraw();
+            }
+            None => self.perform_close(target),
+        }
+    }
+
+    /// Perform the actual close for `target` (after a confirm, or when nothing is running),
+    /// clearing any pending confirm first.
+    fn perform_close(&mut self, target: CloseTarget) {
+        self.confirm = None;
+        match target {
+            CloseTarget::Pane => self.apply_pane_action(PaneAction::Close),
+            CloseTarget::Tab => self.close_tab(),
+        }
+    }
+
+    /// Dismiss the confirm modal without closing.
+    fn cancel_confirm(&mut self) {
+        self.confirm = None;
+        self.request_redraw();
+    }
+
+    /// The name of a foreground job that closing `target` would kill, if any: the focused
+    /// pane's shell for a pane close, any pane in the active tab for a tab close. Falls back
+    /// to a generic label when the process name can't be read.
+    fn foreground_job_name(&self, target: CloseTarget) -> Option<String> {
+        let ws = self.active_tab();
+        let pid = match target {
+            CloseTarget::Pane => ws
+                .panes
+                .get(&ws.tree.focused())
+                .and_then(Terminal::foreground_job_pid),
+            CloseTarget::Tab => ws.panes.values().find_map(Terminal::foreground_job_pid),
+        }?;
+        Some(process_name(pid).unwrap_or_else(|| "a process".to_owned()))
+    }
+
     /// Switch to the tab at `index` (0-based), if it exists and isn't already active.
     fn goto_tab(&mut self, index: usize) {
         if index < self.tabs.len() && index != self.active {
@@ -1205,10 +1312,28 @@ impl App {
     fn run_tab_action(&mut self, action: TabAction) {
         match action {
             TabAction::New => self.new_tab(),
-            TabAction::Close => self.close_tab(),
+            TabAction::Close => self.request_close_tab(),
             TabAction::Goto(index) => self.goto_tab(index),
             TabAction::Next => self.cycle_tab(true),
             TabAction::Prev => self.cycle_tab(false),
+        }
+    }
+
+    /// Keys while the "running job" confirm modal is up (design §12): `Enter` or a second
+    /// press of a close chord (`⌥w` / `⌘W`, the design's "twice" fast path) confirms the
+    /// close; `Esc` cancels; anything else is swallowed (the modal is captured).
+    fn on_confirm_key(&mut self, key_event: &KeyEvent) {
+        let Some(target) = self.confirm.as_ref().map(|c| c.target) else {
+            return;
+        };
+        let close_chord = matches!(key_event.physical_key, PhysicalKey::Code(code)
+            if pane_action(code, self.modifiers) == Some(PaneAction::Close)
+                || tab_action(code, self.modifiers) == Some(TabAction::Close));
+        match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape) => self.cancel_confirm(),
+            Key::Named(NamedKey::Enter) => self.perform_close(target),
+            _ if close_chord => self.perform_close(target),
+            _ => {}
         }
     }
 
@@ -1262,13 +1387,13 @@ impl App {
             Action::SplitDown => self.apply_pane_action(PaneAction::Split(Dir::Down)),
             Action::Zoom => self.apply_pane_action(PaneAction::Zoom),
             Action::EvenOut => self.apply_pane_action(PaneAction::EvenOut),
-            Action::ClosePane => self.apply_pane_action(PaneAction::Close),
+            Action::ClosePane => self.request_close_pane(),
             Action::FocusLeft => self.apply_pane_action(PaneAction::Focus(Dir::Left)),
             Action::FocusDown => self.apply_pane_action(PaneAction::Focus(Dir::Down)),
             Action::FocusUp => self.apply_pane_action(PaneAction::Focus(Dir::Up)),
             Action::FocusRight => self.apply_pane_action(PaneAction::Focus(Dir::Right)),
             Action::NewTab => self.new_tab(),
-            Action::CloseTab => self.close_tab(),
+            Action::CloseTab => self.request_close_tab(),
             Action::NextTab => self.cycle_tab(true),
             Action::PrevTab => self.cycle_tab(false),
             Action::ToggleSidebar => self.toggle_sidebar(),
@@ -1646,6 +1771,11 @@ impl App {
         if key_event.state != ElementState::Pressed {
             return;
         }
+        // The "running job" confirm modal captures input first (design §12).
+        if self.confirm.is_some() {
+            self.on_confirm_key(key_event);
+            return;
+        }
         // The settings view, command palette, and git dock each capture input while open.
         if self.settings.open {
             self.on_settings_key(event_loop, key_event);
@@ -1718,7 +1848,13 @@ impl App {
         // Option-key glyph remapping does not get in the way.
         if let PhysicalKey::Code(code) = key_event.physical_key {
             if let Some(action) = pane_action(code, self.modifiers) {
-                self.apply_pane_action(action);
+                // A pane close routes through the confirm gate (design §12); other pane
+                // actions apply directly.
+                if action == PaneAction::Close {
+                    self.request_close_pane();
+                } else {
+                    self.apply_pane_action(action);
+                }
                 return;
             }
         }
@@ -1875,6 +2011,15 @@ struct PaletteFrame {
     caret: (usize, usize),
 }
 
+/// Owned "running job" confirm-modal frame data the borrowed [`OverlayView`] points at
+/// (like [`PaletteFrame`], but with no input caret).
+struct ConfirmFrame {
+    panel: PxRect,
+    origin: (f32, f32),
+    rows: Vec<Vec<GridCell>>,
+    selected_row: Option<usize>,
+}
+
 /// Owned sidebar frame data the borrowed [`SidebarView`] points at.
 struct SidebarFrame {
     panel: PxRect,
@@ -1921,6 +2066,24 @@ struct TimelineFrame {
 fn current_branch() -> Option<String> {
     let start = std::env::current_dir().ok()?;
     Repo::discover(&start).ok().flatten()?.status().ok()?.branch
+}
+
+/// The command name of process `pid`, for the "process running on close" confirm. Shells
+/// `ps -o comm= -p <pid>` (portable across macOS and Linux) and returns just the basename;
+/// `None` if the lookup fails. Best-effort - the caller falls back to a generic label.
+fn process_name(pid: u32) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout);
+    let name = name.trim();
+    // `comm` can be a full path on macOS; show just the executable name.
+    let base = name.rsplit('/').next().unwrap_or(name).trim();
+    (!base.is_empty()).then(|| base.to_owned())
 }
 
 /// Resolve a terminal cell into a render cell against the active ANSI palette,
@@ -2327,8 +2490,8 @@ fn init_tracing() {
 mod tests {
     use super::{
         cycle_index, dim, index_after_close, order, pane_action, pane_dims, pointer_cell_in,
-        resolve_cell, selection_cells, selection_text, tab_action, PaneAction, Selection,
-        TabAction,
+        process_name, resolve_cell, selection_cells, selection_text, tab_action, PaneAction,
+        Selection, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -2349,6 +2512,15 @@ mod tests {
             .iter()
             .map(|line| line.chars().map(plain).collect())
             .collect()
+    }
+
+    #[test]
+    fn process_name_reads_a_running_pids_command() {
+        // Our own pid resolves to a non-empty command name (the test binary) with no path
+        // separators - proving the `ps` invocation + basename trimming work.
+        let name = process_name(std::process::id()).expect("own process has a name");
+        assert!(!name.is_empty());
+        assert!(!name.contains('/'), "name is the basename, not a full path");
     }
 
     #[test]

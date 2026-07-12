@@ -14,15 +14,17 @@ plus a few M3 follow-ups, which we finish opportunistically rather than block on
 **M4 (signature features) is complete**: the **per-repo git diff dock** (`⇧⌘G`) - the
 diff model, the dock UI, per-file + hunk-level staging, and the commit box - and the
 **session timeline + non-destructive rewind** (`⇧⌘H`, ADR-0007) both land end-to-end.
-**M5 (hardening & release) is now in progress**: four edge states have landed - the
+**M5 (hardening & release) is now in progress**: five edge states have landed - the
 **shell-exit / crash overlay** (design §12; a dim scrim + exit message + `↵ restart` over a
 pane whose shell ended), the **empty state + never-quit close cascade** (design §10.2;
 closing the last pane closes the tab, closing the last tab resets to a fresh empty-state
 tab), the **sidebar collapse rail** (design §08; `⇧⌘B` cycles the full panel <-> a slim
-56px icon rail, the mode persisting to `config.sidebar.mode`), and the **not-a-git-repo
+56px icon rail, the mode persisting to `config.sidebar.mode`), the **not-a-git-repo
 Init button** (design §12; the git dock's empty state offers `Init repo`, running
-`git init`). Remaining M5: the other edge states, perf budgets, packaging, and the first
-tagged release - plus the tracked M2-M4 follow-ups, finished opportunistically.
+`git init`), and the **process-running-on-close confirm** (design §12; closing a pane/tab
+with a running foreground job asks first, naming the process). Remaining M5: the other edge
+states, perf budgets, packaging, and the first tagged release - plus the tracked M2-M4
+follow-ups, finished opportunistically.
 
 - [x] **M0 - Foundation.** Workspace, quality gates, CI, docs, ADR log, and the
   `skelly-config` slice (schema + load + validate + tests), with a runnable binary
@@ -257,8 +259,16 @@ tagged release - plus the tracked M2-M4 follow-ups, finished opportunistically.
     button is keyboard-driven (mouse hit-testing over the dock is the same tracked
     follow-up as click-to-select-file). Verified by the `git_dock_capture` PNG (`norepo`
     arg) in both themes + a `gitdock` unit test.
-  - [ ] Remaining edge/empty states: process-running-on-close confirm, tab overflow,
-    detached/rewound "warns before forking", theme-with-no-light-variant fallback.
+  - [x] **Process-running-on-close confirm** (design §12 "Process running on close"). Closing
+    a pane (`⌥w`) or tab (`⌘W`) that has a running foreground job no longer kills it silently:
+    a centered confirm modal names the process ("`vim` is still running") and asks before
+    closing. `Enter` or a second press of the close chord confirms; `Esc` cancels.
+    `skelly_term::Terminal::foreground_job_pid` reads the PTY's foreground process group
+    (`portable-pty`'s `process_group_leader`) and compares it to the shell's own pid
+    (e2e-tested); the binary looks up the name via `ps -o comm=`. Pure `confirm` module (unit-
+    tested); verified by the `pane_capture` `confirm` arg PNG in both themes.
+  - [ ] Remaining edge/empty states: tab overflow scroll, detached/rewound "warns before
+    forking", theme-with-no-light-variant fallback.
   - [ ] Perf budgets (`criterion` on the parser/renderer hot paths).
   - [ ] Packaging (`cargo-dist` + `cargo-release`) and the first tagged release.
 

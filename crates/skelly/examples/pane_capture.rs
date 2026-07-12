@@ -129,11 +129,16 @@ fn main() {
         });
     }
 
-    // The left sidebar (a two-tab list, tab 1 active) + a command-palette overlay over
-    // the panes, verifying the sidebar chrome and the overlay compositing together.
+    // The left sidebar (a two-tab list, tab 1 active) + an overlay over the panes,
+    // verifying the sidebar chrome and the overlay compositing together. The overlay is
+    // the command palette by default, or the "running job" confirm modal for `confirm`.
     let theme = Theme::resolve(&appearance.theme);
     let sidebar = sidebar_panel(height, cell_w, sidebar_w, sc, rail, &theme);
-    let overlay = palette_overlay(width, height, cell_w, cell_h, sc, &theme);
+    let overlay = if std::env::args().nth(3).as_deref() == Some("confirm") {
+        confirm_overlay(width, height, cell_w, cell_h, sc, &theme)
+    } else {
+        palette_overlay(width, height, cell_w, cell_h, sc, &theme)
+    };
     let rgba = skelly_render::capture_panes_rgba(
         &appearance,
         width,
@@ -204,6 +209,72 @@ fn palette_overlay(
         rows,
         selected_row: Some(2),
         caret: Some(("> zoom".chars().count(), 0)),
+    }
+}
+
+/// Build the "running job" confirm modal (design §12) - a centered panel warning that a
+/// close would kill a foreground job. Mirrors the binary's `confirm` module view. The live
+/// binary drives this from the real module.
+fn confirm_overlay(
+    width: u32,
+    height: u32,
+    cell_w: f32,
+    cell_h: f32,
+    scale: f32,
+    theme: &Theme,
+) -> CaptureOverlay {
+    // Title: the process name (accent) inside straight quotes (primary).
+    let mut title = vec![ui_cell('"', theme.fg_primary)];
+    title.extend("vim".chars().map(|c| ui_cell(c, theme.accent)));
+    title.extend(
+        "\" is still running"
+            .chars()
+            .map(|c| ui_cell(c, theme.fg_primary)),
+    );
+
+    let lines = [
+        title,
+        Vec::new(),
+        "Close this pane and end it?"
+            .chars()
+            .map(|c| ui_cell(c, theme.fg_primary))
+            .collect(),
+        Vec::new(),
+        "\u{21b5} close   esc cancel"
+            .chars()
+            .map(|c| ui_cell(c, theme.fg_muted))
+            .collect(),
+    ];
+    let widest = lines.iter().map(Vec::len).max().unwrap_or(0);
+    let cols = (widest + 4).max(30);
+    let rows: Vec<Vec<GridCell>> = lines
+        .into_iter()
+        .map(|mut line| {
+            let mut row = vec![ui_cell(' ', theme.fg_muted), ui_cell(' ', theme.fg_muted)];
+            row.append(&mut line);
+            while row.len() < cols {
+                row.push(ui_cell(' ', theme.fg_muted));
+            }
+            row
+        })
+        .collect();
+
+    let pad = 12.0 * scale;
+    let panel_w = cols as f32 * cell_w + 2.0 * pad;
+    let panel_h = rows.len() as f32 * cell_h + 2.0 * pad;
+    let x = ((width as f32 - panel_w) / 2.0).max(0.0);
+    let y = height as f32 * 0.16;
+    CaptureOverlay {
+        panel: PxRect {
+            x,
+            y,
+            w: panel_w,
+            h: panel_h,
+        },
+        text_origin: (x + pad, y + pad),
+        rows,
+        selected_row: None,
+        caret: None,
     }
 }
 

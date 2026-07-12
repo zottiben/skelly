@@ -34,6 +34,42 @@ fn shell_exit_is_reported() {
 }
 
 #[test]
+fn foreground_job_is_detected() {
+    let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
+
+    // Wait for the shell to come up (it prints a prompt), then let it settle as the
+    // controlling terminal's foreground process group.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while term.snapshot().iter().all(String::is_empty) {
+        assert!(Instant::now() < deadline, "shell never produced a prompt");
+        sleep(Duration::from_millis(50));
+    }
+    sleep(Duration::from_millis(300));
+    // Idle at the prompt: the shell itself owns the foreground group, so there is no job.
+    assert_eq!(
+        term.foreground_job_pid(),
+        None,
+        "an idle shell reports no foreground job"
+    );
+
+    // Start a long-running foreground job; it takes over the terminal's foreground group.
+    term.write(b"sleep 30\n");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if let Some(pid) = term.foreground_job_pid() {
+            assert!(pid > 0, "a foreground job pid is positive");
+            return; // the `sleep` job was detected as the foreground process group
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the foreground `sleep` job was never detected"
+        );
+        sleep(Duration::from_millis(50));
+    }
+    // `term` drops here, killing the shell and its `sleep` child.
+}
+
+#[test]
 fn shell_executes_a_command_and_output_reaches_the_grid() {
     let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
 
