@@ -55,6 +55,20 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Design-fidelity: pixel audit of the sidebar tab item against §09.** A close
+  read of the guide (browser + HTML source) against the built sidebar found the active-tab
+  styling had drifted from the authoritative §09 "Sidebar tab item" component. Corrected to
+  match it exactly: tab **height 30** (was 28); the active **indicator bar is a 3x14 rounded
+  `accent` bar seated inside the pill's left padding** (was a full-height 2px rule at the sidebar
+  edge); the active pill gains a **1px `accent`@0.28 border** around its `accent`@0.14 fill (drawn
+  as a 0.28 rounded rect with the interior reset to `bg.sidebar` before the 0.14 fill, so the edge
+  reads stronger than the fill - translucent-over-translucent would only add up); tab labels inset
+  past the bar + gap so active and inactive align. **Deferred** (not fabricated): the per-tab `❯`
+  prompt glyph the component shows uses a teal `#94E2D5` that is **not** a §03 semantic UI token
+  (the table has only accent + status.success/warning/danger/info), so adding it would violate
+  Hard rule 2; it also pairs with the blocked content-titling. Left until a teal token is defined
+  or titling lands.
+
 - 2026-07-13 - **Sidebar apparatus + per-pane status line (design-fidelity slices 12-14, §08
   anatomy #3, #7, #9).** Several of the guide's window-anatomy pieces were still missing;
   decided how each maps to real Skelly capabilities rather than fabricated UI (Hard rule 5):

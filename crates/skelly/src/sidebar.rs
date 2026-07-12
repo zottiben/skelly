@@ -35,8 +35,8 @@ const CMD_ICON: &str = "\u{2315}";
 const CMD_PLACEHOLDER: &str = "Search or run\u{2026}";
 /// Height of an overflow indicator row (`↑ N more` / `↓ N more`).
 const IND_H: f32 = 16.0;
-/// Height of a tab row (and the "+ New tab" action).
-const TAB_H: f32 = 28.0;
+/// Height of a tab row (and the "+ New tab" action), per the §09 "Sidebar tab item" (Height 30).
+const TAB_H: f32 = 30.0;
 /// Bottom padding beneath the new-tab action.
 const PAD_BOTTOM: f32 = 10.0;
 /// Height of the bottom-anchored utility bar (design §08 #7 - the icon-only settings /
@@ -46,8 +46,15 @@ const UTIL_H: f32 = 40.0;
 const LABEL_INSET: f32 = 12.0;
 /// Horizontal inset of the active-tab pill from the sidebar edges.
 const PILL_INSET: f32 = 6.0;
-/// The active tab's `accent` bar width (logical px).
-const BAR_W: f32 = 2.0;
+/// The active tab's `accent` indicator bar (design §09 "Sidebar tab item": a 3x14 rounded bar
+/// seated inside the pill, not a full-height rule at the sidebar edge).
+const BAR_W: f32 = 3.0;
+const BAR_H: f32 = 14.0;
+const BAR_RADIUS: f32 = 2.0;
+/// The tab pill's internal left padding + the gap after the indicator bar (§09 `padding:0 10px`
+/// + `gap:8px`); the label is inset past both so active and inactive tabs align.
+const TAB_PAD_X: f32 = 10.0;
+const TAB_GAP: f32 = 8.0;
 /// Corner radius (logical px) of the active-tab pill (the guide's `sm` radius: tab items).
 const PILL_RADIUS: f32 = 6.0;
 
@@ -424,12 +431,30 @@ fn push_row(
             } else {
                 ctx.theme.fg_secondary
             };
-            let text = if ctx.rail {
-                (index + 1).to_string()
+            if ctx.rail {
+                place(
+                    labels,
+                    measure,
+                    &(index + 1).to_string(),
+                    FontRole::Label,
+                    color,
+                );
             } else {
-                format!("Tab {}", index + 1)
-            };
-            place(labels, measure, &text, FontRole::Label, color);
+                // Inset the label past the pill padding + indicator bar + gap so active and
+                // inactive tabs align (§09 `padding:0 10px` + a 3px bar + `gap:8px`).
+                let text_inset = (PILL_INSET + TAB_PAD_X + BAR_W + TAB_GAP) * ctx.scale;
+                let x = ctx.panel.x + text_inset;
+                let line = measure.line_height(FontRole::Label);
+                labels.push(ProseLabel {
+                    text: format!("Tab {}", index + 1),
+                    x,
+                    y: top + (height - line) * 0.5,
+                    role: FontRole::Label,
+                    color,
+                    weight: None,
+                    max_w: (ctx.panel.x + ctx.panel.w - x - LABEL_INSET * ctx.scale * 0.5).max(1.0),
+                });
+            }
         }
         RowKind::OverflowUp(hidden) | RowKind::OverflowDown(hidden) if hidden > 0 => {
             let arrow = if matches!(row.kind, RowKind::OverflowUp(_)) {
@@ -526,8 +551,11 @@ fn push_command_well(
     }
 }
 
-/// The active tab's marks: a rounded `accent.subtle` pill inset from the sidebar edges and a
-/// 2px `accent` bar down the sidebar's left edge (design §08 "Active tab").
+/// The active tab's marks, per the §09 "Sidebar tab item": a rounded pill inset from the
+/// sidebar edges with an `accent`@0.14 fill and a 1px `accent`@0.28 border, plus a short 3x14
+/// rounded `accent` indicator bar seated inside the pill's left padding (not a full-height rule
+/// at the sidebar edge). The border is drawn as an `accent`@0.28 rounded rect with the interior
+/// reset to `bg.sidebar` before the fill, so the 1px edge stays stronger than the fill.
 fn push_active_marks(
     quads: &mut Vec<ChromeQuad>,
     panel: PxRect,
@@ -537,26 +565,38 @@ fn push_active_marks(
     theme: &Theme,
 ) {
     let inset = PILL_INSET * scale;
+    let radius = PILL_RADIUS * scale;
+    let stroke = scale.max(1.0);
     let pill = PxRect {
         x: panel.x + inset,
         y: top,
         w: (panel.w - 2.0 * inset).max(0.0),
         h: height,
     };
-    quads.push(ChromeQuad::tint(
-        pill,
-        theme.accent,
-        0.14,
-        PILL_RADIUS * scale,
-    ));
-    quads.push(ChromeQuad::fill(
+    // The 1px accent@0.28 border ring.
+    quads.push(ChromeQuad::tint(pill, theme.accent, 0.28, radius));
+    // Reset the interior to the sidebar surface, then lay the accent@0.14 fill over it, so the
+    // border reads stronger than the fill (translucent-over-translucent would only add up).
+    let inner = PxRect {
+        x: pill.x + stroke,
+        y: pill.y + stroke,
+        w: (pill.w - 2.0 * stroke).max(0.0),
+        h: (pill.h - 2.0 * stroke).max(0.0),
+    };
+    let inner_r = (radius - stroke).max(0.0);
+    quads.push(ChromeQuad::rounded(inner, theme.bg_sidebar, inner_r));
+    quads.push(ChromeQuad::tint(inner, theme.accent, 0.14, inner_r));
+    // The 3x14 rounded indicator bar inside the pill's left padding, vertically centered.
+    let bar_h = BAR_H * scale;
+    quads.push(ChromeQuad::rounded(
         PxRect {
-            x: panel.x,
-            y: top,
-            w: (BAR_W * scale).max(1.0),
-            h: height,
+            x: pill.x + TAB_PAD_X * scale,
+            y: top + (height - bar_h) * 0.5,
+            w: BAR_W * scale,
+            h: bar_h,
         },
         theme.accent,
+        BAR_RADIUS * scale,
     ));
 }
 
@@ -707,7 +747,7 @@ mod tests {
         // The gap below the well (40 .. 52) maps to nothing.
         assert_eq!(hit(3, 0, p, false, 2.0, x, 46.0 * 2.0), None);
         // The first tab band sits below the well + gap + overflow slot: PAD_TOP(10) + CMD_H(30)
-        // + CMD_GAP(12) + IND_H(16) = 68 logical, first tab spans 68..96. Center ~82 logical.
+        // + CMD_GAP(12) + IND_H(16) = 68 logical, first tab (TAB_H 30) spans 68..98; 82 is inside.
         assert_eq!(hit(3, 0, p, false, 2.0, x, 82.0 * 2.0), Some(Hit::Tab(0)));
         assert_eq!(
             hit(3, 0, p, false, 2.0, x, (82.0 + 28.0) * 2.0),

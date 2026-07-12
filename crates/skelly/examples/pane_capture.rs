@@ -618,11 +618,15 @@ fn push_centered_pl(
 // capture reproduces the real proportional tab list.
 const SB_PAD_TOP: f32 = 10.0;
 const SB_IND_H: f32 = 16.0;
-const SB_TAB_H: f32 = 28.0;
+const SB_TAB_H: f32 = 30.0;
 const SB_PAD_BOTTOM: f32 = 10.0;
 const SB_LABEL_INSET: f32 = 12.0;
 const SB_PILL_INSET: f32 = 6.0;
-const SB_BAR_W: f32 = 2.0;
+const SB_BAR_W: f32 = 3.0;
+const SB_BAR_H: f32 = 14.0;
+const SB_BAR_RADIUS: f32 = 2.0;
+const SB_TAB_PAD_X: f32 = 10.0;
+const SB_TAB_GAP: f32 = 8.0;
 const SB_PILL_RADIUS: f32 = 6.0;
 /// Command-input well (§08 #3) - mirror the binary's `sidebar` module.
 const SB_CMD_H: f32 = 30.0;
@@ -851,17 +855,35 @@ fn push_sb_body(
                 theme,
             );
         }
-        let text = if rail {
-            (index + 1).to_string()
-        } else {
-            format!("Tab {}", index + 1)
-        };
         let color = if is_active {
             theme.fg_primary
         } else {
             theme.fg_secondary
         };
-        place(labels, measure, &text, FontRole::Label, color, y, SB_TAB_H);
+        if rail {
+            place(
+                labels,
+                measure,
+                &(index + 1).to_string(),
+                FontRole::Label,
+                color,
+                y,
+                SB_TAB_H,
+            );
+        } else {
+            // Inset past the pill padding + indicator bar + gap so tabs align (§09).
+            let text_inset = SB_PILL_INSET + SB_TAB_PAD_X + SB_BAR_W + SB_TAB_GAP;
+            let line = measure.line_height(FontRole::Label);
+            labels.push(ProseLabel {
+                text: format!("Tab {}", index + 1),
+                x: panel.x + text_inset * scale,
+                y: panel.y + y * scale + (SB_TAB_H * scale - line) * 0.5,
+                role: FontRole::Label,
+                color,
+                weight: None,
+                max_w: f32::MAX,
+            });
+        }
         y += SB_TAB_H;
     }
     let more_below = count - first - visible;
@@ -889,7 +911,8 @@ fn push_sb_body(
     );
 }
 
-/// The active tab's `accent.subtle` pill + `accent` bar - mirrors the binary.
+/// The active tab's bordered `accent`@0.14 pill + a 3x14 rounded `accent` indicator bar inside
+/// it (§09 "Sidebar tab item") - mirrors the binary's `push_active_marks`.
 fn push_sb_active(
     quads: &mut Vec<ChromeQuad>,
     panel: PxRect,
@@ -899,25 +922,34 @@ fn push_sb_active(
     theme: &Theme,
 ) {
     let inset = SB_PILL_INSET * scale;
-    quads.push(ChromeQuad::tint(
+    let radius = SB_PILL_RADIUS * scale;
+    let stroke = scale.max(1.0);
+    let pill = PxRect {
+        x: panel.x + inset,
+        y: top,
+        w: (panel.w - 2.0 * inset).max(0.0),
+        h: height,
+    };
+    quads.push(ChromeQuad::tint(pill, theme.accent, 0.28, radius));
+    let inner = PxRect {
+        x: pill.x + stroke,
+        y: pill.y + stroke,
+        w: (pill.w - 2.0 * stroke).max(0.0),
+        h: (pill.h - 2.0 * stroke).max(0.0),
+    };
+    let inner_r = (radius - stroke).max(0.0);
+    quads.push(ChromeQuad::rounded(inner, theme.bg_sidebar, inner_r));
+    quads.push(ChromeQuad::tint(inner, theme.accent, 0.14, inner_r));
+    let bar_h = SB_BAR_H * scale;
+    quads.push(ChromeQuad::rounded(
         PxRect {
-            x: panel.x + inset,
-            y: top,
-            w: (panel.w - 2.0 * inset).max(0.0),
-            h: height,
+            x: pill.x + SB_TAB_PAD_X * scale,
+            y: top + (height - bar_h) * 0.5,
+            w: SB_BAR_W * scale,
+            h: bar_h,
         },
         theme.accent,
-        0.14,
-        SB_PILL_RADIUS * scale,
-    ));
-    quads.push(ChromeQuad::fill(
-        PxRect {
-            x: panel.x,
-            y: top,
-            w: (SB_BAR_W * scale).max(1.0),
-            h: height,
-        },
-        theme.accent,
+        SB_BAR_RADIUS * scale,
     ));
 }
 
