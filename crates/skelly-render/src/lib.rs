@@ -196,24 +196,12 @@ pub struct SidebarView<'a> {
 pub struct GitDockView<'a> {
     /// The dock rectangle on the surface (right edge, full height), physical px.
     pub panel: PxRect,
-    /// Pixel position of the text grid's cell `(0, 0)` top-left, physical px.
-    pub text_origin: (f32, f32),
-    /// The dock's text as a monospace grid (rows top to bottom), UI-token colored.
-    pub rows: &'a [Vec<GridCell>],
-    /// Grid row of the selected file in the file list (`accent` bar + subtle fill).
-    pub selected_file_row: Option<usize>,
-    /// Grid rows that are diff additions (translucent `diff.add` background).
-    pub add_rows: &'a [usize],
-    /// Grid rows that are diff deletions (translucent `diff.del` background).
-    pub del_rows: &'a [usize],
-    /// Grid rows that are `@@` hunk headers (translucent `diff.hunk` background).
-    pub hunk_rows: &'a [usize],
-    /// Grid row of the focused hunk's header, marked with an `accent.subtle` fill (the
-    /// target of a hunk-stage).
-    pub focused_hunk_row: Option<usize>,
-    /// The commit-message input caret's `(column, row)` cell, when the commit box has
-    /// focus (an `accent` bar is drawn there).
-    pub caret: Option<(usize, usize)>,
+    /// The content quads over the dock frame (diff add/del/hunk line backgrounds, the
+    /// selected-file + focused-hunk fills, the commit caret).
+    pub quads: &'a [ChromeQuad],
+    /// The positioned proportional text labels (status bar, file list, diff lines, commit
+    /// box); mono content (code, branch, counts) uses the `mono` font role.
+    pub labels: &'a [ProseLabel],
 }
 
 /// The session-timeline dock to draw as base-layer chrome on the right edge.

@@ -158,17 +158,6 @@ impl Theme {
             },
         }
     }
-
-    /// The `accent.subtle` fill - the accent at ~14% alpha - as a linear RGBA, for the
-    /// selected-row tint shared by the sidebar, palette, settings, and docks. One helper so
-    /// the alpha stays consistent (spec: 0.14 dark / 0.12 light - the difference is
-    /// imperceptible, so a single value keeps the token single-sourced).
-    #[must_use]
-    pub(crate) fn accent_subtle(self) -> [f32; 4] {
-        let mut fill = self.accent.to_linear();
-        fill[3] = 0.14;
-        fill
-    }
 }
 
 /// An 8-bit sRGB color from its channels - a terse constructor for the token table.
@@ -259,17 +248,5 @@ mod tests {
         assert_eq!(light.bg_sidebar, srgb(0xE6, 0xE9, 0xEF));
         assert_eq!(light.border, srgb(0xCC, 0xD0, 0xDA));
         assert_eq!(light.fg_faint, srgb(0xBC, 0xC0, 0xCC));
-    }
-
-    #[test]
-    fn accent_subtle_is_the_accent_at_low_alpha() {
-        let dark = Theme::resolve("ossein-dark");
-        let fill = dark.accent_subtle();
-        assert!((fill[3] - 0.14).abs() < 1e-6, "spec accent.subtle alpha");
-        // RGB matches the opaque accent (only alpha differs).
-        let accent = dark.accent.to_linear();
-        for channel in 0..3 {
-            assert!((fill[channel] - accent[channel]).abs() < 1e-6);
-        }
     }
 }

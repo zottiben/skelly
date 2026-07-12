@@ -17,13 +17,12 @@
 
 use skelly_config::Appearance;
 use skelly_render::{
-    measure_cell, CaptureGitDock, CapturePane, Chrome, GridCell, PxRect, Srgb, Theme,
+    CaptureGitDock, CapturePane, Chrome, ChromeQuad, FontRole, GridCell, ProseLabel, PxRect, Srgb,
+    TextMeasure, Theme,
 };
 
 /// Logical dock width - mirrors the binary's `GIT_DOCK_WIDTH` (420, the guide's default).
 const DOCK_WIDTH: f32 = 420.0;
-/// Logical inset of the dock text - mirrors the binary's `GIT_DOCK_PAD`.
-const DOCK_PAD: f32 = 14.0;
 /// Logical window margin - mirrors the binary's `WINDOW_PAD`.
 const WINDOW_PAD: f32 = 12.0;
 /// Logical inner pane inset - mirrors the binary's `PANE_INSET`.
@@ -44,7 +43,6 @@ fn main() {
         ..Appearance::default()
     };
     let theme = Theme::resolve(&appearance.theme);
-    let (cell_w, cell_h) = measure_cell(&appearance, scale);
     let sc = scale as f32;
 
     // One pane, inset on the left by the window margin and on the right by the dock -
@@ -70,7 +68,7 @@ fn main() {
     // An optional third arg `norepo` renders the "Not a git repo" empty state (the Init
     // button) instead of the populated diff dock.
     let norepo = std::env::args().nth(3).as_deref() == Some("norepo");
-    let dock = build_dock(width, height, cell_w, cell_h, sc, norepo, &theme);
+    let dock = build_dock(width, height, sc, norepo, &theme);
     let rgba = skelly_render::capture_panes_rgba(
         &appearance,
         width,
@@ -95,252 +93,559 @@ fn main() {
     println!("wrote {path}");
 }
 
-/// A representative git diff dock, mirroring the binary's `gitdock` layout: a status bar,
-/// a changed-file list (the selected file highlighted), and the selected file's unified
-/// diff with hunk headers and add/del line backgrounds.
-fn build_dock(
-    width: u32,
-    height: u32,
-    cell_w: f32,
-    cell_h: f32,
-    scale: f32,
-    norepo: bool,
-    theme: &Theme,
-) -> CaptureGitDock {
-    let pad = DOCK_PAD * scale;
+// Git-dock layout constants (logical px) - mirror the binary's `gitdock` module (§10.6).
+const G_PAD_X: f32 = 12.0;
+const G_PAD_TOP: f32 = 12.0;
+const G_STATUS_H: f32 = 26.0;
+const G_LABEL_H: f32 = 24.0;
+const G_FILE_ROW_H: f32 = 26.0;
+const G_DIFF_HEADER_H: f32 = 26.0;
+const G_DIFF_ROW_H: f32 = 20.0;
+const G_COMMIT_ROW_H: f32 = 24.0;
+const G_COMMIT_BAND_H: f32 = 78.0;
+const G_GUTTER_CHARS: usize = 4;
+const G_DIFF_BG_ALPHA: f32 = 0.14;
+const G_HUNK_BG_ALPHA: f32 = 0.08;
+
+/// A representative git diff dock as a proportional display list, mirroring the binary's
+/// `gitdock` layout: a status bar, a changed-file list (the selected file filled), the
+/// selected file's diff (add/del/hunk backgrounds + mono code), and a commit box.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one straight-line representative dock builder mirroring the binary"
+)]
+fn build_dock(width: u32, height: u32, scale: f32, norepo: bool, theme: &Theme) -> CaptureGitDock {
+    let mut m = TextMeasure::new(scale);
     let dock_w = DOCK_WIDTH * scale;
-    let panel_x = width as f32 - dock_w;
-    let cols = ((dock_w - 2.0 * pad) / cell_w).floor().max(1.0) as usize;
-    let rows_n = ((height as f32 - 2.0 * pad) / cell_h).floor().max(1.0) as usize;
-
-    let mut rows: Vec<Vec<GridCell>> = (0..rows_n)
-        .map(|_| blank_row(cols, theme.fg_muted))
-        .collect();
-
     let panel = PxRect {
-        x: panel_x,
+        x: width as f32 - dock_w,
         y: 0.0,
         w: dock_w,
         h: height as f32,
     };
-    let text_origin = (panel_x + pad, pad);
+    let cx = panel.x + G_PAD_X * scale;
+    let cr = panel.x + panel.w - G_PAD_X * scale;
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
 
-    // The "Not a git repo" empty state (design §12): "No repository here" + the Init button.
     if norepo {
-        return norepo_dock(panel, text_origin, cols, &mut rows, theme);
+        let mid = panel.y + panel.h * 0.5;
+        gpush_center(
+            &mut labels,
+            &mut m,
+            "No repository here",
+            FontRole::Body,
+            theme.fg_muted,
+            panel,
+            mid,
+        );
+        let by = mid + 34.0 * scale;
+        let w = m.width("Init repo  \u{21a9}", FontRole::Body, None);
+        let bx = panel.x + (panel.w - w) * 0.5;
+        quads.push(ChromeQuad::tint(
+            PxRect {
+                x: bx - 10.0 * scale,
+                y: by,
+                w: w + 20.0 * scale,
+                h: 28.0 * scale,
+            },
+            theme.accent,
+            0.14,
+            6.0 * scale,
+        ));
+        gpush(
+            &mut labels,
+            &mut m,
+            "Init repo  \u{21a9}",
+            FontRole::Body,
+            theme.accent,
+            bx,
+            by,
+            28.0,
+            scale,
+        );
+        return CaptureGitDock {
+            panel,
+            quads,
+            labels,
+        };
     }
 
-    // Status bar: branch (diff.hunk), ahead/behind (muted), totals (diff.add/del), esc.
-    write(&mut rows[0], 0, "main", theme.diff_hunk);
-    write(&mut rows[0], 6, "ahead 2 behind 1", theme.fg_muted);
-    write(&mut rows[0], 24, "+42", theme.diff_add);
-    write(&mut rows[0], 28, "-11", theme.diff_del);
-    write_right(&mut rows[0], cols, "esc", theme.fg_muted);
+    // Status bar.
+    let sy = panel.y + G_PAD_TOP * scale;
+    let mut x = cx;
+    gpush(
+        &mut labels,
+        &mut m,
+        "\u{2442} main",
+        FontRole::Mono,
+        theme.diff_hunk,
+        x,
+        sy,
+        G_STATUS_H,
+        scale,
+    );
+    x += m.width("\u{2442} main", FontRole::Mono, None) + 10.0 * scale;
+    gpush(
+        &mut labels,
+        &mut m,
+        "\u{2191}2 \u{2193}1",
+        FontRole::Mono,
+        theme.fg_muted,
+        x,
+        sy,
+        G_STATUS_H,
+        scale,
+    );
+    let mut end = gpush_right(
+        &mut labels,
+        &mut m,
+        "esc",
+        FontRole::Caption,
+        theme.fg_muted,
+        cr,
+        sy,
+        G_STATUS_H,
+        scale,
+    ) - 10.0 * scale;
+    end = gpush_right(
+        &mut labels,
+        &mut m,
+        "-45",
+        FontRole::Mono,
+        theme.diff_del,
+        end,
+        sy,
+        G_STATUS_H,
+        scale,
+    ) - 8.0 * scale;
+    gpush_right(
+        &mut labels,
+        &mut m,
+        "+122",
+        FontRole::Mono,
+        theme.diff_add,
+        end,
+        sy,
+        G_STATUS_H,
+        scale,
+    );
 
-    // File-list section label (+ key hint) and the changed files. Each row: a stage
-    // checkbox, the status letter, the path, and its counts (staged.rs is staged: [x]).
-    write(&mut rows[2], 0, "CHANGED - 3", theme.fg_muted);
-    write_right(&mut rows[2], cols, "space stage  a all", theme.fg_muted);
+    // Section label.
+    let mut y = sy + G_STATUS_H * scale;
+    gpush(
+        &mut labels,
+        &mut m,
+        "CHANGED - 3",
+        FontRole::Micro,
+        theme.fg_muted,
+        cx,
+        y,
+        G_LABEL_H,
+        scale,
+    );
+    gpush_right(
+        &mut labels,
+        &mut m,
+        "space stage  a all",
+        FontRole::Caption,
+        theme.fg_muted,
+        cr,
+        y,
+        G_LABEL_H,
+        scale,
+    );
+    y += G_LABEL_H * scale;
+
+    // File rows.
     let files = [
-        ('M', "src/pane/tree.rs", "+42", "-11", theme.diff_hunk, true),
         (
-            'A',
-            "src/session/timeline.rs",
-            "+80",
-            "-0",
-            theme.diff_add,
+            "[x]",
+            'M',
+            "src/pane/tree.rs",
+            42u32,
+            11u32,
+            theme.diff_hunk,
             true,
         ),
-        ('D', "old/legacy.rs", "+0", "-34", theme.diff_del, false),
+        (
+            "[x]",
+            'A',
+            "src/session/timeline.rs",
+            80,
+            0,
+            theme.diff_add,
+            false,
+        ),
+        ("[ ]", 'D', "old/legacy.rs", 0, 34, theme.diff_del, false),
     ];
-    let file_start = 3usize;
-    let selected = 0usize;
-    for (i, (letter, path, add, del, letter_fg, staged)) in files.iter().enumerate() {
-        let row = file_start + i;
-        let name_fg = if i == selected {
+    for (i, (check, letter, path, add, del, lfg, selected)) in files.iter().enumerate() {
+        let top = y + i as f32 * G_FILE_ROW_H * scale;
+        if *selected {
+            quads.push(ChromeQuad::tint(
+                PxRect {
+                    x: panel.x,
+                    y: top,
+                    w: panel.w,
+                    h: G_FILE_ROW_H * scale,
+                },
+                theme.accent,
+                G_DIFF_BG_ALPHA,
+                0.0,
+            ));
+        }
+        let mut fx = cx;
+        let check_fg = if *check == "[x]" {
+            theme.diff_add
+        } else {
+            theme.fg_muted
+        };
+        gpush(
+            &mut labels,
+            &mut m,
+            check,
+            FontRole::Mono,
+            check_fg,
+            fx,
+            top,
+            G_FILE_ROW_H,
+            scale,
+        );
+        fx += m.width("[x] ", FontRole::Mono, None);
+        gpush(
+            &mut labels,
+            &mut m,
+            &letter.to_string(),
+            FontRole::Mono,
+            *lfg,
+            fx,
+            top,
+            G_FILE_ROW_H,
+            scale,
+        );
+        fx += m.width("M  ", FontRole::Mono, None);
+        let counts_left = gpush_counts(
+            &mut labels,
+            &mut m,
+            cr,
+            *add,
+            *del,
+            top,
+            G_FILE_ROW_H,
+            scale,
+            theme,
+        );
+        let name_fg = if *selected {
             theme.fg_primary
         } else {
             theme.fg_secondary
         };
-        write(&mut rows[row], 0, "[", theme.fg_muted);
-        write(
-            &mut rows[row],
-            1,
-            if *staged { "x" } else { " " },
-            theme.diff_add,
-        );
-        write(&mut rows[row], 2, "]", theme.fg_muted);
-        write(&mut rows[row], 4, &letter.to_string(), *letter_fg);
-        write(&mut rows[row], 6, path, name_fg);
-        write_pair(&mut rows[row], cols, add, del, theme);
+        labels.push(ProseLabel {
+            text: (*path).to_owned(),
+            x: fx,
+            y: top + (G_FILE_ROW_H * scale - m.line_height(FontRole::Body)) * 0.5,
+            role: FontRole::Body,
+            color: name_fg,
+            weight: None,
+            max_w: (counts_left - 8.0 * scale - fx).max(1.0),
+        });
     }
+    y += files.len() as f32 * G_FILE_ROW_H * scale;
 
-    // Diff header (the selected file) + its unified diff.
-    let diff_header = file_start + files.len() + 1;
-    write(
-        &mut rows[diff_header],
-        0,
+    // Diff header.
+    y += 6.0 * scale;
+    gpush(
+        &mut labels,
+        &mut m,
         "src/pane/tree.rs",
+        FontRole::Label,
         theme.fg_secondary,
+        cx,
+        y,
+        G_DIFF_HEADER_H,
+        scale,
     );
-    write_pair(&mut rows[diff_header], cols, "+42", "-11", theme);
-
-    // Reserve the bottom band for the commit box; the diff fills the rows above it.
-    let commit_rows = 3usize;
-    let content_rows = rows_n.saturating_sub(commit_rows);
-    let mut kinds = DiffRows::default();
-    write_diff_rows(&mut rows, diff_header + 1, content_rows, theme, &mut kinds);
-
-    // The first hunk is focused: mark it and show the `⌘↵` stage affordance.
-    let focused_hunk_row = kinds.hunk.first().copied();
-    if let Some(row) = focused_hunk_row {
-        write_right(&mut rows[row], cols, "stage \u{2318}\u{21a9}", theme.accent);
-    }
-
-    // The commit box: a divider, a message input with a caret, and a status line.
-    let caret = Some(write_commit_band(&mut rows, content_rows, cols, theme));
-
-    CaptureGitDock {
-        panel,
-        text_origin,
-        rows,
-        selected_file_row: Some(file_start + selected),
-        add_rows: kinds.add,
-        del_rows: kinds.del,
-        hunk_rows: kinds.hunk,
-        focused_hunk_row,
-        caret,
-    }
-}
-
-/// The "Not a git repo" empty state (design §12): "No repository here" centered with the
-/// accent "Init repo" button one row below. Mirrors the binary's `gitdock` no-repo view.
-fn norepo_dock(
-    panel: PxRect,
-    text_origin: (f32, f32),
-    cols: usize,
-    rows: &mut [Vec<GridCell>],
-    theme: &Theme,
-) -> CaptureGitDock {
-    let mid = rows.len() / 2;
-    write_centered(&mut rows[mid], cols, "No repository here", theme.fg_muted);
-    let init_row = (mid + 1).min(rows.len() - 1);
-    write_centered(
-        &mut rows[init_row],
-        cols,
-        "Init repo  \u{21a9}",
-        theme.accent,
+    gpush_counts(
+        &mut labels,
+        &mut m,
+        cr,
+        42,
+        11,
+        y,
+        G_DIFF_HEADER_H,
+        scale,
+        theme,
     );
-    CaptureGitDock {
-        panel,
-        text_origin,
-        rows: rows.to_vec(),
-        selected_file_row: Some(init_row),
-        add_rows: Vec::new(),
-        del_rows: Vec::new(),
-        hunk_rows: Vec::new(),
-        focused_hunk_row: None,
-        caret: None,
-    }
-}
+    y += G_DIFF_HEADER_H * scale;
 
-/// A representative commit box at the foot (divider, `> message` input, status line),
-/// returning the caret cell. Mirrors the binary's `gitdock::write_commit_band`.
-fn write_commit_band(
-    rows: &mut [Vec<GridCell>],
-    top: usize,
-    cols: usize,
-    theme: &Theme,
-) -> (usize, usize) {
-    if let Some(row) = rows.get_mut(top) {
-        write(row, 0, &"-".repeat(cols), theme.border_strong);
-    }
-    let message = "feat: rewindable session timeline";
-    let input_row = top + 1;
-    if let Some(row) = rows.get_mut(input_row) {
-        write(row, 0, "> ", theme.accent);
-        write(row, 2, message, theme.fg_primary);
-    }
-    if let Some(row) = rows.get_mut(top + 2) {
-        write(row, 0, "2 staged", theme.fg_muted);
-        write_right(row, cols, "enter commit  esc back", theme.fg_muted);
-    }
-    (2 + message.chars().count(), input_row)
-}
-
-/// The add/del/hunk grid rows a diff render produced (for the background quads).
-#[derive(Default)]
-struct DiffRows {
-    add: Vec<usize>,
-    del: Vec<usize>,
-    hunk: Vec<usize>,
-}
-
-/// Render a representative unified diff into `rows[body..]`, recording the add/del/hunk
-/// grid rows into `kinds`.
-fn write_diff_rows(
-    rows: &mut [Vec<GridCell>],
-    body: usize,
-    rows_n: usize,
-    theme: &Theme,
-    kinds: &mut DiffRows,
-) {
-    let lines: &[(char, &str, &str)] = &[
-        ('@', "@@ -18,7 +18,9 @@ impl PaneTree", ""),
-        (' ', "18", "fn split(&mut self, dir: Dir) {"),
-        (' ', "19", "    let node = self.focused();"),
-        ('-', "20", "    node.grow(dir);"),
-        ('+', "20", "    if self.count() >= 8 { return; }"),
-        ('+', "21", "    node.grow(dir);"),
-        (' ', "22", "    self.rebalance();"),
-        (' ', "23", "}"),
+    // Diff body.
+    let gutter_w = m.width(&"0".repeat(G_GUTTER_CHARS), FontRole::Mono, None);
+    let content_bottom = panel.y + panel.h - G_COMMIT_BAND_H * scale;
+    let lines: &[(char, &str, u32, &str)] = &[
+        ('@', "@@ -18,7 +18,9 @@ impl PaneTree", 0, ""),
+        (' ', "", 18, "fn split(&mut self, dir: Dir) {"),
+        (' ', "", 19, "    let node = self.focused();"),
+        ('-', "", 20, "    node.grow(dir);"),
+        ('+', "", 20, "    if self.count() >= 8 { return; }"),
+        ('+', "", 21, "    node.grow(dir);"),
+        (' ', "", 22, "    self.rebalance();"),
+        (' ', "", 23, "}"),
     ];
-    for (i, (kind, gutter, text)) in lines.iter().enumerate() {
-        let row = body + i;
-        if row >= rows_n {
+    let row_h = G_DIFF_ROW_H * scale;
+    for (i, (sign, hunk, gutter, text)) in lines.iter().enumerate() {
+        let ry = y + i as f32 * row_h;
+        if ry + row_h > content_bottom {
             break;
         }
-        match kind {
-            '@' => {
-                kinds.hunk.push(row);
-                write(&mut rows[row], 0, gutter, theme.diff_hunk);
+        let full = PxRect {
+            x: panel.x,
+            y: ry,
+            w: panel.w,
+            h: row_h,
+        };
+        if *sign == '@' {
+            quads.push(ChromeQuad::tint(
+                full,
+                theme.diff_hunk,
+                G_HUNK_BG_ALPHA,
+                0.0,
+            ));
+            quads.push(ChromeQuad::tint(full, theme.accent, G_DIFF_BG_ALPHA, 0.0));
+            gpush(
+                &mut labels,
+                &mut m,
+                hunk,
+                FontRole::Mono,
+                theme.diff_hunk,
+                cx,
+                ry,
+                G_DIFF_ROW_H,
+                scale,
+            );
+            gpush_right(
+                &mut labels,
+                &mut m,
+                "stage \u{2318}\u{21a9}",
+                FontRole::Micro,
+                theme.accent,
+                cr,
+                ry,
+                G_DIFF_ROW_H,
+                scale,
+            );
+        } else {
+            let (fg, bg) = match sign {
+                '+' => (theme.diff_add, Some(theme.diff_add)),
+                '-' => (theme.diff_del, Some(theme.diff_del)),
+                _ => (theme.fg_secondary, None),
+            };
+            if let Some(b) = bg {
+                quads.push(ChromeQuad::tint(full, b, G_DIFF_BG_ALPHA, 0.0));
             }
-            '+' => {
-                kinds.add.push(row);
-                write_diff_line(&mut rows[row], gutter, '+', text, theme.diff_add, theme);
-            }
-            '-' => {
-                kinds.del.push(row);
-                write_diff_line(&mut rows[row], gutter, '-', text, theme.diff_del, theme);
-            }
-            _ => write_diff_line(&mut rows[row], gutter, ' ', text, theme.fg_secondary, theme),
+            let gutter_fg = if *sign == ' ' { theme.fg_muted } else { fg };
+            gpush_right(
+                &mut labels,
+                &mut m,
+                &gutter.to_string(),
+                FontRole::Mono,
+                gutter_fg,
+                cx + gutter_w,
+                ry,
+                G_DIFF_ROW_H,
+                scale,
+            );
+            let code_x = cx + gutter_w + m.width("  ", FontRole::Mono, None);
+            labels.push(ProseLabel {
+                text: format!("{sign} {text}"),
+                x: code_x,
+                y: ry + (row_h - m.line_height(FontRole::Mono)) * 0.5,
+                role: FontRole::Mono,
+                color: fg,
+                weight: None,
+                max_w: (cr - code_x).max(1.0),
+            });
         }
+    }
+
+    // Commit box.
+    let ctop = content_bottom;
+    quads.push(ChromeQuad::fill(
+        PxRect {
+            x: panel.x,
+            y: ctop,
+            w: panel.w,
+            h: scale.max(1.0),
+        },
+        theme.border,
+    ));
+    let iy = ctop + 10.0 * scale;
+    gpush(
+        &mut labels,
+        &mut m,
+        "\u{203a}",
+        FontRole::Mono,
+        theme.accent,
+        cx,
+        iy,
+        G_COMMIT_ROW_H,
+        scale,
+    );
+    let msg_x = cx + m.width("\u{203a} ", FontRole::Mono, None);
+    let msg = "feat: rewindable session timeline";
+    gpush(
+        &mut labels,
+        &mut m,
+        msg,
+        FontRole::Body,
+        theme.fg_primary,
+        msg_x,
+        iy,
+        G_COMMIT_ROW_H,
+        scale,
+    );
+    let caret_x = msg_x + m.width(msg, FontRole::Body, None);
+    let line_h = m.line_height(FontRole::Body);
+    quads.push(ChromeQuad::fill(
+        PxRect {
+            x: caret_x,
+            y: iy + (G_COMMIT_ROW_H * scale - line_h) * 0.5,
+            w: (2.0 * scale).max(1.0),
+            h: line_h,
+        },
+        theme.accent,
+    ));
+    let stat_y = iy + G_COMMIT_ROW_H * scale;
+    gpush(
+        &mut labels,
+        &mut m,
+        "2 staged",
+        FontRole::Caption,
+        theme.fg_muted,
+        cx,
+        stat_y,
+        G_COMMIT_ROW_H,
+        scale,
+    );
+    gpush_right(
+        &mut labels,
+        &mut m,
+        "enter commit  esc back",
+        FontRole::Caption,
+        theme.fg_muted,
+        cr,
+        stat_y,
+        G_COMMIT_ROW_H,
+        scale,
+    );
+
+    CaptureGitDock {
+        panel,
+        quads,
+        labels,
     }
 }
 
-/// A right-aligned `+add -del` count pair (add in `diff.add`, del in `diff.del`).
-fn write_pair(row: &mut [GridCell], cols: usize, add: &str, del: &str, theme: &Theme) {
-    let del_start = cols.saturating_sub(1 + del.chars().count());
-    write(row, del_start, del, theme.diff_del);
-    let add_start = del_start.saturating_sub(1 + add.chars().count());
-    write(row, add_start, add, theme.diff_add);
+/// Push a left-anchored label vertically centered in a `row_h` row.
+#[allow(clippy::too_many_arguments, reason = "one focused example helper")]
+fn gpush(
+    labels: &mut Vec<ProseLabel>,
+    m: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    x: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) {
+    let line_h = m.line_height(role);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x,
+        y: top + (row_h * scale - line_h) * 0.5,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
 }
 
-/// A diff body line: a right-aligned line-number gutter, the `+`/`-`/` ` sign, and the
-/// code text, all in `fg` (context uses a muted gutter).
-fn write_diff_line(
-    row: &mut [GridCell],
-    gutter: &str,
-    sign: char,
+/// Push a right-anchored label ending at `right`; returns its left edge.
+#[allow(clippy::too_many_arguments, reason = "one focused example helper")]
+fn gpush_right(
+    labels: &mut Vec<ProseLabel>,
+    m: &mut TextMeasure,
     text: &str,
-    fg: Srgb,
-    theme: &Theme,
+    role: FontRole,
+    color: Srgb,
+    right: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) -> f32 {
+    let x = right - m.width(text, role, None);
+    gpush(labels, m, text, role, color, x, top, row_h, scale);
+    x
+}
+
+/// Push a horizontally-centered label at physical `top`.
+fn gpush_center(
+    labels: &mut Vec<ProseLabel>,
+    m: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    panel: PxRect,
+    top: f32,
 ) {
-    let gutter_fg = if sign == ' ' { theme.fg_muted } else { fg };
-    let g = format!("{gutter:>4}");
-    write(row, 0, &g, gutter_fg);
-    write(row, 5, &sign.to_string(), fg);
-    write(row, 7, text, fg);
+    let w = m.width(text, role, None);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x: panel.x + (panel.w - w) * 0.5,
+        y: top,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
+}
+
+/// Push a right-anchored `+add -del` count pair; returns the left edge of the pair.
+#[allow(clippy::too_many_arguments, reason = "one focused example helper")]
+fn gpush_counts(
+    labels: &mut Vec<ProseLabel>,
+    m: &mut TextMeasure,
+    cr: f32,
+    add: u32,
+    del: u32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+    theme: &Theme,
+) -> f32 {
+    let mut end = gpush_right(
+        labels,
+        m,
+        &format!("-{del}"),
+        FontRole::Mono,
+        theme.diff_del,
+        cr,
+        top,
+        row_h,
+        scale,
+    );
+    end = gpush_right(
+        labels,
+        m,
+        &format!("+{add}"),
+        FontRole::Mono,
+        theme.diff_add,
+        end - 8.0 * scale,
+        top,
+        row_h,
+        scale,
+    );
+    end
 }
 
 fn ui_cell(c: char, fg: Srgb) -> GridCell {
@@ -352,28 +657,6 @@ fn ui_cell(c: char, fg: Srgb) -> GridCell {
         italic: false,
         underline: false,
     }
-}
-
-fn blank_row(cols: usize, fg: Srgb) -> Vec<GridCell> {
-    vec![ui_cell(' ', fg); cols]
-}
-
-fn write(row: &mut [GridCell], col: usize, text: &str, fg: Srgb) {
-    for (i, ch) in text.chars().enumerate() {
-        if let Some(slot) = row.get_mut(col + i) {
-            *slot = ui_cell(ch, fg);
-        }
-    }
-}
-
-fn write_right(row: &mut [GridCell], cols: usize, text: &str, fg: Srgb) {
-    let start = cols.saturating_sub(text.chars().count() + 1);
-    write(row, start, text, fg);
-}
-
-fn write_centered(row: &mut [GridCell], cols: usize, text: &str, fg: Srgb) {
-    let start = cols.saturating_sub(text.chars().count()) / 2;
-    write(row, start, text, fg);
 }
 
 /// A few plausible terminal lines behind the dock, so the capture shows the dock over a

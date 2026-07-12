@@ -58,8 +58,6 @@ const RAIL_WIDTH: f32 = 56.0;
 /// Logical width (px) of the git diff dock - the guide's default (resizable 360-560 is a
 /// later slice, so it is fixed for now).
 const GIT_DOCK_WIDTH: f32 = 420.0;
-/// Logical inset (px) of the git dock's text from its top-left corner.
-const GIT_DOCK_PAD: f32 = 14.0;
 /// Diff lines scrolled per `PageUp`/`PageDown` in the git dock.
 const DIFF_SCROLL_LINES: i32 = 10;
 
@@ -582,14 +580,8 @@ impl App {
             match &git_dock {
                 Some(frame) => renderer.set_git_dock(Some(&GitDockView {
                     panel: frame.panel,
-                    text_origin: frame.origin,
-                    rows: &frame.rows,
-                    selected_file_row: frame.selected_file_row,
-                    add_rows: &frame.add_rows,
-                    del_rows: &frame.del_rows,
-                    hunk_rows: &frame.hunk_rows,
-                    focused_hunk_row: frame.focused_hunk_row,
-                    caret: frame.caret,
+                    quads: &frame.quads,
+                    labels: &frame.labels,
                 })),
                 None => renderer.set_git_dock(None),
             }
@@ -729,41 +721,27 @@ impl App {
         }
     }
 
-    /// Lay out the git dock: a fixed-width panel on the right edge, its status bar +
-    /// file list + selected-file diff rendered in UI tokens and clipped to the panel.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the dock cell dimensions are small, non-negative values"
-    )]
-    fn build_git_dock_frame(&self) -> GitDockFrame {
-        let (cell_w, cell_h) = self.cell_size();
-        let pad = GIT_DOCK_PAD * scale32(self.scale);
+    /// Lay out the git dock (design §10.6): a fixed-width panel on the right edge, its
+    /// status bar + file list + selected-file diff + commit box as a proportional display
+    /// list clipped to the panel.
+    fn build_git_dock_frame(&mut self) -> GitDockFrame {
+        let scale = scale32(self.scale);
         let dock_w = self.right_dock_width_px();
         let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
-        let panel_x = (surface_w - dock_w).max(0.0);
-
-        let cols = ((dock_w - 2.0 * pad) / cell_w).floor().max(1.0) as usize;
-        let rows = ((surface_h - 2.0 * pad) / cell_h).floor().max(1.0) as usize;
-        let view = self.git_dock.view(cols, rows, &self.theme);
-
+        let panel = PxRect {
+            x: (surface_w - dock_w).max(0.0),
+            y: 0.0,
+            w: dock_w,
+            h: surface_h,
+        };
+        let paint = self
+            .git_dock
+            .build(panel, scale, &self.theme, &mut self.measure);
         GitDockFrame {
-            panel: PxRect {
-                x: panel_x,
-                y: 0.0,
-                w: dock_w,
-                h: surface_h,
-            },
-            origin: (panel_x + pad, pad),
-            rows: view.rows,
-            selected_file_row: view.selected_file_row,
-            add_rows: view.add_rows,
-            del_rows: view.del_rows,
-            hunk_rows: view.hunk_rows,
-            focused_hunk_row: view.focused_hunk_row,
-            caret: view.caret,
-            diff_scroll: view.diff_scroll,
+            panel,
+            quads: paint.quads,
+            labels: paint.labels,
+            diff_scroll: paint.diff_scroll,
         }
     }
 
@@ -2074,14 +2052,8 @@ struct SettingsFrame {
 /// Owned git-dock frame data the borrowed [`GitDockView`] points at.
 struct GitDockFrame {
     panel: PxRect,
-    origin: (f32, f32),
-    rows: Vec<Vec<GridCell>>,
-    selected_file_row: Option<usize>,
-    add_rows: Vec<usize>,
-    del_rows: Vec<usize>,
-    hunk_rows: Vec<usize>,
-    focused_hunk_row: Option<usize>,
-    caret: Option<(usize, usize)>,
+    quads: Vec<skelly_render::ChromeQuad>,
+    labels: Vec<skelly_render::ProseLabel>,
     /// The clamped diff scroll the view actually used, written back to the dock.
     diff_scroll: usize,
 }

@@ -10,14 +10,13 @@
 use skelly_config::Appearance;
 
 use crate::cells::{
-    card_quads, chrome_quad, dock_frame_quads, gitdock_quads as build_gitdock_quads, grid_quads,
-    logo_quads, push_outline, scrim_quad, settings_frame_quads, Quad, QuadLayer,
-    LOGO_WATERMARK_OPACITY,
+    card_quads, chrome_quad, dock_frame_quads, grid_quads, logo_quads, push_outline, scrim_quad,
+    settings_frame_quads, Quad, QuadLayer, LOGO_WATERMARK_OPACITY,
 };
 use crate::prose::{ProseLabel, ProseLayer};
-use crate::text::{measure_cell, PaneTextInput, TextLayer};
+use crate::text::{PaneTextInput, TextLayer};
 use crate::theme::{Rgba, Theme};
-use crate::{ChromeQuad, GitDockView, GridCell, PxRect};
+use crate::{ChromeQuad, GridCell, PxRect};
 
 /// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
@@ -118,26 +117,14 @@ pub struct CaptureSidebar {
 }
 
 /// The git diff dock for [`capture_panes_rgba`], mirroring
-/// [`GitDockView`](crate::GitDockView) but owning its rows.
+/// [`GitDockView`](crate::GitDockView) but owning its display list (proportional chrome).
 pub struct CaptureGitDock {
     /// The dock rectangle (right edge, full height), physical px.
     pub panel: PxRect,
-    /// Pixel position of the text grid's cell `(0, 0)` top-left.
-    pub text_origin: (f32, f32),
-    /// The dock text as a monospace grid (UI-token colored).
-    pub rows: Vec<Vec<GridCell>>,
-    /// Grid row of the selected file to highlight, if any.
-    pub selected_file_row: Option<usize>,
-    /// Grid rows that are diff additions.
-    pub add_rows: Vec<usize>,
-    /// Grid rows that are diff deletions.
-    pub del_rows: Vec<usize>,
-    /// Grid rows that are `@@` hunk headers.
-    pub hunk_rows: Vec<usize>,
-    /// Grid row of the focused hunk's header (accent highlight).
-    pub focused_hunk_row: Option<usize>,
-    /// The commit-message caret `(column, row)`, when the commit box has focus.
-    pub caret: Option<(usize, usize)>,
+    /// The content quads over the dock frame (diff backgrounds, selection/hunk fills, caret).
+    pub quads: Vec<ChromeQuad>,
+    /// The positioned proportional text labels.
+    pub labels: Vec<ProseLabel>,
 }
 
 /// The session-timeline dock for [`capture_panes_rgba`], mirroring
@@ -211,7 +198,6 @@ pub fn capture_panes_rgba(
     chrome: &Chrome,
 ) -> Vec<u8> {
     let theme = Theme::resolve(&appearance.theme);
-    let (cell_w, cell_h) = measure_cell(appearance, scale);
     // The "shell exited" scrims + messages, drawn just above the panes (before the sidebar).
     let dead_pane_scenes: Vec<Scene> = chrome
         .dead_panes
@@ -234,24 +220,15 @@ pub fn capture_panes_rgba(
         prose: sb.labels.clone(),
     });
     let gitdock_scene = chrome.git_dock.map(|gd| {
-        let view = GitDockView {
-            panel: gd.panel,
-            text_origin: gd.text_origin,
-            rows: &gd.rows,
-            selected_file_row: gd.selected_file_row,
-            add_rows: &gd.add_rows,
-            del_rows: &gd.del_rows,
-            hunk_rows: &gd.hunk_rows,
-            focused_hunk_row: gd.focused_hunk_row,
-            caret: gd.caret,
-        };
+        let mut quads = dock_frame_quads(gd.panel, &theme, scale as f32);
+        quads.extend(gd.quads.iter().map(chrome_quad));
         Scene {
-            quads: build_gitdock_quads(&view, &theme, cell_w, cell_h, scale as f32),
-            rows: &gd.rows,
-            left: gd.text_origin.0,
-            top: gd.text_origin.1,
+            quads,
+            rows: &[],
+            left: gd.panel.x,
+            top: gd.panel.y,
             clip: (gd.panel.x, gd.panel.y, gd.panel.w, gd.panel.h),
-            prose: Vec::new(),
+            prose: gd.labels.clone(),
         }
     });
     let timeline_scene = chrome.timeline.map(|tl| {

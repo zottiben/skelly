@@ -1,10 +1,11 @@
 //! The git diff dock: a per-repo right dock over the live terminal (AGENTS Hard rule 4 -
 //! a layer, the pane tree never unmounts; only one right-dock surface shows at a time).
-//! Opened with `⇧⌘G` and dismissed with `Esc`. This module is pure state + view-building:
-//! it holds the git-derived data ([`Status`] + the selected file's [`FileDiff`]) and turns
-//! it into a monospace grid of UI-token-colored cells plus the add/del/hunk row metadata
-//! the renderer needs for the `diff.*` backgrounds. The binary owns the [`Repo`] calls
-//! (discover / status / diff), routing keys, and the viewport inset.
+//! Opened with `⇧⌘G` and dismissed with `Esc`. This module is pure state + layout: it holds
+//! the git-derived data ([`Status`] + the selected file's [`FileDiff`]) and builds a
+//! *proportional* display list (decorative quads for the diff backgrounds + selection, and
+//! positioned labels - chrome in IBM Plex Sans, diff code + metadata in the `mono` role
+//! (`JetBrains` Mono) so columns stay aligned). The binary owns the [`Repo`] calls (discover
+//! / diff), routing keys, and the viewport inset.
 //!
 //! v1 is read-only: a status bar (branch, ahead/behind, totals), the changed-file list
 //! (status letter, path, `+add`/`-del` counts), and the selected file's unified diff.
@@ -13,36 +14,37 @@
 //!
 //! [`Repo`]: skelly_session::Repo
 
-use skelly_render::{GridCell, Srgb, Theme};
+use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
 use skelly_session::{ChangedFile, FileDiff, FileStatus, Hunk, LineKind, Status};
 
-/// Grid row of the status bar (branch / ahead-behind / totals).
-const STATUS_ROW: usize = 0;
-/// Grid row of the `CHANGED - N` file-list section label.
-const LABEL_ROW: usize = 2;
-/// First grid row of the changed-file list.
-const FILE_START: usize = 3;
+/// Git-dock layout constants in **logical** px (multiplied by the DPI scale). Tuned to the
+/// guide's §10.6: a status bar, a `CHANGED - N` file list at `bg.inset`, the selected file's
+/// diff (code in `mono`), and a commit box at the foot.
+const PAD_X: f32 = 12.0;
+/// Top padding above the status bar.
+const PAD_TOP: f32 = 12.0;
+/// Status-bar row height.
+const STATUS_H: f32 = 26.0;
+/// Section-label (`CHANGED - N`) row height.
+const LABEL_H: f32 = 24.0;
+/// Changed-file row height.
+const FILE_ROW_H: f32 = 26.0;
+/// Diff header (file path + counts) row height.
+const DIFF_HEADER_H: f32 = 26.0;
+/// Diff body line height (compact, code).
+const DIFF_ROW_H: f32 = 20.0;
+/// Each commit-band row's height (message input, status line).
+const COMMIT_ROW_H: f32 = 24.0;
+/// The commit band's total height at the foot (a divider + input + status + padding).
+const COMMIT_BAND_H: f32 = 78.0;
 /// Most file rows to show at once; a longer list scrolls to keep the selection visible.
-const FILE_ROWS_MAX: usize = 12;
-/// Rows the diff section always reserves below the file list (blank + header + a little
-/// body), so the file list never crowds the diff out entirely.
-const DIFF_RESERVE: usize = 4;
-/// Cells reserved for the diff line-number gutter (right-aligned), then a space, the
-/// `+`/`-`/` ` sign, a space, and the code text at [`DIFF_TEXT_COL`].
-const GUTTER_COLS: usize = 4;
-/// Column where a diff line's code text begins (`gutter(4) + space + sign + space`).
-const DIFF_TEXT_COL: usize = GUTTER_COLS + 3;
-/// Column of the per-file stage checkbox (`[x]`/`[ ]`) at the start of a file row.
-const FILE_CHECK_COL: usize = 0;
-/// Column of the status letter in a file row (after the checkbox).
-const FILE_LETTER_COL: usize = 4;
-/// Column where a file row's path begins.
-const FILE_PATH_COL: usize = 6;
-/// Rows the commit box occupies at the foot of the dock: a divider, the message input,
-/// and a status line. Only shown when there is room and the tree has changes.
-const COMMIT_ROWS: usize = 3;
-/// Column where the commit message begins (after the `> ` prompt).
-const COMMIT_TEXT_COL: usize = 2;
+const FILE_ROWS_MAX: usize = 10;
+/// Gutter width for the diff line-number, in mono chars.
+const GUTTER_CHARS: usize = 4;
+/// Alpha for an add/del diff-line background (the guide's `diff.*.bg` tokens).
+const DIFF_BG_ALPHA: f32 = 0.14;
+/// Alpha for a hunk-header background (the lighter `diff.hunk.bg`).
+const HUNK_BG_ALPHA: f32 = 0.08;
 
 /// Which part of the dock has keyboard focus.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -277,283 +279,370 @@ impl GitDock {
         true
     }
 
-    /// Scroll the selected file's diff by `delta` lines (clamped in [`Self::view`]).
+    /// Scroll the selected file's diff by `delta` lines (clamped in [`Self::build`]).
     pub(crate) fn scroll_diff(&mut self, delta: i32) {
         let next =
             i64::from(i32::try_from(self.diff_scroll).unwrap_or(i32::MAX)) + i64::from(delta);
         self.diff_scroll = usize::try_from(next.max(0)).unwrap_or(0);
     }
 
-    /// Store the clamped diff scroll [`Self::view`] settled on, so paging past the end of a
+    /// Store the clamped diff scroll [`Self::build`] settled on, so paging past the end of a
     /// diff does not leave a large value that then needs many pages back to undo.
     pub(crate) fn set_scroll(&mut self, scroll: usize) {
         self.diff_scroll = scroll;
     }
 
-    /// Build the dock grid `cols` cells wide and `rows` cells tall, in `theme`'s UI
-    /// tokens. Returns the grid plus the row metadata the renderer needs (selected file,
-    /// and which rows are additions / deletions / hunk headers) and the clamped diff
-    /// scroll actually used (the binary writes it back so repeated paging settles).
-    pub(crate) fn view(&self, cols: usize, rows: usize, theme: &Theme) -> View {
-        let cols = cols.max(1);
-        let rows = rows.max(1);
-        let mut grid: Vec<Vec<GridCell>> =
-            (0..rows).map(|_| blank_row(cols, theme.fg_muted)).collect();
+    /// Build the dock's proportional display list within `panel` (physical px) at DPI
+    /// `scale`, in `theme`'s UI tokens: the status bar, the `CHANGED - N` file list (the
+    /// selected file filled), the selected file's diff (add/del/hunk backgrounds + `mono`
+    /// code), and the commit box. The renderer draws the dock frame (shadow + divider).
+    /// Returns the clamped diff scroll actually used (the binary writes it back).
+    pub(crate) fn build(
+        &self,
+        panel: PxRect,
+        scale: f32,
+        theme: &Theme,
+        measure: &mut TextMeasure,
+    ) -> Paint {
+        let ctx = GCtx {
+            panel,
+            cx: panel.x + PAD_X * scale,
+            cr: panel.x + panel.w - PAD_X * scale,
+            scale,
+            theme,
+        };
+        let mid = panel.y + panel.h * 0.5;
+        // Empty / error states short-circuit with their own centered message.
+        if let Some(paint) = self.empty_paint(&ctx, measure, mid) {
+            return paint;
+        }
+        let mut quads = Vec::new();
+        let mut labels = Vec::new();
+        self.push_status_bar(&mut labels, &ctx, measure, panel.y + PAD_TOP * scale);
 
-        // Empty / error states.
+        // The commit box occupies a fixed band at the foot; the file list + diff lay out above.
+        let content_bottom = panel.y + panel.h - COMMIT_BAND_H * scale;
+        let mut y = panel.y + PAD_TOP * scale + STATUS_H * scale;
+        // File-list section label + a key hint.
+        push_row(
+            &mut labels,
+            measure,
+            &format!("CHANGED - {}", self.status.files.len()),
+            FontRole::Micro,
+            theme.fg_muted,
+            ctx.cx,
+            y,
+            LABEL_H,
+            scale,
+        );
+        push_right(
+            &mut labels,
+            measure,
+            "space stage  a all",
+            FontRole::Caption,
+            theme.fg_muted,
+            ctx.cr,
+            y,
+            LABEL_H,
+            scale,
+        );
+        y += LABEL_H * scale;
+
+        let files_bottom =
+            self.push_file_list(&mut quads, &mut labels, &ctx, measure, y, content_bottom);
+        let diff_scroll = self.push_diff(
+            &mut quads,
+            &mut labels,
+            &ctx,
+            measure,
+            files_bottom,
+            content_bottom,
+        );
+        self.push_commit(&mut quads, &mut labels, &ctx, measure, content_bottom);
+        Paint {
+            quads,
+            labels,
+            diff_scroll,
+        }
+    }
+
+    /// The empty / error states, each a centered message: no repo (with an Init button), a
+    /// git error, or a clean tree (with the status bar). `Some` short-circuits [`Self::build`].
+    fn empty_paint(&self, ctx: &GCtx, measure: &mut TextMeasure, mid: f32) -> Option<Paint> {
+        let (panel, scale, theme) = (ctx.panel, ctx.scale, ctx.theme);
         if !self.repo_present {
-            center(&mut grid, "No repository here", theme.fg_muted);
-            // The "Init repo" button (design §12 "Not a git repo"): an accent affordance
-            // one row below, activated with `Enter`. Highlighted via the selected-row
-            // accent quad (reused - the empty state has no file list to select).
-            if rows > 1 {
-                let init_row = (rows / 2 + 1).min(rows - 1);
-                write_centered(
-                    &mut grid[init_row],
-                    cols,
-                    "Init repo  \u{21a9}",
-                    theme.accent,
-                );
-                let mut view = View::empty(grid);
-                view.selected_file_row = Some(init_row);
-                return view;
-            }
-            return View::empty(grid);
+            let mut quads = Vec::new();
+            let mut labels = Vec::new();
+            push_centered(
+                &mut labels,
+                measure,
+                "No repository here",
+                FontRole::Body,
+                theme.fg_muted,
+                panel,
+                mid,
+            );
+            // The "Init repo" button (design §12 "Not a git repo"): an accent affordance.
+            let by = mid + 34.0 * scale;
+            let w = measure.width("Init repo  \u{21a9}", FontRole::Body, None);
+            let bx = panel.x + (panel.w - w) * 0.5;
+            quads.push(ChromeQuad::tint(
+                PxRect {
+                    x: bx - 10.0 * scale,
+                    y: by,
+                    w: w + 20.0 * scale,
+                    h: 28.0 * scale,
+                },
+                theme.accent,
+                0.14,
+                6.0 * scale,
+            ));
+            push_row(
+                &mut labels,
+                measure,
+                "Init repo  \u{21a9}",
+                FontRole::Body,
+                theme.accent,
+                bx,
+                by,
+                28.0,
+                scale,
+            );
+            return Some(Paint {
+                quads,
+                labels,
+                diff_scroll: 0,
+            });
         }
         if let Some(error) = &self.error {
-            center(&mut grid, "git error", theme.diff_del);
-            if rows > 1 {
-                let msg: String = error
-                    .lines()
-                    .next()
-                    .unwrap_or(error)
-                    .chars()
-                    .take(cols)
-                    .collect();
-                write_centered(
-                    &mut grid[(rows / 2 + 1).min(rows - 1)],
-                    cols,
-                    &msg,
-                    theme.fg_muted,
-                );
-            }
-            return View::empty(grid);
+            let mut labels = Vec::new();
+            push_centered(
+                &mut labels,
+                measure,
+                "git error",
+                FontRole::Body,
+                theme.diff_del,
+                panel,
+                mid - 14.0 * scale,
+            );
+            let msg: String = error
+                .lines()
+                .next()
+                .unwrap_or(error)
+                .chars()
+                .take(60)
+                .collect();
+            push_centered(
+                &mut labels,
+                measure,
+                &msg,
+                FontRole::Caption,
+                theme.fg_muted,
+                panel,
+                mid + 14.0 * scale,
+            );
+            return Some(Paint {
+                quads: Vec::new(),
+                labels,
+                diff_scroll: 0,
+            });
         }
-
-        self.write_status_bar(&mut grid[STATUS_ROW], cols, theme);
-
         if self.status.files.is_empty() {
-            // After committing everything the tree is clean; keep the Undo hint visible.
+            let mut labels = Vec::new();
+            self.push_status_bar(&mut labels, ctx, measure, panel.y + PAD_TOP * scale);
             let message = match &self.last_commit {
                 Some(sha) => format!("committed {sha} - press u to undo"),
                 None => "Working tree clean".to_owned(),
             };
-            if LABEL_ROW < rows {
-                write_centered(
-                    &mut grid[LABEL_ROW.max(rows / 2)],
-                    cols,
-                    &message,
-                    theme.fg_muted,
-                );
-            }
-            return View::empty(grid);
+            push_centered(
+                &mut labels,
+                measure,
+                &message,
+                FontRole::Body,
+                theme.fg_muted,
+                panel,
+                mid,
+            );
+            return Some(Paint {
+                quads: Vec::new(),
+                labels,
+                diff_scroll: 0,
+            });
         }
-
-        // The commit box occupies a fixed band at the foot (when there is room); the
-        // file list + diff lay out above it, in `content_rows`.
-        let commit_rows = if rows >= FILE_START + DIFF_RESERVE + COMMIT_ROWS {
-            COMMIT_ROWS
-        } else {
-            0
-        };
-        let content_rows = rows.saturating_sub(commit_rows);
-
-        // The file list (label + rows), then the diff, then the commit band.
-        let (file_visible, selected_file_row) =
-            self.write_file_list(&mut grid, content_rows, cols, theme);
-
-        // The diff section: a blank, the selected file's header, then its scrolled body.
-        let header_row = FILE_START + file_visible + 1;
-        let mut view = View {
-            rows: Vec::new(),
-            selected_file_row,
-            add_rows: Vec::new(),
-            del_rows: Vec::new(),
-            hunk_rows: Vec::new(),
-            focused_hunk_row: None,
-            diff_scroll: 0,
-            caret: None,
-        };
-        if let (Some(file), true) = (self.selected_file(), header_row < content_rows) {
-            let path = file.path.to_string_lossy();
-            let (added, removed) = self.diff.stats();
-            write(&mut grid[header_row], 0, &path, theme.fg_secondary);
-            write_counts(&mut grid[header_row], cols, added, removed, theme);
-        }
-        let body_start = header_row + 1;
-        let body_rows = content_rows.saturating_sub(body_start);
-        view.diff_scroll =
-            self.write_diff_body(&mut grid, body_start, body_rows, cols, theme, &mut view);
-
-        // The commit box at the foot.
-        if commit_rows > 0 {
-            view.caret = self.write_commit_band(&mut grid, content_rows, cols, theme);
-        }
-
-        view.rows = grid;
-        view
+        None
     }
 
-    /// Render the changed-file list (its `CHANGED - N` label + a key hint, then the file
-    /// rows) into the first `content_rows` of `grid`, scrolled to keep the selection
-    /// visible. Returns the number of file rows drawn and the selected file's grid row.
-    fn write_file_list(
+    /// The status bar: branch (`diff.hunk`), ahead/behind (muted), the `+added`/`-removed`
+    /// totals right-anchored, and an `esc` hint.
+    fn push_status_bar(
         &self,
-        grid: &mut [Vec<GridCell>],
-        content_rows: usize,
-        cols: usize,
-        theme: &Theme,
-    ) -> (usize, Option<usize>) {
-        write(
-            &mut grid[LABEL_ROW],
-            0,
-            &format!("CHANGED - {}", self.status.files.len()),
-            theme.fg_muted,
-        );
-        // A quiet key hint on the far right of the label row (staging is keyboard-driven).
-        write_before(
-            &mut grid[LABEL_ROW],
-            cols,
-            "space stage  a all",
-            theme.fg_muted,
-        );
-        let avail = content_rows.saturating_sub(FILE_START);
-        let file_visible = self
-            .status
-            .files
-            .len()
-            .min(FILE_ROWS_MAX)
-            .min(avail.saturating_sub(DIFF_RESERVE))
-            .max(1);
-        let file_offset = scroll_window(self.status.files.len(), file_visible, self.selected);
-        let mut selected_file_row = None;
-        for visible in 0..file_visible {
-            let index = file_offset + visible;
-            let Some(file) = self.status.files.get(index) else {
-                break;
-            };
-            let row = FILE_START + visible;
-            if row >= content_rows {
-                break;
-            }
-            if index == self.selected {
-                selected_file_row = Some(row);
-            }
-            file_row(&mut grid[row], cols, file, index == self.selected, theme);
-        }
-        (file_visible, selected_file_row)
-    }
-
-    /// Render the commit box at the foot of the dock (a divider, the message input, and a
-    /// status line), starting at grid row `top`. Returns the caret cell when the commit
-    /// box has focus.
-    fn write_commit_band(
-        &self,
-        grid: &mut [Vec<GridCell>],
-        top: usize,
-        cols: usize,
-        theme: &Theme,
-    ) -> Option<(usize, usize)> {
-        let focused = self.focus == Focus::Commit;
-        // Divider.
-        if let Some(row) = grid.get_mut(top) {
-            write(row, 0, &"-".repeat(cols), theme.border_strong);
-        }
-
-        // The message input line: a prompt + the message (tail-truncated to fit).
-        let input_row = top + 1;
-        let caret = grid.get_mut(input_row).map(|row| {
-            let prompt_fg = if focused {
-                theme.accent
-            } else {
-                theme.fg_muted
-            };
-            write(row, 0, "> ", prompt_fg);
-            let max = cols.saturating_sub(COMMIT_TEXT_COL + 1);
-            let count = self.message.chars().count();
-            let shown: String = if count > max {
-                self.message.chars().skip(count - max).collect()
-            } else {
-                self.message.clone()
-            };
-            if shown.is_empty() && !focused {
-                write(row, COMMIT_TEXT_COL, "commit message", theme.fg_muted);
-            } else {
-                write(row, COMMIT_TEXT_COL, &shown, theme.fg_primary);
-            }
-            (COMMIT_TEXT_COL + shown.chars().count(), input_row)
-        });
-
-        // The status line: the just-committed Undo hint, else the staged count + a hint.
-        if let Some(row) = grid.get_mut(top + 2) {
-            let staged = self.staged_count();
-            if let Some(sha) = &self.last_commit {
-                write(row, 0, &format!("committed {sha}"), theme.diff_add);
-                write_before(row, cols, "u undo", theme.fg_muted);
-            } else {
-                write(row, 0, &format!("{staged} staged"), theme.fg_muted);
-                let hint = if focused {
-                    if self.can_commit() {
-                        "enter commit  esc back"
-                    } else {
-                        "esc back"
-                    }
-                } else {
-                    "tab to write a message"
-                };
-                write_before(row, cols, hint, theme.fg_muted);
-            }
-        }
-
-        focused.then_some(caret).flatten()
-    }
-
-    /// Write the status bar: branch (in `diff.hunk`), ahead/behind (muted), the added/
-    /// removed totals (`diff.add`/`diff.del`), and an `esc` hint anchored right.
-    fn write_status_bar(&self, row: &mut [GridCell], cols: usize, theme: &Theme) {
+        labels: &mut Vec<ProseLabel>,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        top: f32,
+    ) {
+        let theme = ctx.theme;
         let branch = self.status.branch.as_deref().unwrap_or("(detached)");
-        write(row, 0, branch, theme.diff_hunk);
-        let mut col = branch.chars().count() + 3;
+        let mut x = ctx.cx;
+        push_row(
+            labels,
+            measure,
+            &format!("\u{2442} {branch}"),
+            FontRole::Mono,
+            theme.diff_hunk,
+            x,
+            top,
+            STATUS_H,
+            ctx.scale,
+        );
+        x += measure.width(&format!("\u{2442} {branch}"), FontRole::Mono, None) + 10.0 * ctx.scale;
         if self.status.ahead > 0 || self.status.behind > 0 {
-            let text = format!("ahead {} behind {}", self.status.ahead, self.status.behind);
-            write(row, col, &text, theme.fg_muted);
-            col += text.chars().count();
+            let text = format!(
+                "\u{2191}{} \u{2193}{}",
+                self.status.ahead, self.status.behind
+            );
+            push_row(
+                labels,
+                measure,
+                &text,
+                FontRole::Mono,
+                theme.fg_muted,
+                x,
+                top,
+                STATUS_H,
+                ctx.scale,
+            );
         }
-        let _ = col;
         let (added, removed): (u32, u32) = self
             .status
             .files
             .iter()
             .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
-        // Right-anchored, right to left: esc, then -removed, then +added.
-        let mut end = cols;
-        end = write_before(row, end, "esc", theme.fg_muted);
-        end = write_before(row, end, &format!("-{removed}"), theme.diff_del);
-        write_before(row, end, &format!("+{added}"), theme.diff_add);
+        // Right-anchored right-to-left: esc, then -removed, then +added.
+        let mut end = ctx.cr;
+        end = push_right(
+            labels,
+            measure,
+            "esc",
+            FontRole::Caption,
+            theme.fg_muted,
+            end,
+            top,
+            STATUS_H,
+            ctx.scale,
+        ) - 10.0 * ctx.scale;
+        end = push_right(
+            labels,
+            measure,
+            &format!("-{removed}"),
+            FontRole::Mono,
+            theme.diff_del,
+            end,
+            top,
+            STATUS_H,
+            ctx.scale,
+        ) - 8.0 * ctx.scale;
+        push_right(
+            labels,
+            measure,
+            &format!("+{added}"),
+            FontRole::Mono,
+            theme.diff_add,
+            end,
+            top,
+            STATUS_H,
+            ctx.scale,
+        );
     }
 
-    /// Render the selected file's flattened diff into `grid[body_start..]`, recording the
-    /// add/del/hunk grid rows into `view`. Returns the clamped scroll actually used. Shows
-    /// a placeholder when there is nothing to diff (untracked / binary / unchanged).
-    fn write_diff_body(
+    /// The changed-file list (windowed to keep the selection visible): each row's stage
+    /// checkbox, status letter, path (Plex, clipped before the counts), and `+add`/`-del`
+    /// counts, the selected row behind an `accent.subtle` fill. Returns the y below the list.
+    fn push_file_list(
         &self,
-        grid: &mut [Vec<GridCell>],
-        body_start: usize,
-        body_rows: usize,
-        cols: usize,
-        theme: &Theme,
-        view: &mut View,
+        quads: &mut Vec<ChromeQuad>,
+        labels: &mut Vec<ProseLabel>,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        top: f32,
+        bottom: f32,
+    ) -> f32 {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let row_h = FILE_ROW_H * scale;
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "small non-negative count"
+        )]
+        let capacity =
+            (((bottom - top) * 0.45 / row_h).floor().max(1.0) as usize).min(FILE_ROWS_MAX);
+        let visible = self.status.files.len().min(capacity);
+        let offset = scroll_window(self.status.files.len(), visible, self.selected);
+        let mut y = top;
+        for slot in 0..visible {
+            let index = offset + slot;
+            let Some(file) = self.status.files.get(index) else {
+                break;
+            };
+            let selected = index == self.selected;
+            if selected {
+                quads.push(ChromeQuad::tint(
+                    PxRect {
+                        x: ctx.panel.x,
+                        y,
+                        w: ctx.panel.w,
+                        h: row_h,
+                    },
+                    theme.accent,
+                    DIFF_BG_ALPHA,
+                    0.0,
+                ));
+            }
+            push_file_row(labels, measure, ctx, file, selected, y);
+            y += row_h;
+        }
+        y
+    }
+
+    /// The selected file's diff: a header (path + counts), then the flattened body scrolled
+    /// into the space above the commit band, with add/del/hunk backgrounds, the focused-hunk
+    /// fill + stage hint, and `mono` code. Returns the clamped scroll used.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the visible-row count + slot index are small, non-negative values"
+    )]
+    fn push_diff(
+        &self,
+        quads: &mut Vec<ChromeQuad>,
+        labels: &mut Vec<ProseLabel>,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        top: f32,
+        bottom: f32,
     ) -> usize {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let mut y = top + 6.0 * scale;
+        if let Some(file) = self.selected_file() {
+            let (added, removed) = self.diff.stats();
+            push_row(
+                labels,
+                measure,
+                &file.path.to_string_lossy(),
+                FontRole::Label,
+                theme.fg_secondary,
+                ctx.cx,
+                y,
+                DIFF_HEADER_H,
+                scale,
+            );
+            push_counts(labels, measure, ctx, added, removed, y, DIFF_HEADER_H);
+        }
+        y += DIFF_HEADER_H * scale;
+        let body_top = y;
+        let row_h = DIFF_ROW_H * scale;
+        let body_rows = ((bottom - body_top) / row_h).floor().max(0.0) as usize;
         if body_rows == 0 {
             return 0;
         }
@@ -563,42 +652,187 @@ impl GitDock {
                 Some(FileStatus::Untracked) => "Untracked file",
                 _ => "No textual changes",
             };
-            write(&mut grid[body_start], 0, note, theme.fg_muted);
+            push_row(
+                labels,
+                measure,
+                note,
+                FontRole::Caption,
+                theme.fg_muted,
+                ctx.cx,
+                body_top,
+                DIFF_ROW_H,
+                scale,
+            );
             return 0;
         }
-        let max_scroll = lines.len().saturating_sub(body_rows);
-        let scroll = self.diff_scroll.min(max_scroll);
-        for (visible, line) in lines.iter().skip(scroll).take(body_rows).enumerate() {
-            let row = body_start + visible;
-            match line.kind {
-                DiffRowKind::Hunk => {
-                    view.hunk_rows.push(row);
-                    write(&mut grid[row], 0, &line.text, theme.diff_hunk);
-                    // Mark the focused hunk + show its stage/unstage affordance (`⌘↵`).
-                    if line.hunk_index == Some(self.focused_hunk) {
-                        view.focused_hunk_row = Some(row);
-                        let hint = if self.diff_is_staged {
-                            "unstage \u{2318}\u{21a9}"
-                        } else {
-                            "stage \u{2318}\u{21a9}"
-                        };
-                        write_before(&mut grid[row], cols, hint, theme.accent);
-                    }
-                }
-                DiffRowKind::Add => {
-                    view.add_rows.push(row);
-                    diff_line(&mut grid[row], cols, line, theme.diff_add, theme);
-                }
-                DiffRowKind::Del => {
-                    view.del_rows.push(row);
-                    diff_line(&mut grid[row], cols, line, theme.diff_del, theme);
-                }
-                DiffRowKind::Context => {
-                    diff_line(&mut grid[row], cols, line, theme.fg_secondary, theme);
-                }
-            }
+        let scroll = self.diff_scroll.min(lines.len().saturating_sub(body_rows));
+        let gutter_w = measure.width(&"0".repeat(GUTTER_CHARS), FontRole::Mono, None);
+        for (i, line) in lines.iter().skip(scroll).take(body_rows).enumerate() {
+            let ry = body_top + i as f32 * row_h;
+            push_diff_line(
+                quads,
+                labels,
+                measure,
+                ctx,
+                line,
+                ry,
+                row_h,
+                gutter_w,
+                self.diff_is_staged,
+                line.hunk_index == Some(self.focused_hunk),
+            );
         }
         scroll
+    }
+
+    /// The commit box at the foot: a divider, the `> message` input (with an accent caret when
+    /// focused), and a status line (the just-committed Undo hint, or the staged count + hint).
+    fn push_commit(
+        &self,
+        quads: &mut Vec<ChromeQuad>,
+        labels: &mut Vec<ProseLabel>,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        top: f32,
+    ) {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let focused = self.focus == Focus::Commit;
+        quads.push(ChromeQuad::fill(
+            PxRect {
+                x: ctx.panel.x,
+                y: top,
+                w: ctx.panel.w,
+                h: scale.max(1.0),
+            },
+            theme.border,
+        ));
+        // Message input.
+        let iy = top + 10.0 * scale;
+        let prompt_fg = if focused {
+            theme.accent
+        } else {
+            theme.fg_muted
+        };
+        push_row(
+            labels,
+            measure,
+            "\u{203a}",
+            FontRole::Mono,
+            prompt_fg,
+            ctx.cx,
+            iy,
+            COMMIT_ROW_H,
+            scale,
+        );
+        let msg_x = ctx.cx + measure.width("\u{203a} ", FontRole::Mono, None);
+        if self.message.is_empty() && !focused {
+            push_row(
+                labels,
+                measure,
+                "commit message",
+                FontRole::Body,
+                theme.fg_muted,
+                msg_x,
+                iy,
+                COMMIT_ROW_H,
+                scale,
+            );
+        } else {
+            push_row(
+                labels,
+                measure,
+                &self.message,
+                FontRole::Body,
+                theme.fg_primary,
+                msg_x,
+                iy,
+                COMMIT_ROW_H,
+                scale,
+            );
+        }
+        if focused {
+            let caret_x = msg_x + measure.width(&self.message, FontRole::Body, None);
+            let line_h = measure.line_height(FontRole::Body);
+            quads.push(ChromeQuad::fill(
+                PxRect {
+                    x: caret_x,
+                    y: iy + (COMMIT_ROW_H * scale - line_h) * 0.5,
+                    w: (2.0 * scale).max(1.0),
+                    h: line_h,
+                },
+                theme.accent,
+            ));
+        }
+        self.push_commit_status(labels, ctx, measure, iy + COMMIT_ROW_H * scale, focused);
+    }
+
+    /// The commit box's status line: the just-committed Undo hint, or the staged count + a
+    /// context hint.
+    fn push_commit_status(
+        &self,
+        labels: &mut Vec<ProseLabel>,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        sy: f32,
+        focused: bool,
+    ) {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        if let Some(sha) = &self.last_commit {
+            push_row(
+                labels,
+                measure,
+                &format!("committed {sha}"),
+                FontRole::Mono,
+                theme.diff_add,
+                ctx.cx,
+                sy,
+                COMMIT_ROW_H,
+                scale,
+            );
+            push_right(
+                labels,
+                measure,
+                "u undo",
+                FontRole::Caption,
+                theme.fg_muted,
+                ctx.cr,
+                sy,
+                COMMIT_ROW_H,
+                scale,
+            );
+        } else {
+            push_row(
+                labels,
+                measure,
+                &format!("{} staged", self.staged_count()),
+                FontRole::Caption,
+                theme.fg_muted,
+                ctx.cx,
+                sy,
+                COMMIT_ROW_H,
+                scale,
+            );
+            let hint = if focused {
+                if self.can_commit() {
+                    "enter commit  esc back"
+                } else {
+                    "esc back"
+                }
+            } else {
+                "tab to write a message"
+            };
+            push_right(
+                labels,
+                measure,
+                hint,
+                FontRole::Caption,
+                theme.fg_muted,
+                ctx.cr,
+                sy,
+                COMMIT_ROW_H,
+                scale,
+            );
+        }
     }
 
     /// Flatten the selected file's [`FileDiff`] into display lines (a header line per
@@ -647,41 +881,24 @@ impl Default for GitDock {
     }
 }
 
-/// The rendered dock grid plus the renderer's row metadata.
-pub(crate) struct View {
-    /// The dock's lines as a grid of UI-colored cells.
-    pub(crate) rows: Vec<Vec<GridCell>>,
-    /// Grid row to draw the `accent.subtle` highlight quad on: the selected file, or the
-    /// `Init repo` button in the no-repo empty state.
-    pub(crate) selected_file_row: Option<usize>,
-    /// Grid rows that are diff additions (for the `diff.add` background quads).
-    pub(crate) add_rows: Vec<usize>,
-    /// Grid rows that are diff deletions (for the `diff.del` background quads).
-    pub(crate) del_rows: Vec<usize>,
-    /// Grid rows that are `@@` hunk headers (for the `diff.hunk` background quads).
-    pub(crate) hunk_rows: Vec<usize>,
-    /// Grid row of the focused hunk's header (for the `accent.subtle` highlight quad).
-    pub(crate) focused_hunk_row: Option<usize>,
+/// The dock's proportional display list: the content quads (diff backgrounds, selection /
+/// hunk fills, commit caret) + the positioned labels, and the clamped diff scroll used.
+pub(crate) struct Paint {
+    /// The content quads over the dock frame.
+    pub(crate) quads: Vec<ChromeQuad>,
+    /// The positioned proportional text labels.
+    pub(crate) labels: Vec<ProseLabel>,
     /// The clamped diff scroll actually used (the binary writes it back).
     pub(crate) diff_scroll: usize,
-    /// The commit-message caret `(column, row)`, when the commit box has focus.
-    pub(crate) caret: Option<(usize, usize)>,
 }
 
-impl View {
-    /// A view carrying just a grid (empty / error / clean states have no highlights).
-    fn empty(rows: Vec<Vec<GridCell>>) -> Self {
-        Self {
-            rows,
-            selected_file_row: None,
-            add_rows: Vec::new(),
-            del_rows: Vec::new(),
-            hunk_rows: Vec::new(),
-            focused_hunk_row: None,
-            diff_scroll: 0,
-            caret: None,
-        }
-    }
+/// Shared geometry for the dock builders: the panel, the content left/right x, scale, theme.
+struct GCtx<'a> {
+    panel: PxRect,
+    cx: f32,
+    cr: f32,
+    scale: f32,
+    theme: &'a Theme,
 }
 
 /// One flattened diff display line.
@@ -715,144 +932,285 @@ fn scroll_window(len: usize, visible: usize, anchor: usize) -> usize {
     anchor.saturating_sub(visible / 2).min(len - visible)
 }
 
-/// Write one file row: the stage checkbox, the status letter (colored by kind), the
-/// path, and its `+add`/`-del` counts. The selected row's path is drawn in the primary
-/// color; a staged file shows a ticked checkbox.
-fn file_row(row: &mut [GridCell], cols: usize, file: &ChangedFile, selected: bool, theme: &Theme) {
-    // `[x]` when anything is staged, `[ ]` otherwise (the tick in `diff.add`).
-    write(row, FILE_CHECK_COL, "[", theme.fg_muted);
-    write(
-        row,
-        FILE_CHECK_COL + 1,
-        if file.staged { "x" } else { " " },
-        theme.diff_add,
+/// Push one file row: the stage checkbox (mono), status letter (mono, colored by kind), the
+/// path (Plex, clipped before the counts), and its `+add`/`-del` counts (mono).
+fn push_file_row(
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    ctx: &GCtx,
+    file: &ChangedFile,
+    selected: bool,
+    top: f32,
+) {
+    let (scale, theme) = (ctx.scale, ctx.theme);
+    let mut x = ctx.cx;
+    let check = if file.staged { "[x]" } else { "[ ]" };
+    let check_fg = if file.staged {
+        theme.diff_add
+    } else {
+        theme.fg_muted
+    };
+    push_row(
+        labels,
+        measure,
+        check,
+        FontRole::Mono,
+        check_fg,
+        x,
+        top,
+        FILE_ROW_H,
+        scale,
     );
-    write(row, FILE_CHECK_COL + 2, "]", theme.fg_muted);
-
+    x += measure.width("[x] ", FontRole::Mono, None);
     let letter_fg = match file.status {
         FileStatus::Added | FileStatus::Untracked => theme.diff_add,
         FileStatus::Deleted => theme.diff_del,
         FileStatus::Modified | FileStatus::Renamed | FileStatus::Copied => theme.diff_hunk,
         FileStatus::TypeChange | FileStatus::Unmerged => theme.fg_secondary,
     };
-    write(
-        row,
-        FILE_LETTER_COL,
+    push_row(
+        labels,
+        measure,
         &file.status.code().to_string(),
+        FontRole::Mono,
         letter_fg,
+        x,
+        top,
+        FILE_ROW_H,
+        scale,
     );
-
+    x += measure.width("M  ", FontRole::Mono, None);
+    // Counts right-anchored; the path clips before them.
+    let counts_left = push_counts(
+        labels,
+        measure,
+        ctx,
+        file.added,
+        file.removed,
+        top,
+        FILE_ROW_H,
+    );
     let name_fg = if selected {
         theme.fg_primary
     } else {
         theme.fg_secondary
     };
-    // The counts are right-anchored; clip the path so it never runs under them.
-    let count_start = counts_start(cols, file.added, file.removed);
-    let path = file.path.to_string_lossy();
-    let max_path = count_start.saturating_sub(FILE_PATH_COL + 1);
-    write_clipped(row, FILE_PATH_COL, &path, max_path, name_fg);
-    write_counts(row, cols, file.added, file.removed, theme);
+    labels.push(ProseLabel {
+        text: file.path.to_string_lossy().into_owned(),
+        x,
+        y: top + (FILE_ROW_H * scale - measure.line_height(FontRole::Body)) * 0.5,
+        role: FontRole::Body,
+        color: name_fg,
+        weight: None,
+        max_w: (counts_left - 8.0 * scale - x).max(1.0),
+    });
 }
 
-/// Write one diff body line: the right-aligned gutter number, the sign, and the code
-/// text, in `fg` (context lines use a muted gutter).
-fn diff_line(row: &mut [GridCell], cols: usize, line: &DiffRow, fg: Srgb, theme: &Theme) {
-    if let Some(number) = line.gutter {
-        let gutter_fg = if line.sign == ' ' { theme.fg_muted } else { fg };
-        write(row, 0, &format!("{number:>GUTTER_COLS$}"), gutter_fg);
-    }
-    write(row, GUTTER_COLS + 1, &line.sign.to_string(), fg);
-    let max_text = cols.saturating_sub(DIFF_TEXT_COL);
-    write_clipped(row, DIFF_TEXT_COL, &line.text, max_text, fg);
-}
-
-/// The column where a right-anchored `+add -del` count pair begins.
-fn counts_start(cols: usize, added: u32, removed: u32) -> usize {
-    let del = format!("-{removed}");
-    let add = format!("+{added}");
-    // ` +add -del ` occupies: 1 margin + add + 1 gap + del.
-    cols.saturating_sub(1 + add.chars().count() + 1 + del.chars().count())
-}
-
-/// Write a right-anchored `+add -del` count pair (add in `diff.add`, del in `diff.del`).
-fn write_counts(row: &mut [GridCell], cols: usize, added: u32, removed: u32, theme: &Theme) {
-    let del = format!("-{removed}");
-    let del_start = cols.saturating_sub(1 + del.chars().count());
-    write(row, del_start, &del, theme.diff_del);
-    let add = format!("+{added}");
-    let add_start = del_start.saturating_sub(1 + add.chars().count());
-    write(row, add_start, &add, theme.diff_add);
-}
-
-/// One UI cell: a character in `fg`, no background or attributes.
-fn cell(c: char, fg: Srgb) -> GridCell {
-    GridCell {
-        c,
-        fg,
-        bg: None,
-        bold: false,
-        italic: false,
-        underline: false,
-    }
-}
-
-/// A blank row of `cols` spaces.
-fn blank_row(cols: usize, fg: Srgb) -> Vec<GridCell> {
-    vec![cell(' ', fg); cols]
-}
-
-/// Overwrite `text` into `row` starting at `col`, clipped to the row width.
-fn write(row: &mut [GridCell], col: usize, text: &str, fg: Srgb) {
-    for (i, ch) in text.chars().enumerate() {
-        if let Some(slot) = row.get_mut(col + i) {
-            *slot = cell(ch, fg);
+/// Push one diff body line: the add/del/hunk background (+ focused-hunk fill), then the
+/// content - a hunk header (mono, `diff.hunk`, with a stage/unstage hint when focused) or a
+/// body line (right-aligned mono gutter + mono code, colored by kind).
+#[allow(clippy::too_many_arguments, reason = "one focused diff-line builder")]
+fn push_diff_line(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    ctx: &GCtx,
+    line: &DiffRow,
+    top: f32,
+    row_h: f32,
+    gutter_w: f32,
+    staged: bool,
+    focused_hunk: bool,
+) {
+    let (scale, theme, panel) = (ctx.scale, ctx.theme, ctx.panel);
+    let full = PxRect {
+        x: panel.x,
+        y: top,
+        w: panel.w,
+        h: row_h,
+    };
+    if line.kind == DiffRowKind::Hunk {
+        quads.push(ChromeQuad::tint(full, theme.diff_hunk, HUNK_BG_ALPHA, 0.0));
+        if focused_hunk {
+            quads.push(ChromeQuad::tint(full, theme.accent, DIFF_BG_ALPHA, 0.0));
         }
-    }
-}
-
-/// Like [`write()`], but truncate `text` to at most `max` cells first.
-fn write_clipped(row: &mut [GridCell], col: usize, text: &str, max: usize, fg: Srgb) {
-    if max == 0 {
-        return;
-    }
-    if text.chars().count() <= max {
-        write(row, col, text, fg);
+        let role_h = DIFF_ROW_H;
+        push_row(
+            labels,
+            measure,
+            &line.text,
+            FontRole::Mono,
+            theme.diff_hunk,
+            ctx.cx,
+            top,
+            role_h,
+            scale,
+        );
+        if focused_hunk {
+            let hint = if staged {
+                "unstage \u{2318}\u{21a9}"
+            } else {
+                "stage \u{2318}\u{21a9}"
+            };
+            push_right(
+                labels,
+                measure,
+                hint,
+                FontRole::Micro,
+                theme.accent,
+                ctx.cr,
+                top,
+                role_h,
+                scale,
+            );
+        }
     } else {
-        let clipped: String = text.chars().take(max).collect();
-        write(row, col, &clipped, fg);
+        let fg = match line.kind {
+            DiffRowKind::Add => theme.diff_add,
+            DiffRowKind::Del => theme.diff_del,
+            _ => theme.fg_secondary,
+        };
+        let alpha_token = match line.kind {
+            DiffRowKind::Add => Some(theme.diff_add),
+            DiffRowKind::Del => Some(theme.diff_del),
+            _ => None,
+        };
+        if let Some(bg) = alpha_token {
+            quads.push(ChromeQuad::tint(full, bg, DIFF_BG_ALPHA, 0.0));
+        }
+        if let Some(number) = line.gutter {
+            let gutter_fg = if line.sign == ' ' { theme.fg_muted } else { fg };
+            push_right(
+                labels,
+                measure,
+                &number.to_string(),
+                FontRole::Mono,
+                gutter_fg,
+                ctx.cx + gutter_w,
+                top,
+                DIFF_ROW_H,
+                scale,
+            );
+        }
+        let code_x = ctx.cx + gutter_w + measure.width("  ", FontRole::Mono, None);
+        let code = format!("{} {}", line.sign, line.text);
+        labels.push(ProseLabel {
+            text: code,
+            x: code_x,
+            y: top + (row_h - measure.line_height(FontRole::Mono)) * 0.5,
+            role: FontRole::Mono,
+            color: fg,
+            weight: None,
+            max_w: (ctx.cr - code_x).max(1.0),
+        });
     }
 }
 
-/// Write `text` so its last cell sits just before `end`, returning the column one cell
-/// before it starts (for chaining right-anchored segments right to left).
-fn write_before(row: &mut [GridCell], end: usize, text: &str, fg: Srgb) -> usize {
-    let len = text.chars().count();
-    let start = end.saturating_sub(len + 1); // +1 leaves a one-cell margin/gap
-    write(row, start, text, fg);
-    start
+/// Push a right-anchored `+add -del` count pair (add in `diff.add`, del in `diff.del`);
+/// returns the left edge of the pair (so a path can clip before it).
+fn push_counts(
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    ctx: &GCtx,
+    added: u32,
+    removed: u32,
+    top: f32,
+    row_h: f32,
+) -> f32 {
+    let mut end = push_right(
+        labels,
+        measure,
+        &format!("-{removed}"),
+        FontRole::Mono,
+        ctx.theme.diff_del,
+        ctx.cr,
+        top,
+        row_h,
+        ctx.scale,
+    );
+    end = push_right(
+        labels,
+        measure,
+        &format!("+{added}"),
+        FontRole::Mono,
+        ctx.theme.diff_add,
+        end - 8.0 * ctx.scale,
+        top,
+        row_h,
+        ctx.scale,
+    );
+    end
 }
 
-/// Write `text` centered on a single `row` of `cols`.
-fn write_centered(row: &mut [GridCell], cols: usize, text: &str, fg: Srgb) {
-    let start = cols.saturating_sub(text.chars().count()) / 2;
-    write(row, start, text, fg);
+/// Push one left-anchored label vertically centered in a row of `row_h` logical px.
+#[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
+fn push_row(
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    x: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) {
+    let line_h = measure.line_height(role);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x,
+        y: top + (row_h * scale - line_h) * 0.5,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
 }
 
-/// Write `text` centered on the middle row of `grid`.
-fn center(grid: &mut [Vec<GridCell>], text: &str, fg: Srgb) {
-    if grid.is_empty() {
-        return;
-    }
-    let mid = grid.len() / 2;
-    let cols = grid[mid].len();
-    write_centered(&mut grid[mid], cols, text, fg);
+/// Push a right-anchored label ending at `right`, vertically centered; returns its left edge.
+#[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
+fn push_right(
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    right: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) -> f32 {
+    let x = right - measure.width(text, role, None);
+    push_row(labels, measure, text, role, color, x, top, row_h, scale);
+    x
+}
+
+/// Push a label horizontally centered in `panel` at physical `top`.
+fn push_centered(
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    panel: PxRect,
+    top: f32,
+) {
+    let w = measure.width(text, role, None);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x: panel.x + (panel.w - w) * 0.5,
+        y: top,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
 }
 
 #[cfg(test)]
 mod tests {
-    use super::GitDock;
-    use skelly_render::Theme;
+    use super::{GitDock, Paint};
+    use skelly_render::{PxRect, TextMeasure, Theme};
     use skelly_session::{ChangedFile, DiffLine, FileDiff, FileStatus, Hunk, LineKind, Status};
 
     fn changed(path: &str, status: FileStatus, added: u32, removed: u32) -> ChangedFile {
@@ -910,12 +1268,31 @@ mod tests {
         }
     }
 
-    fn row_text(row: &[skelly_render::GridCell]) -> String {
-        row.iter()
-            .map(|c| c.c)
-            .collect::<String>()
-            .trim_end()
-            .to_owned()
+    /// A tall dock panel (the 420px dock) at 2x DPI.
+    fn panel() -> PxRect {
+        PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: 420.0 * 2.0,
+            h: 900.0 * 2.0,
+        }
+    }
+
+    /// Build the dock's paint at a representative panel.
+    fn built(dock: &GitDock) -> Paint {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
+        dock.build(panel(), 2.0, &theme, &mut m)
+    }
+
+    /// The joined text of every label the dock builds (for content assertions).
+    fn texts(paint: &Paint) -> String {
+        paint
+            .labels
+            .iter()
+            .map(|l| l.text.clone())
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     /// A dock loaded with one file, staged iff `staged`.
@@ -946,7 +1323,6 @@ mod tests {
         dock.backspace();
         assert_eq!(dock.message(), "fi");
 
-        // A committed result clears the message, returns to the list, and keeps the SHA.
         dock.set_committed("abc1234".to_owned());
         assert_eq!(dock.message(), "");
         assert!(!dock.commit_focused());
@@ -957,7 +1333,7 @@ mod tests {
 
     #[test]
     fn commit_is_blocked_without_a_staged_file() {
-        let mut dock = dock_with_one(false); // unstaged only
+        let mut dock = dock_with_one(false);
         dock.focus_commit();
         for c in "msg".chars() {
             dock.push_char(c);
@@ -966,104 +1342,87 @@ mod tests {
     }
 
     #[test]
-    fn view_renders_the_commit_band_with_a_caret_when_focused() {
+    fn build_renders_the_commit_band_with_a_caret_when_focused() {
         let theme = Theme::resolve("ossein-dark");
         let mut dock = dock_with_one(true);
         dock.focus_commit();
         for c in "hi".chars() {
             dock.push_char(c);
         }
-        let view = dock.view(46, 24, &theme);
-        assert!(
-            view.caret.is_some(),
-            "the caret shows when the box has focus"
-        );
-        let joined = view
-            .rows
-            .iter()
-            .map(|r| row_text(r))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined.contains("> hi"), "the message input line");
+        let paint = built(&dock);
+        let joined = texts(&paint);
+        assert!(joined.contains("hi"), "the message input line");
         assert!(joined.contains("1 staged"), "the staged-count status line");
+        // The caret (a thin accent bar) shows when the box has focus.
+        assert!(
+            paint
+                .quads
+                .iter()
+                .any(|q| (q.alpha - 1.0).abs() < 1e-6 && q.color == theme.accent),
+            "the commit caret"
+        );
     }
 
     #[test]
     fn no_repo_shows_the_empty_state_with_an_init_button() {
-        let theme = Theme::resolve("ossein-dark");
         let dock = GitDock::new(); // repo_present is false until loaded
         assert!(dock.no_repo());
-        let view = dock.view(46, 20, &theme);
-        let joined = view
-            .rows
-            .iter()
-            .map(|r| row_text(r))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let paint = built(&dock);
+        let joined = texts(&paint);
         assert!(joined.contains("No repository here"));
-        // The Init button is shown one row below the message and carries the accent
-        // highlight (so Enter has a visible target).
         assert!(joined.contains("Init repo"));
-        let init_row = view.selected_file_row.expect("init button is highlighted");
-        assert!(row_text(&view.rows[init_row]).contains("Init repo"));
+        // The Init button has an accent highlight (so Enter has a visible target).
+        assert!(!paint.quads.is_empty(), "init button highlight");
     }
 
     #[test]
     fn clean_tree_shows_the_branch_and_a_clean_note() {
-        let theme = Theme::resolve("ossein-dark");
         let mut dock = GitDock::new();
         dock.load(Status {
             branch: Some("main".to_owned()),
             ..Status::default()
         });
-        let view = dock.view(46, 20, &theme);
-        let joined = view
-            .rows
-            .iter()
-            .map(|r| row_text(r))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let joined = texts(&built(&dock));
         assert!(joined.contains("main"));
         assert!(joined.contains("Working tree clean"));
     }
 
     #[test]
     fn status_bar_shows_branch_ahead_behind_and_totals() {
-        let theme = Theme::resolve("ossein-dark");
         let mut dock = GitDock::new();
         dock.load(sample_status());
-        let view = dock.view(60, 30, &theme);
-        let status = row_text(&view.rows[0]);
-        assert!(status.starts_with("main"));
-        assert!(status.contains("ahead 2 behind 1"));
+        let joined = texts(&built(&dock));
+        assert!(joined.contains("main"));
+        assert!(joined.contains("\u{2191}2 \u{2193}1"), "ahead/behind");
         // Totals: 42+80+0 added, 11+0+34 removed.
-        assert!(status.contains("+122"));
-        assert!(status.contains("-45"));
-        assert!(status.contains("esc"));
+        assert!(joined.contains("+122"));
+        assert!(joined.contains("-45"));
+        assert!(joined.contains("esc"));
     }
 
     #[test]
-    fn file_list_marks_the_selected_row_and_lists_every_file() {
+    fn file_list_marks_the_selected_file_and_lists_every_file() {
         let theme = Theme::resolve("ossein-dark");
         let mut dock = GitDock::new();
         dock.load(sample_status());
-        let view = dock.view(60, 30, &theme);
-        assert_eq!(view.selected_file_row, Some(super::FILE_START));
-        let joined = view
-            .rows
-            .iter()
-            .map(|r| row_text(r))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let paint = built(&dock);
+        let joined = texts(&paint);
         assert!(joined.contains("src/pane/tree.rs"));
         assert!(joined.contains("src/session/timeline.rs"));
         assert!(joined.contains("old/legacy.rs"));
         assert!(joined.contains("CHANGED - 3"));
+        // The selected file sits behind an accent.subtle fill.
+        assert!(
+            paint
+                .quads
+                .iter()
+                .any(|q| q.color == theme.accent && (q.alpha - 0.14).abs() < 1e-6),
+            "selected-file fill"
+        );
     }
 
     #[test]
     fn file_rows_show_a_stage_checkbox_reflecting_the_staged_flag() {
-        let theme = Theme::resolve("ossein-dark");
         let mut dock = GitDock::new();
         let mut staged = changed("staged.rs", FileStatus::Modified, 1, 0);
         staged.staged = true;
@@ -1073,16 +1432,9 @@ mod tests {
             files: vec![staged, changed("unstaged.rs", FileStatus::Modified, 1, 0)],
             ..Status::default()
         });
-        let view = dock.view(60, 30, &theme);
-        // First file row is staged -> "[x]"; second is unstaged -> "[ ]".
-        assert_eq!(&row_text(&view.rows[super::FILE_START])[..3], "[x]");
-        assert_eq!(
-            &view.rows[super::FILE_START + 1]
-                .iter()
-                .map(|c| c.c)
-                .collect::<String>()[..3],
-            "[ ]"
-        );
+        let joined = texts(&built(&dock));
+        assert!(joined.contains("[x]"), "a staged file's ticked checkbox");
+        assert!(joined.contains("[ ]"), "an unstaged file's empty checkbox");
     }
 
     #[test]
@@ -1091,23 +1443,32 @@ mod tests {
         let mut dock = GitDock::new();
         dock.load(sample_status());
         dock.set_diff(sample_diff(), false);
-        let view = dock.view(60, 30, &theme);
-        assert_eq!(view.hunk_rows.len(), 1, "one hunk header");
-        assert_eq!(view.add_rows.len(), 1, "one addition");
-        assert_eq!(view.del_rows.len(), 1, "one deletion");
+        let paint = built(&dock);
+        let count = |color, alpha: f32| {
+            paint
+                .quads
+                .iter()
+                .filter(|q| q.color == color && (q.alpha - alpha).abs() < 1e-6)
+                .count()
+        };
+        assert_eq!(
+            count(theme.diff_hunk, 0.08),
+            1,
+            "one hunk-header background"
+        );
+        assert_eq!(count(theme.diff_add, 0.14), 1, "one addition background");
+        assert_eq!(count(theme.diff_del, 0.14), 1, "one deletion background");
+        let joined = texts(&paint);
         // The hunk header reconstructs its counts (1 context + 1 del = 2 old; 1+1 = 2 new).
-        let hunk_row = view.hunk_rows[0];
-        assert!(row_text(&view.rows[hunk_row]).contains("@@ -18,2 +18,2 @@ impl PaneTree"));
+        assert!(joined.contains("@@ -18,2 +18,2 @@ impl PaneTree"));
         // The first (only) hunk is focused, and its header shows the stage affordance.
-        assert_eq!(view.focused_hunk_row, Some(hunk_row));
-        assert!(row_text(&view.rows[hunk_row]).contains("stage"));
+        assert!(joined.contains("stage"));
     }
 
     #[test]
     fn focus_hunk_moves_between_hunks_and_reports_the_target() {
         let mut two = sample_diff();
-        // Give the diff a second hunk so there is something to move to.
-        two.hunks.push(skelly_session::Hunk {
+        two.hunks.push(Hunk {
             old_start: 40,
             new_start: 41,
             heading: String::new(),
@@ -1132,30 +1493,21 @@ mod tests {
             40,
             "moved to hunk 1"
         );
-        dock.focus_hunk(5); // clamps at the last hunk
+        dock.focus_hunk(5);
         assert_eq!(dock.focused_hunk().unwrap().old_start, 40);
-        dock.focus_hunk(-5); // clamps back to the first
+        dock.focus_hunk(-5);
         assert_eq!(dock.focused_hunk().unwrap().old_start, 18);
     }
 
     #[test]
     fn untracked_selection_shows_a_placeholder_not_an_empty_diff() {
-        let theme = Theme::resolve("ossein-dark");
         let mut dock = GitDock::new();
         dock.load(Status {
             branch: Some("main".to_owned()),
             files: vec![changed("new.txt", FileStatus::Untracked, 0, 0)],
             ..Status::default()
         });
-        // No diff set (untracked files have none).
-        let view = dock.view(46, 20, &theme);
-        let joined = view
-            .rows
-            .iter()
-            .map(|r| row_text(r))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined.contains("Untracked file"));
+        assert!(texts(&built(&dock)).contains("Untracked file"));
     }
 
     #[test]
@@ -1168,7 +1520,7 @@ mod tests {
             dock.selected_file().unwrap().path.to_string_lossy(),
             "src/session/timeline.rs"
         );
-        assert!(dock.move_selection(100)); // clamps to the last file
+        assert!(dock.move_selection(100));
         assert_eq!(
             dock.selected_file().unwrap().path.to_string_lossy(),
             "old/legacy.rs"
@@ -1178,14 +1530,12 @@ mod tests {
 
     #[test]
     fn diff_scroll_clamps_to_the_content_height() {
-        let theme = Theme::resolve("ossein-dark");
         let mut dock = GitDock::new();
         dock.load(sample_status());
         dock.set_diff(sample_diff(), false);
         dock.scroll_diff(1000); // far past the end
                                 // With plenty of rows the whole (3-line) diff fits, so the used scroll clamps to 0.
-        let view = dock.view(60, 40, &theme);
-        assert_eq!(view.diff_scroll, 0);
+        assert_eq!(built(&dock).diff_scroll, 0);
     }
 
     #[test]
@@ -1203,18 +1553,18 @@ mod tests {
         for _ in 0..30 {
             dock.move_selection(1);
         }
-        let view = dock.view(46, 24, &theme);
-        // The selected file (file30.rs) must appear and be highlighted somewhere on screen.
-        assert!(view.selected_file_row.is_some());
-        let joined = view
-            .rows
-            .iter()
-            .map(|r| row_text(r))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let paint = built(&dock);
+        // The selected file (file30.rs) must appear and be highlighted.
         assert!(
-            joined.contains("file30.rs"),
+            texts(&paint).contains("file30.rs"),
             "selected file scrolled into view"
+        );
+        assert!(
+            paint
+                .quads
+                .iter()
+                .any(|q| q.color == theme.accent && (q.alpha - 0.14).abs() < 1e-6),
+            "selection fill"
         );
     }
 }

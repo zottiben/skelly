@@ -65,23 +65,9 @@ impl ChromeLayer {
         self.text.set_default_fg(fg);
     }
 
-    /// Upload this layer's decorative `quads` and its monospace `text` (rows + position +
-    /// clip), and mark it active for the next frame. (Monospace surfaces; the sidebar uses
-    /// [`set_paint`](Self::set_paint).)
-    fn set(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        surface: (u32, u32),
-        quads: &[Quad],
-        text: PaneTextInput,
-    ) {
-        self.set_all(device, queue, surface, quads, &[text]);
-    }
-
-    /// Like [`set`](Self::set) but for a layer made of several independently positioned
-    /// text grids (e.g. one exit message per pane); active only when there is something
-    /// to draw.
+    /// A layer made of several independently positioned monospace text grids (the "shell
+    /// exited" scrims - one message per pane); active only when there is something to draw.
+    /// Proportional surfaces use [`set_paint`](Self::set_paint) instead.
     fn set_all(
         &mut self,
         device: &wgpu::Device,
@@ -464,19 +450,15 @@ impl Renderer {
             return;
         };
         let scale = self.gitdock.text.scale();
-        let (cell_w, cell_h, _) = self.gitdock.text.cell_metrics();
-        let quads = crate::cells::gitdock_quads(view, &self.theme, cell_w, cell_h, scale);
-        self.gitdock.set(
+        let mut quads = crate::cells::dock_frame_quads(view.panel, &self.theme, scale);
+        quads.extend(view.quads.iter().map(chrome_quad));
+        self.gitdock.set_paint(
             &self.device,
             &self.queue,
             (self.config.width, self.config.height),
             &quads,
-            PaneTextInput {
-                rows: view.rows,
-                left: view.text_origin.0,
-                top: view.text_origin.1,
-                clip: (view.panel.x, view.panel.y, view.panel.w, view.panel.h),
-            },
+            view.labels,
+            view.panel,
         );
     }
 
