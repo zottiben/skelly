@@ -115,6 +115,21 @@ impl Quad {
     }
 }
 
+/// Convert a binary-built [`ChromeQuad`](crate::ChromeQuad) (physical-px rect, a UI-token
+/// color at an alpha, an optional corner radius) into a GPU [`Quad`]. This is the paint
+/// primitive proportional chrome is drawn from: the sidebar (and, as they migrate, the
+/// other surfaces) hand the renderer a display list of these plus positioned prose labels.
+pub(crate) fn chrome_quad(q: &crate::ChromeQuad) -> Quad {
+    let mut color = q.color.to_linear();
+    color[3] = q.alpha;
+    let r = q.rect;
+    if q.radius > 0.0 {
+        Quad::rounded(r.x, r.y, r.w, r.h, color, q.radius)
+    } else {
+        Quad::new(r.x, r.y, r.w, r.h, color)
+    }
+}
+
 /// Alpha applied to the accent color for the (translucent) selection highlight.
 const SELECTION_ALPHA: f32 = 0.30;
 
@@ -326,60 +341,6 @@ pub(crate) fn logo_quads(
         disc(0.50, 0.42, 0.22, tint(theme.accent, opacity)),
         disc(0.84, 0.26, 0.26, tint(theme.fg_primary, opacity)),
     ]
-}
-
-/// Build the decorative quads for the left sidebar: the `bg.sidebar` panel fill (one step
-/// off `bg.base`, per the guide's token table), the active tab's `accent.subtle` fill + a
-/// 2px `accent` bar on its left edge, and a `border` divider down the right edge separating
-/// the sidebar from the pane area. Shared by the windowed [`Renderer`](crate::Renderer) and
-/// the headless capture.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "the active-row index into a short tab list is exact as f32"
-)]
-pub(crate) fn sidebar_quads(
-    view: &crate::SidebarView,
-    theme: &crate::theme::Theme,
-    _cell_w: f32,
-    cell_h: f32,
-    scale: f32,
-) -> Vec<Quad> {
-    let panel = view.panel;
-    let stroke = scale.max(1.0);
-    // The sidebar surface, distinct from the terminal's `bg.base` behind it.
-    let mut quads = vec![Quad::new(
-        panel.x,
-        panel.y,
-        panel.w,
-        panel.h,
-        theme.bg_sidebar.to_linear(),
-    )];
-    if let Some(row) = view.active_row {
-        let y = view.text_origin.1 + row as f32 * cell_h;
-        quads.push(Quad::new(
-            panel.x,
-            y,
-            panel.w,
-            cell_h,
-            theme.accent_subtle(),
-        ));
-        quads.push(Quad::new(
-            panel.x,
-            y,
-            (2.0 * scale).max(1.0),
-            cell_h,
-            theme.accent.to_linear(),
-        ));
-    }
-    // The divider on the sidebar's right edge (drawn last, over the active fill).
-    quads.push(Quad::new(
-        panel.x + panel.w - stroke,
-        panel.y,
-        stroke,
-        panel.h,
-        theme.border.to_linear(),
-    ));
-    quads
 }
 
 /// Build the decorative quads for the full-window settings view: the `bg.elevated`

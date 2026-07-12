@@ -12,13 +12,16 @@ use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use skelly_config::Appearance;
 
 use crate::cells::{
-    grid_quads, logo_quads, push_outline, scrim_quad, Quad, QuadLayer, LOGO_WATERMARK_OPACITY,
+    chrome_quad, grid_quads, logo_quads, push_outline, scrim_quad, Quad, QuadLayer,
+    LOGO_WATERMARK_OPACITY,
 };
 use crate::error::RenderError;
+use crate::prose::{ProseLabel, ProseLayer};
 use crate::text::{PaneTextInput, TextLayer};
 use crate::theme::Theme;
 use crate::{
-    DeadPaneView, GitDockView, OverlayView, PaneView, SettingsView, SidebarView, TimelineView,
+    DeadPaneView, GitDockView, OverlayView, PaneView, PxRect, SettingsView, SidebarView,
+    TimelineView,
 };
 
 /// One chrome layer drawn over the terminal with `LoadOp::Load`: a quad pass then a text
@@ -28,6 +31,9 @@ use crate::{
 struct ChromeLayer {
     quads: QuadLayer,
     text: TextLayer,
+    /// Proportional text for surfaces built in the guide's fonts (the sidebar today, the
+    /// other surfaces as they migrate). Empty for layers still drawn as a monospace grid.
+    prose: ProseLayer,
     active: bool,
 }
 
@@ -44,6 +50,7 @@ impl ChromeLayer {
         Self {
             quads: QuadLayer::new(device, format),
             text: TextLayer::new(device, queue, format, width, height, scale, appearance),
+            prose: ProseLayer::new(device, queue, format, scale_f32(scale)),
             active: false,
         }
     }
@@ -58,8 +65,9 @@ impl ChromeLayer {
         self.text.set_default_fg(fg);
     }
 
-    /// Upload this layer's decorative `quads` and its `text` (rows + position + clip), and
-    /// mark it active for the next frame.
+    /// Upload this layer's decorative `quads` and its monospace `text` (rows + position +
+    /// clip), and mark it active for the next frame. (Monospace surfaces; the sidebar uses
+    /// [`set_paint`](Self::set_paint).)
     fn set(
         &mut self,
         device: &wgpu::Device,
@@ -85,14 +93,35 @@ impl ChromeLayer {
         self.active = !texts.is_empty() || !quads.is_empty();
         self.quads.set(device, queue, surface.0, surface.1, quads);
         self.text.set_panes(texts);
+        self.prose.clear();
+    }
+
+    /// Upload a proportional-chrome display list: decorative `quads` plus positioned prose
+    /// `labels` clipped to `clip`. The monospace text is cleared (a paint layer never mixes
+    /// the two). Active whenever there is anything to draw.
+    fn set_paint(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface: (u32, u32),
+        quads: &[Quad],
+        labels: &[ProseLabel],
+        clip: PxRect,
+    ) {
+        self.active = !quads.is_empty() || !labels.is_empty();
+        self.quads.set(device, queue, surface.0, surface.1, quads);
+        self.text.set_panes(&[]);
+        self.prose.set_labels(labels, clip);
     }
 
     /// Hide the layer (nothing drawn next frame).
     fn clear(&mut self) {
         self.active = false;
+        self.prose.clear();
     }
 
-    /// Draw the layer over `view` (quads then text, both loading), when active.
+    /// Draw the layer over `view` (quads, then monospace text, then prose, all loading),
+    /// when active.
     fn draw(
         &mut self,
         device: &wgpu::Device,
@@ -106,8 +135,19 @@ impl ChromeLayer {
         }
         self.quads.draw(device, queue, view, None);
         self.text.draw(device, queue, view, width, height)?;
+        self.prose.draw(device, queue, view, width, height)?;
         Ok(())
     }
+}
+
+/// Narrow a DPI scale factor to `f32` for the prose layer (sub-pixel precision loss is
+/// irrelevant for glyph sizing, matching the terminal text layer).
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "scale-factor precision loss does not matter for glyph sizing"
+)]
+fn scale_f32(value: f64) -> f32 {
+    value as f32
 }
 
 /// Owns the GPU device and surface and presents painted frames.
@@ -394,27 +434,22 @@ impl Renderer {
     }
 
     /// Set the persistent left sidebar to draw next frame, or clear it with `None`
-    /// (hidden). Builds the active-tab highlight + right-edge divider quads; the tab
-    /// labels come baked into `sidebar.rows`. Drawn as base chrome beneath any overlay.
+    /// (hidden). Proportional chrome: the binary hands over the finished display list
+    /// (decorative `quads` + positioned prose `labels`); the renderer paints them clipped
+    /// to the panel. Drawn as base chrome beneath any overlay.
     pub fn set_sidebar(&mut self, sidebar: Option<&SidebarView>) {
         let Some(view) = sidebar else {
             self.sidebar.clear();
             return;
         };
-        let scale = self.sidebar.text.scale();
-        let (cell_w, cell_h, _) = self.sidebar.text.cell_metrics();
-        let quads = crate::cells::sidebar_quads(view, &self.theme, cell_w, cell_h, scale);
-        self.sidebar.set(
+        let quads: Vec<Quad> = view.quads.iter().map(chrome_quad).collect();
+        self.sidebar.set_paint(
             &self.device,
             &self.queue,
             (self.config.width, self.config.height),
             &quads,
-            PaneTextInput {
-                rows: view.rows,
-                left: view.text_origin.0,
-                top: view.text_origin.1,
-                clip: (view.panel.x, view.panel.y, view.panel.w, view.panel.h),
-            },
+            view.labels,
+            view.panel,
         );
     }
 

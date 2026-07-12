@@ -29,7 +29,7 @@ use skelly_config::Config;
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
 use skelly_render::{
     AnsiPalette, DeadPaneView, GitDockView, GridCell, OverlayView, PaneView, PxRect, Renderer,
-    SettingsView, SidebarView, Srgb, Theme, TimelineView,
+    SettingsView, SidebarView, Srgb, TextMeasure, Theme, TimelineView,
 };
 use skelly_session::{Actor, Repo, SessionEvent, ShadowWorktree};
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
@@ -55,13 +55,8 @@ const PANE_INSET: f32 = 6.0;
 const RESIZE_STEP: f32 = 0.04;
 /// Logical padding (px) inside the command palette panel.
 const PALETTE_PAD: f32 = 12.0;
-/// Logical inset (px) of the sidebar's text from the sidebar's top-left corner.
-const SIDEBAR_PAD: f32 = 12.0;
 /// Logical width (px) of the slim icon rail (`⇧⌘B`), per design §08 ("Icon rail 56px").
 const RAIL_WIDTH: f32 = 56.0;
-/// Logical horizontal inset (px) of the rail's centered content - smaller than
-/// `SIDEBAR_PAD` so a couple of glyphs fit inside 56px.
-const RAIL_PAD: f32 = 6.0;
 /// Logical inset (px) of the full-window settings view's text from the window edge.
 const SETTINGS_PAD: f32 = 20.0;
 /// Logical width (px) of the git diff dock - the guide's default (resizable 360-560 is a
@@ -196,6 +191,10 @@ struct App {
     settings: Settings,
     /// The persistent left sidebar (the tab list) state.
     sidebar: Sidebar,
+    /// The proportional-text measurer for laying out chrome (the sidebar, and the other
+    /// surfaces as they migrate) in the guide's fonts - GPU-free, so hit-testing and
+    /// rendering agree on glyph widths. Kept in step with the DPI scale.
+    measure: TextMeasure,
     /// The per-repo git diff dock (right dock) state.
     git_dock: GitDock,
     /// The session-timeline dock (right dock; mutually exclusive with the git dock).
@@ -268,6 +267,7 @@ impl App {
             palette: Palette::new(),
             settings: Settings::new(),
             sidebar,
+            measure: TextMeasure::new(1.0),
             git_dock: GitDock::new(),
             timeline: TimelineDock::new(),
             confirm: None,
@@ -576,11 +576,10 @@ impl App {
                 .collect();
             renderer.set_pane_overlays(&dead_views);
             match &sidebar {
-                Some(frame) => renderer.set_sidebar(Some(&SidebarView {
-                    panel: frame.panel,
-                    text_origin: frame.origin,
-                    rows: &frame.rows,
-                    active_row: frame.active_row,
+                Some(paint) => renderer.set_sidebar(Some(&SidebarView {
+                    panel: paint.panel,
+                    quads: &paint.quads,
+                    labels: &paint.labels,
                 })),
                 None => renderer.set_sidebar(None),
             }
@@ -725,47 +724,27 @@ impl App {
         }
     }
 
-    /// Lay out the left sidebar: a full-height panel of `sidebar.width`, its tab list
-    /// rendered in UI tokens and clipped to that width.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the sidebar cell width is a small, non-negative value"
-    )]
-    fn build_sidebar_frame(&self) -> SidebarFrame {
-        let (cell_w, _) = self.cell_size();
+    /// Lay out the left sidebar (design §08): a full-height panel of `sidebar.width` (or
+    /// the 56px rail), its tab list built as a proportional display list in the guide's
+    /// fonts + UI tokens and clipped to the panel.
+    fn build_sidebar_frame(&mut self) -> sidebar::Paint {
         let rail = self.sidebar.is_rail();
         let scale = scale32(self.scale);
-        // Narrower horizontal inset for the rail so its glyphs center inside 56px; the
-        // vertical inset stays `SIDEBAR_PAD` (matched by `sidebar_hit`'s `origin_y`).
-        let pad_x = if rail { RAIL_PAD } else { SIDEBAR_PAD } * scale;
-        let pad_y = SIDEBAR_PAD * scale;
-        let sidebar_w = self.sidebar_width_px();
-        let surface_h = dim_f32(self.size.1);
-
-        let cols = ((sidebar_w - 2.0 * pad_x) / cell_w).floor().max(1.0) as usize;
-        let max_rows = self.sidebar_max_rows();
-        let view = sidebar::view(
+        let panel = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: self.sidebar_width_px(),
+            h: dim_f32(self.size.1),
+        };
+        sidebar::build(
             self.tabs.len(),
             self.active,
-            cols,
-            max_rows,
+            panel,
             rail,
+            scale,
             &self.theme,
-        );
-
-        SidebarFrame {
-            panel: PxRect {
-                x: 0.0,
-                y: 0.0,
-                w: sidebar_w,
-                h: surface_h,
-            },
-            origin: (pad_x, pad_y),
-            rows: view.rows,
-            active_row: view.active_row,
-        }
+            &mut self.measure,
+        )
     }
 
     /// Lay out the settings view: a full-window panel, its nav + control grid rendered
@@ -1139,30 +1118,14 @@ impl App {
         if px >= self.sidebar_width_px() {
             return None;
         }
-        let (_, cell_h) = self.cell_size();
-        let origin_y = SIDEBAR_PAD * scale32(self.scale);
-        if py < origin_y {
-            return None;
-        }
-        let row = ((py - origin_y) / cell_h).floor() as usize;
-        sidebar::hit(self.tabs.len(), self.active, self.sidebar_max_rows(), row)
-    }
-
-    /// The number of grid rows the sidebar's tab list can occupy at the current window
-    /// height - the shared height budget that [`Self::build_sidebar_frame`] windows the tab
-    /// list into and [`Self::sidebar_hit`] maps clicks against, so the rendered rows and the
-    /// click map agree on where each tab is.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the row count is a small, non-negative value"
-    )]
-    fn sidebar_max_rows(&self) -> usize {
-        let (_, cell_h) = self.cell_size();
-        let pad_y = SIDEBAR_PAD * scale32(self.scale);
-        let surface_h = dim_f32(self.size.1);
-        ((surface_h - 2.0 * pad_y) / cell_h).floor().max(1.0) as usize
+        let panel_h = dim_f32(self.size.1);
+        sidebar::hit(
+            self.tabs.len(),
+            self.active,
+            panel_h,
+            scale32(self.scale),
+            py,
+        )
     }
 
     /// Copy the current selection to the clipboard.
@@ -2163,14 +2126,6 @@ struct ConfirmFrame {
     selected_row: Option<usize>,
 }
 
-/// Owned sidebar frame data the borrowed [`SidebarView`] points at.
-struct SidebarFrame {
-    panel: PxRect,
-    origin: (f32, f32),
-    rows: Vec<Vec<GridCell>>,
-    active_row: Option<usize>,
-}
-
 /// Owned settings-view frame data the borrowed [`SettingsView`] points at.
 struct SettingsFrame {
     panel: PxRect,
@@ -2302,6 +2257,7 @@ impl ApplicationHandler<Wakeup> for App {
 
         let size = window.inner_size();
         self.scale = window.scale_factor();
+        self.measure.set_scale(scale32(self.scale));
         self.size = (size.width, size.height);
         let renderer = Renderer::new(
             window.clone(),

@@ -82,6 +82,7 @@ impl TextLayer {
         appearance: &Appearance,
     ) -> Self {
         let mut font_system = FontSystem::new();
+        crate::fonts::load_bundled(font_system.db_mut());
         let swash_cache = SwashCache::new();
         let cache = Cache::new(device);
         let viewport = Viewport::new(device, &cache);
@@ -425,6 +426,7 @@ pub(crate) fn text_runs(rows: &[Vec<GridCell>]) -> Vec<Run> {
 #[must_use]
 pub fn measure_cell(appearance: &Appearance, scale_factor: f64) -> (f32, f32) {
     let mut font_system = FontSystem::new();
+    crate::fonts::load_bundled(font_system.db_mut());
     let scale = scale_to_f32(scale_factor);
     let font_px = f32::from(appearance.font_size) * scale;
     let line_px = font_px * appearance.line_height;

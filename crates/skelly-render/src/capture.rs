@@ -10,14 +10,15 @@
 use skelly_config::Appearance;
 
 use crate::cells::{
-    gitdock_quads as build_gitdock_quads, grid_quads, logo_quads,
+    chrome_quad, gitdock_quads as build_gitdock_quads, grid_quads, logo_quads,
     overlay_quads as build_overlay_quads, push_outline, scrim_quad,
-    settings_quads as build_settings_quads, sidebar_quads, timeline_quads as build_timeline_quads,
-    Quad, QuadLayer, LOGO_WATERMARK_OPACITY,
+    settings_quads as build_settings_quads, timeline_quads as build_timeline_quads, Quad,
+    QuadLayer, LOGO_WATERMARK_OPACITY,
 };
+use crate::prose::{ProseLabel, ProseLayer};
 use crate::text::{measure_cell, PaneTextInput, TextLayer};
 use crate::theme::{Rgba, Theme};
-use crate::{GitDockView, GridCell, OverlayView, PxRect, SettingsView, SidebarView, TimelineView};
+use crate::{ChromeQuad, GitDockView, GridCell, OverlayView, PxRect, SettingsView, TimelineView};
 
 /// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
@@ -107,16 +108,14 @@ pub struct CapturePane {
 }
 
 /// The left sidebar for [`capture_panes_rgba`], mirroring
-/// [`SidebarView`](crate::SidebarView) but owning its rows.
+/// [`SidebarView`](crate::SidebarView) but owning its display list (proportional chrome).
 pub struct CaptureSidebar {
     /// The sidebar rectangle (`x = 0`, full height), physical px.
     pub panel: PxRect,
-    /// Pixel position of the text grid's cell `(0, 0)` top-left.
-    pub text_origin: (f32, f32),
-    /// The sidebar text as a monospace grid (UI-token colored).
-    pub rows: Vec<Vec<GridCell>>,
-    /// Grid row of the active tab to highlight, if any.
-    pub active_row: Option<usize>,
+    /// The decorative quads (surface, active pill + bar, chips, divider), in draw order.
+    pub quads: Vec<ChromeQuad>,
+    /// The positioned proportional text labels.
+    pub labels: Vec<ProseLabel>,
 }
 
 /// The git diff dock for [`capture_panes_rgba`], mirroring
@@ -232,22 +231,16 @@ pub fn capture_panes_rgba(
             left: dp.text_origin.0,
             top: dp.text_origin.1,
             clip: (dp.rect.x, dp.rect.y, dp.rect.w, dp.rect.h),
+            prose: Vec::new(),
         })
         .collect();
-    let sidebar_scene = chrome.sidebar.map(|sb| {
-        let view = SidebarView {
-            panel: sb.panel,
-            text_origin: sb.text_origin,
-            rows: &sb.rows,
-            active_row: sb.active_row,
-        };
-        SidebarScene {
-            quads: sidebar_quads(&view, &theme, cell_w, cell_h, scale as f32),
-            rows: &sb.rows,
-            left: sb.text_origin.0,
-            top: sb.text_origin.1,
-            clip: (sb.panel.x, sb.panel.y, sb.panel.w, sb.panel.h),
-        }
+    let sidebar_scene = chrome.sidebar.map(|sb| SidebarScene {
+        quads: sb.quads.iter().map(chrome_quad).collect(),
+        rows: &[],
+        left: sb.panel.x,
+        top: sb.panel.y,
+        clip: (sb.panel.x, sb.panel.y, sb.panel.w, sb.panel.h),
+        prose: sb.labels.clone(),
     });
     let gitdock_scene = chrome.git_dock.map(|gd| {
         let view = GitDockView {
@@ -267,6 +260,7 @@ pub fn capture_panes_rgba(
             left: gd.text_origin.0,
             top: gd.text_origin.1,
             clip: (gd.panel.x, gd.panel.y, gd.panel.w, gd.panel.h),
+            prose: Vec::new(),
         }
     });
     let timeline_scene = chrome.timeline.map(|tl| {
@@ -283,6 +277,7 @@ pub fn capture_panes_rgba(
             left: tl.text_origin.0,
             top: tl.text_origin.1,
             clip: (tl.panel.x, tl.panel.y, tl.panel.w, tl.panel.h),
+            prose: Vec::new(),
         }
     });
     let overlay_scene = chrome.overlay.map(|ov| {
@@ -299,6 +294,7 @@ pub fn capture_panes_rgba(
             left: ov.text_origin.0,
             top: ov.text_origin.1,
             clip: (ov.panel.x, ov.panel.y, ov.panel.w, ov.panel.h),
+            prose: Vec::new(),
         }
     });
     pollster::block_on(capture_async(
@@ -438,6 +434,7 @@ pub fn capture_settings_rgba(
             settings.panel.w,
             settings.panel.h,
         ),
+        prose: Vec::new(),
     };
     pollster::block_on(capture_async(
         appearance,
@@ -467,6 +464,9 @@ struct Scene<'a> {
     left: f32,
     top: f32,
     clip: (f32, f32, f32, f32),
+    /// Proportional prose labels for a migrated surface (the sidebar); empty for
+    /// monospace-grid surfaces, which draw only `rows`.
+    prose: Vec<ProseLabel>,
 }
 
 /// The sidebar chrome scene (passes 3-4 in the windowed renderer).
@@ -526,6 +526,11 @@ where
 
     // The chrome load-pass pairs, in the windowed renderer's order: the sidebar
     // (passes 3-4) beneath the overlay (passes 5-6). Each loads over the terminal.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "DPI scale precision loss is irrelevant for glyph sizing"
+    )]
+    let scale_f32 = scale as f32;
     for scene in chrome {
         let mut chrome_quads = QuadLayer::new(&device, format);
         chrome_quads.set(&device, &queue, width, height, &scene.quads);
@@ -541,6 +546,24 @@ where
         chrome_text
             .draw(&device, &queue, &view, width, height)
             .expect("draw chrome text");
+        // Proportional chrome (the sidebar): draw its positioned labels on top, clipped to
+        // the surface panel - the same ProseLayer pass the windowed renderer uses.
+        if !scene.prose.is_empty() {
+            let (cx, cy, cw, ch) = scene.clip;
+            let mut prose = ProseLayer::new(&device, &queue, format, scale_f32);
+            prose.set_labels(
+                &scene.prose,
+                PxRect {
+                    x: cx,
+                    y: cy,
+                    w: cw,
+                    h: ch,
+                },
+            );
+            prose
+                .draw(&device, &queue, &view, width, height)
+                .expect("draw chrome prose");
+        }
     }
 
     read_texture(&device, &queue, &texture, width, height)

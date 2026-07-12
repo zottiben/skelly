@@ -20,6 +20,8 @@ mod ansi;
 mod capture;
 mod cells;
 mod error;
+mod fonts;
+mod prose;
 mod renderer;
 mod text;
 mod theme;
@@ -31,6 +33,8 @@ pub use capture::{
     Chrome,
 };
 pub use error::RenderError;
+pub use fonts::FontRole;
+pub use prose::{ProseLabel, TextMeasure};
 pub use renderer::Renderer;
 pub use text::{measure_cell, TextLayer};
 pub use theme::{Rgba, Srgb, Theme};
@@ -46,6 +50,59 @@ pub struct PxRect {
     pub w: f32,
     /// Height.
     pub h: f32,
+}
+
+/// One decorative chrome quad the binary hands the renderer to paint: a physical-pixel
+/// rectangle, a resolved UI-token color at `alpha`, and an optional corner `radius`
+/// (physical px; `0` = a sharp fill). This is how proportional chrome expresses its
+/// surfaces, pills, bars, and dividers - the binary owns the layout, the renderer just
+/// paints where told (the same split as [`ProseLabel`] for text).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ChromeQuad {
+    /// The rectangle to fill, physical px.
+    pub rect: PxRect,
+    /// The fill color (a resolved UI token; theme-correct).
+    pub color: Srgb,
+    /// Fill alpha (`1.0` opaque; `< 1.0` for translucent tints like `accent.subtle`).
+    pub alpha: f32,
+    /// Corner radius in physical px (`0.0` = sharp corners).
+    pub radius: f32,
+}
+
+impl ChromeQuad {
+    /// A sharp, opaque fill.
+    #[must_use]
+    pub fn fill(rect: PxRect, color: Srgb) -> Self {
+        Self {
+            rect,
+            color,
+            alpha: 1.0,
+            radius: 0.0,
+        }
+    }
+
+    /// An opaque fill with rounded corners of `radius` physical px.
+    #[must_use]
+    pub fn rounded(rect: PxRect, color: Srgb, radius: f32) -> Self {
+        Self {
+            rect,
+            color,
+            alpha: 1.0,
+            radius,
+        }
+    }
+
+    /// A translucent fill (e.g. an `accent.subtle` selected-row pill) at `alpha`, with an
+    /// optional corner `radius`.
+    #[must_use]
+    pub fn tint(rect: PxRect, color: Srgb, alpha: f32, radius: f32) -> Self {
+        Self {
+            rect,
+            color,
+            alpha,
+            radius,
+        }
+    }
 }
 
 /// One pane to draw this frame.
@@ -112,23 +169,22 @@ pub struct OverlayView<'a> {
     pub caret: Option<(usize, usize)>,
 }
 
-/// The persistent left sidebar (the tab list) to draw as base-layer chrome.
+/// The persistent left sidebar to draw as base-layer chrome (design §08).
 ///
-/// It sits in the left strip of the surface, beneath any overlay and never over the
-/// panes (the pane viewport is inset to its right). The renderer draws the active
-/// tab's `accent.subtle` fill + `accent` bar and a `border` divider on the right edge,
-/// then paints `rows` as a monospace grid at `text_origin` (clipped to `panel`). The
-/// caller bakes the UI-token colors into `rows`; the renderer owns only the
-/// decorative quads.
+/// It sits in the left strip of the surface, beneath any overlay and never over the panes
+/// (the pane viewport is inset to its right). Proportional chrome: the binary lays the
+/// sidebar out in the guide's fonts and hands over the finished display list - the
+/// decorative `quads` (the surface fill, the active tab's rounded `accent.subtle` pill +
+/// `accent` bar, chips, the input well, the right-edge divider) and the positioned text
+/// `labels` (header, tab titles, group headers, the utility bar). The renderer paints them,
+/// clipping to `panel`.
 pub struct SidebarView<'a> {
     /// The sidebar rectangle on the surface (`x = 0`, full height), physical px.
     pub panel: PxRect,
-    /// Pixel position of the text grid's cell `(0, 0)` top-left, physical px.
-    pub text_origin: (f32, f32),
-    /// The sidebar's text as a monospace grid (rows top to bottom), UI-token colored.
-    pub rows: &'a [Vec<GridCell>],
-    /// Grid row of the active tab to highlight (`accent` bar + `accent.subtle` fill).
-    pub active_row: Option<usize>,
+    /// The decorative quads (surface, pills, bars, dividers), in draw order.
+    pub quads: &'a [ChromeQuad],
+    /// The positioned proportional text labels.
+    pub labels: &'a [ProseLabel],
 }
 
 /// The per-repo git diff dock to draw as base-layer chrome on the right edge.

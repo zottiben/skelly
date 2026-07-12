@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 use skelly_config::Appearance;
 use skelly_pane::{Dir, PaneTree, Rect};
 use skelly_render::{
-    measure_cell, AnsiPalette, CaptureOverlay, CapturePane, CaptureSidebar, GridCell, PxRect, Srgb,
-    Theme,
+    measure_cell, AnsiPalette, CaptureOverlay, CapturePane, CaptureSidebar, ChromeQuad, FontRole,
+    GridCell, ProseLabel, PxRect, Srgb, TextMeasure, Theme,
 };
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 
@@ -28,12 +28,8 @@ const WINDOW_PAD: f32 = 12.0;
 const PANE_INSET: f32 = 6.0;
 /// Logical sidebar width - mirrors the config default (`[sidebar] width = 240`).
 const SIDEBAR_WIDTH: f32 = 240.0;
-/// Logical inset of the sidebar text - mirrors the binary's `SIDEBAR_PAD`.
-const SIDEBAR_PAD: f32 = 12.0;
 /// Logical width of the slim icon rail - mirrors the binary's `RAIL_WIDTH`.
 const RAIL_WIDTH: f32 = 56.0;
-/// Logical horizontal inset of the rail's centered content - mirrors `RAIL_PAD`.
-const RAIL_PAD: f32 = 6.0;
 
 fn main() {
     let path = std::env::args()
@@ -137,7 +133,7 @@ fn main() {
     // verifying the sidebar chrome and the overlay compositing together. The overlay is
     // the command palette by default, or the "running job" confirm modal for `confirm`.
     let theme = Theme::resolve(&appearance.theme);
-    let sidebar = sidebar_panel(height, cell_w, sidebar_w, sc, rail, overflow, &theme);
+    let sidebar = sidebar_panel(height, sidebar_w, sc, rail, overflow, &theme);
     let overlay = if std::env::args().nth(3).as_deref() == Some("confirm") {
         confirm_overlay(width, height, cell_w, cell_h, sc, &theme)
     } else {
@@ -282,91 +278,251 @@ fn confirm_overlay(
     }
 }
 
-/// Build a representative left sidebar (a two-tab list with tab 1 active and a new-tab
-/// action) - mirroring the binary's `sidebar` module layout so the capture verifies the
-/// tab-list chrome. `rail` picks the slim 56px icon rail (centered tab numbers) over the
-/// full panel. The live binary drives this from the real module.
+// Sidebar layout constants (logical px) - mirror the binary's `sidebar` module (§08) so the
+// capture reproduces the real proportional tab list.
+const SB_PAD_TOP: f32 = 10.0;
+const SB_HEADER_H: f32 = 24.0;
+const SB_IND_H: f32 = 16.0;
+const SB_TAB_H: f32 = 28.0;
+const SB_PAD_BOTTOM: f32 = 10.0;
+const SB_LABEL_INSET: f32 = 12.0;
+const SB_PILL_INSET: f32 = 6.0;
+const SB_BAR_W: f32 = 2.0;
+const SB_PILL_RADIUS: f32 = 6.0;
+
+/// Build a representative left sidebar as a proportional display list, mirroring the
+/// binary's `sidebar` module layout (§08) so the capture verifies the tab-list chrome.
+/// `rail` picks the slim 56px icon rail (centered tab numbers); `overflow` shows the
+/// many-tab windowed state. The live binary drives this from the real module.
 fn sidebar_panel(
     height: u32,
-    cell_w: f32,
     sidebar_w: f32,
     scale: f32,
     rail: bool,
     overflow: bool,
     theme: &Theme,
 ) -> CaptureSidebar {
-    let pad = (if rail { RAIL_PAD } else { SIDEBAR_PAD }) * scale;
-    let cols = ((sidebar_w - 2.0 * pad) / cell_w).max(1.0) as usize;
-    let indent = "  ";
-    let (rows, active_row) = if overflow {
-        // Ten tabs windowed into a 6-tab list with the active tab (Tab 9) scrolled to the
-        // bottom row: the ↑/↓ spacers carry the hidden-tab counts. Mirrors what the binary's
-        // `sidebar` module produces for count=10, active=8, a 6-row window.
-        (
-            vec![
-                ui_row(&format!("{indent}skelly"), cols, theme.fg_secondary), // header
-                ui_row(&format!("{indent}↑ 3 more"), cols, theme.fg_muted),   // more above
-                ui_row(&format!("{indent}Tab 4"), cols, theme.fg_secondary),
-                ui_row(&format!("{indent}Tab 5"), cols, theme.fg_secondary),
-                ui_row(&format!("{indent}Tab 6"), cols, theme.fg_secondary),
-                ui_row(&format!("{indent}Tab 7"), cols, theme.fg_secondary),
-                ui_row(&format!("{indent}Tab 8"), cols, theme.fg_secondary),
-                ui_row(&format!("{indent}Tab 9"), cols, theme.fg_primary), // active
-                ui_row(&format!("{indent}↓ 1 more"), cols, theme.fg_muted), // more below
-                ui_row(&format!("{indent}+ New tab"), cols, theme.fg_muted),
-            ],
-            Some(7),
-        )
-    } else if rail {
-        (
-            vec![
-                centered_row("sk", cols, theme.fg_secondary), // brand mark
-                ui_row("", cols, theme.fg_muted),             // spacer
-                centered_row("1", cols, theme.fg_primary),    // active
-                centered_row("2", cols, theme.fg_secondary),
-                ui_row("", cols, theme.fg_muted), // spacer
-                centered_row("+", cols, theme.fg_muted),
-            ],
-            Some(2),
-        )
-    } else {
-        (
-            vec![
-                ui_row(&format!("{indent}skelly"), cols, theme.fg_secondary), // header
-                ui_row("", cols, theme.fg_muted),                             // spacer
-                ui_row(&format!("{indent}Tab 1"), cols, theme.fg_primary),    // active
-                ui_row(&format!("{indent}Tab 2"), cols, theme.fg_secondary),
-                ui_row("", cols, theme.fg_muted), // spacer
-                ui_row(&format!("{indent}+ New tab"), cols, theme.fg_muted),
-            ],
-            Some(2),
-        )
+    let mut measure = TextMeasure::new(scale);
+    let panel = PxRect {
+        x: 0.0,
+        y: 0.0,
+        w: sidebar_w,
+        h: height as f32,
     };
-    CaptureSidebar {
-        panel: PxRect {
-            x: 0.0,
+    let (count, active): (usize, usize) = if overflow { (10, 8) } else { (2, 0) };
+    let mut quads = vec![ChromeQuad::fill(panel, theme.bg_sidebar)];
+    let mut labels = Vec::new();
+
+    // Header.
+    let head = if rail { "SK" } else { "SKELLY" };
+    push_sb_label(
+        &mut labels,
+        &mut measure,
+        head,
+        FontRole::Micro,
+        theme.fg_muted,
+        panel,
+        panel.y + SB_PAD_TOP * scale,
+        SB_HEADER_H * scale,
+        rail,
+        scale,
+    );
+
+    push_sb_body(
+        &mut quads,
+        &mut labels,
+        &mut measure,
+        panel,
+        (count, active),
+        rail,
+        scale,
+        theme,
+    );
+
+    // Right-edge divider.
+    let stroke = scale.max(1.0);
+    quads.push(ChromeQuad::fill(
+        PxRect {
+            x: panel.w - stroke,
             y: 0.0,
-            w: sidebar_w,
-            h: height as f32,
+            w: stroke,
+            h: panel.h,
         },
-        text_origin: (pad, pad),
-        rows,
-        // The active tab's grid row (index 0 at HEADER_ROWS=2, or Tab 9 scrolled to row 7).
-        active_row,
+        theme.border,
+    ));
+
+    CaptureSidebar {
+        panel,
+        quads,
+        labels,
     }
 }
 
-/// A `text` centered within `cols` cells in `fg` - mirrors the `sidebar` module's rail
-/// centering.
-fn centered_row(text: &str, cols: usize, fg: Srgb) -> Vec<GridCell> {
-    let left = cols.saturating_sub(text.chars().count()) / 2;
-    let mut row: Vec<GridCell> = (0..left).map(|_| ui_cell(' ', fg)).collect();
-    row.extend(text.chars().map(|c| ui_cell(c, fg)));
-    row.truncate(cols);
-    while row.len() < cols {
-        row.push(ui_cell(' ', fg));
+/// The windowed tab rows (overflow indicators + tabs + the new-tab action) - mirrors the
+/// binary's `sidebar::build`.
+#[allow(clippy::too_many_arguments, reason = "one focused example builder")]
+fn push_sb_body(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    panel: PxRect,
+    tabs: (usize, usize),
+    rail: bool,
+    scale: f32,
+    theme: &Theme,
+) {
+    let (count, active) = tabs;
+    let reserved_below = SB_IND_H + SB_TAB_H + SB_PAD_BOTTOM;
+    let avail = panel.h / scale - SB_PAD_TOP - SB_HEADER_H - SB_IND_H - reserved_below;
+    let capacity = (avail / SB_TAB_H).floor().max(1.0) as usize;
+    let visible = count.min(capacity);
+    let first = if count <= visible {
+        0
+    } else {
+        active.saturating_sub(visible - 1).min(count - visible)
+    };
+    let mut y = SB_PAD_TOP + SB_HEADER_H;
+    let place = |labels: &mut Vec<ProseLabel>, m: &mut TextMeasure, t: &str, r, c, yy, h| {
+        push_sb_label(
+            labels,
+            m,
+            t,
+            r,
+            c,
+            panel,
+            panel.y + yy * scale,
+            h * scale,
+            rail,
+            scale,
+        );
+    };
+    if first > 0 {
+        place(
+            labels,
+            measure,
+            &format!("↑ {first} more"),
+            FontRole::Caption,
+            theme.fg_muted,
+            y,
+            SB_IND_H,
+        );
     }
-    row
+    y += SB_IND_H;
+    for index in first..first + visible {
+        let is_active = index == active;
+        if is_active {
+            push_sb_active(
+                quads,
+                panel,
+                panel.y + y * scale,
+                SB_TAB_H * scale,
+                scale,
+                theme,
+            );
+        }
+        let text = if rail {
+            (index + 1).to_string()
+        } else {
+            format!("Tab {}", index + 1)
+        };
+        let color = if is_active {
+            theme.fg_primary
+        } else {
+            theme.fg_secondary
+        };
+        place(labels, measure, &text, FontRole::Label, color, y, SB_TAB_H);
+        y += SB_TAB_H;
+    }
+    let more_below = count - first - visible;
+    if more_below > 0 {
+        place(
+            labels,
+            measure,
+            &format!("↓ {more_below} more"),
+            FontRole::Caption,
+            theme.fg_muted,
+            y,
+            SB_IND_H,
+        );
+    }
+    y += SB_IND_H;
+    let newtab = if rail { "+" } else { "+ New tab" };
+    place(
+        labels,
+        measure,
+        newtab,
+        FontRole::Label,
+        theme.fg_muted,
+        y,
+        SB_TAB_H,
+    );
+}
+
+/// The active tab's `accent.subtle` pill + `accent` bar - mirrors the binary.
+fn push_sb_active(
+    quads: &mut Vec<ChromeQuad>,
+    panel: PxRect,
+    top: f32,
+    height: f32,
+    scale: f32,
+    theme: &Theme,
+) {
+    let inset = SB_PILL_INSET * scale;
+    quads.push(ChromeQuad::tint(
+        PxRect {
+            x: panel.x + inset,
+            y: top,
+            w: (panel.w - 2.0 * inset).max(0.0),
+            h: height,
+        },
+        theme.accent,
+        0.14,
+        SB_PILL_RADIUS * scale,
+    ));
+    quads.push(ChromeQuad::fill(
+        PxRect {
+            x: panel.x,
+            y: top,
+            w: (SB_BAR_W * scale).max(1.0),
+            h: height,
+        },
+        theme.accent,
+    ));
+}
+
+/// Place one sidebar label vertically centered (left-inset for the panel, centered for the
+/// rail) - mirrors the binary's `push_label`.
+#[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
+fn push_sb_label(
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    panel: PxRect,
+    top: f32,
+    height: f32,
+    rail: bool,
+    scale: f32,
+) {
+    let line_h = measure.line_height(role);
+    let y = top + (height - line_h) * 0.5;
+    let x = if rail {
+        let w = measure.width(text, role, None);
+        panel.x + (panel.w - w) * 0.5
+    } else {
+        panel.x + SB_LABEL_INSET * scale
+    };
+    let max_w = (panel.x + panel.w - x - SB_LABEL_INSET * scale * 0.5).max(1.0);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x,
+        y,
+        role,
+        color,
+        weight: None,
+        max_w,
+    });
 }
 
 fn ui_cell(c: char, fg: Srgb) -> GridCell {
