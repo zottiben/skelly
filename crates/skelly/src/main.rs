@@ -14,24 +14,27 @@ mod gitdock;
 mod palette;
 mod settings;
 mod sidebar;
+mod timeline;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Context as _;
 use skelly_config::{Config, SidebarMode};
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
 use skelly_render::{
     AnsiPalette, GitDockView, GridCell, OverlayView, PaneView, PxRect, Renderer, SettingsView,
-    SidebarView, Srgb, Theme,
+    SidebarView, Srgb, Theme, TimelineView,
 };
-use skelly_session::Repo;
+use skelly_session::{Actor, Repo, SessionEvent, ShadowWorktree};
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 
 use gitdock::GitDock;
 use palette::Palette;
 use settings::Settings;
 use sidebar::Sidebar;
+use timeline::TimelineDock;
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -170,6 +173,16 @@ struct App {
     sidebar: Sidebar,
     /// The per-repo git diff dock (right dock) state.
     git_dock: GitDock,
+    /// The session-timeline dock (right dock; mutually exclusive with the git dock).
+    timeline: TimelineDock,
+    /// The live shadow worktree while rewound to a past state (`None` = at HEAD/now). Its
+    /// drop removes the worktree, so returning to now / closing just clears it.
+    shadow: Option<ShadowWorktree>,
+    /// When the session began, for the timeline's session-relative event times.
+    session_start: Instant,
+    /// Whether the "session started" timeline event has been recorded yet (once, on the
+    /// first window activation, when a repo is known).
+    session_started: bool,
     /// The repository backing the dock (from the process cwd), cached while it is open so
     /// moving the file selection re-diffs without re-discovering.
     git_repo: Option<Repo>,
@@ -203,6 +216,10 @@ impl App {
             settings: Settings::new(),
             sidebar,
             git_dock: GitDock::new(),
+            timeline: TimelineDock::new(),
+            shadow: None,
+            session_start: Instant::now(),
+            session_started: false,
             git_repo: None,
             clipboard: arboard::Clipboard::new().ok(),
             window: None,
@@ -233,7 +250,7 @@ impl App {
     fn viewport_rect(&self) -> Rect {
         let pad = WINDOW_PAD * scale32(self.scale);
         let sidebar = self.sidebar_width_px();
-        let dock = self.git_dock_width_px();
+        let dock = self.right_dock_width_px();
         let w = dim_f32(self.size.0);
         let h = dim_f32(self.size.1);
         Rect::new(
@@ -254,10 +271,12 @@ impl App {
         }
     }
 
-    /// The git dock's width in physical px, or `0.0` when it is closed. The dock occupies
-    /// the right strip `[surface_w - width, surface_w)`; the pane viewport ends before it.
-    fn git_dock_width_px(&self) -> f32 {
-        if self.git_dock.open {
+    /// The right dock's width in physical px, or `0.0` when neither right dock is open. The
+    /// git diff dock and the session timeline are mutually exclusive (Hard rule 4) and both
+    /// occupy the right strip `[surface_w - width, surface_w)`; the pane viewport ends
+    /// before it. Both use the guide's 420px default.
+    fn right_dock_width_px(&self) -> f32 {
+        if self.git_dock.open || self.timeline.open {
             GIT_DOCK_WIDTH * scale32(self.scale)
         } else {
             0.0
@@ -408,6 +427,7 @@ impl App {
         // Build the chrome frames before the mutable renderer borrow.
         let sidebar = self.sidebar.visible.then(|| self.build_sidebar_frame());
         let git_dock = self.git_dock.open.then(|| self.build_git_dock_frame());
+        let timeline = self.timeline.open.then(|| self.build_timeline_frame());
         let overlay = self.palette.open.then(|| self.build_palette_frame());
         let settings = self.settings.open.then(|| self.build_settings_frame());
         // Write the clamped diff scroll back so repeated paging past the end settles.
@@ -439,6 +459,16 @@ impl App {
                     caret: frame.caret,
                 })),
                 None => renderer.set_git_dock(None),
+            }
+            match &timeline {
+                Some(frame) => renderer.set_timeline(Some(&TimelineView {
+                    panel: frame.panel,
+                    text_origin: frame.origin,
+                    rows: &frame.rows,
+                    selected_row: frame.selected_row,
+                    viewing_row: frame.viewing_row,
+                })),
+                None => renderer.set_timeline(None),
             }
             match &overlay {
                 Some(frame) => renderer.set_overlay(Some(&OverlayView {
@@ -577,7 +607,7 @@ impl App {
     fn build_git_dock_frame(&self) -> GitDockFrame {
         let (cell_w, cell_h) = self.cell_size();
         let pad = GIT_DOCK_PAD * scale32(self.scale);
-        let dock_w = self.git_dock_width_px();
+        let dock_w = self.right_dock_width_px();
         let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
         let panel_x = (surface_w - dock_w).max(0.0);
 
@@ -601,6 +631,39 @@ impl App {
             focused_hunk_row: view.focused_hunk_row,
             caret: view.caret,
             diff_scroll: view.diff_scroll,
+        }
+    }
+
+    /// Lay out the session-timeline dock on the right edge, mirroring the git dock: the
+    /// event list + status banner + foot rendered in UI tokens and clipped to the panel.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the dock cell dimensions are small, non-negative values"
+    )]
+    fn build_timeline_frame(&self) -> TimelineFrame {
+        let (cell_w, cell_h) = self.cell_size();
+        let pad = GIT_DOCK_PAD * scale32(self.scale);
+        let dock_w = self.right_dock_width_px();
+        let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
+        let panel_x = (surface_w - dock_w).max(0.0);
+
+        let cols = ((dock_w - 2.0 * pad) / cell_w).floor().max(1.0) as usize;
+        let rows = ((surface_h - 2.0 * pad) / cell_h).floor().max(1.0) as usize;
+        let view = self.timeline.view(cols, rows, &self.theme);
+
+        TimelineFrame {
+            panel: PxRect {
+                x: panel_x,
+                y: 0.0,
+                w: dock_w,
+                h: surface_h,
+            },
+            origin: (panel_x + pad, pad),
+            rows: view.rows,
+            selected_row: view.selected_row,
+            viewing_row: view.viewing_row,
         }
     }
 
@@ -652,11 +715,129 @@ impl App {
             self.git_dock.close();
             self.git_repo = None;
         } else {
+            // Only one right dock at a time (Hard rule 4): opening the diff closes the
+            // timeline and returns to now.
+            self.close_timeline();
             self.git_dock.open();
             self.refresh_git();
         }
         self.sync_layout();
         self.request_redraw();
+    }
+
+    /// Toggle the session-timeline dock (`⇧⌘H`). Opening it closes the git dock (Hard rule
+    /// 4), records the session-start event if it has not been yet, and snaps to now; either
+    /// way the pane viewport changes width, so re-fit the shells and repaint.
+    fn toggle_timeline(&mut self) {
+        if self.timeline.open {
+            self.close_timeline();
+        } else {
+            self.git_dock.close();
+            self.git_repo = None;
+            self.record_session_start();
+            let branch = current_branch();
+            self.timeline.open(branch);
+            self.reconcile_shadow();
+        }
+        self.sync_layout();
+        self.request_redraw();
+    }
+
+    /// Close the timeline dock and return to now (discarding any shadow worktree).
+    fn close_timeline(&mut self) {
+        if self.timeline.open {
+            self.timeline.close();
+        }
+        self.discard_shadow();
+    }
+
+    /// Record the one-time "session started" event, anchored to the launch HEAD (so the
+    /// pre-session state is restorable). Discovers the process-cwd repo once; a non-repo or
+    /// a repo with no commits simply records a non-restorable anchor.
+    fn record_session_start(&mut self) {
+        if self.session_started {
+            return;
+        }
+        self.session_started = true;
+        let start = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let (detail, restore) = match Repo::discover(&start) {
+            Ok(Some(repo)) => {
+                let branch = repo.status().ok().and_then(|s| s.branch);
+                let head = repo.head_short().ok();
+                (branch.unwrap_or_else(|| "(detached)".to_owned()), head)
+            }
+            _ => ("no repository".to_owned(), None),
+        };
+        let mut event = SessionEvent::new(
+            Actor::System,
+            self.elapsed_label(),
+            "Session started",
+            detail,
+        );
+        if let Some(sha) = restore {
+            event = event.restoring(sha);
+        }
+        self.timeline.record(self.session_start.elapsed(), event);
+    }
+
+    /// Record a timeline event now, stamping it with the session-relative elapsed time.
+    fn record_event(
+        &mut self,
+        actor: Actor,
+        title: impl Into<String>,
+        detail: impl Into<String>,
+        restore: Option<String>,
+    ) {
+        let mut event = SessionEvent::new(actor, self.elapsed_label(), title, detail);
+        if let Some(sha) = restore {
+            event = event.restoring(sha);
+        }
+        self.timeline.record(self.session_start.elapsed(), event);
+    }
+
+    /// A short session-relative time label (`M:SS` into the session) for a recorded event.
+    fn elapsed_label(&self) -> String {
+        let secs = self.session_start.elapsed().as_secs();
+        format!("{}:{:02}", secs / 60, secs % 60)
+    }
+
+    /// Reconcile the shadow worktree to the timeline's current selection: at now, discard
+    /// any worktree; on a past state, ensure a shadow worktree is checked out to its commit
+    /// (Hard rule 3 - never touches HEAD/refs). A git failure is logged and treated as
+    /// "stay at now" rather than left half-applied.
+    fn reconcile_shadow(&mut self) {
+        if self.timeline.selection_is_now() {
+            self.discard_shadow();
+            return;
+        }
+        let Some(sha) = self.timeline.selected_restore() else {
+            self.discard_shadow();
+            return;
+        };
+        // Already viewing this commit? Nothing to do.
+        if self.shadow.as_ref().is_some_and(|w| w.committish() == sha) {
+            return;
+        }
+        self.discard_shadow();
+        let start = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match Repo::discover(&start) {
+            Ok(Some(repo)) => match repo.shadow_checkout(&sha) {
+                Ok(worktree) => self.shadow = Some(worktree),
+                Err(err) => tracing::warn!(%err, %sha, "shadow checkout failed"),
+            },
+            Ok(None) => tracing::warn!("cannot rewind: not in a git repository"),
+            Err(err) => tracing::warn!(%err, "cannot rewind: git discovery failed"),
+        }
+    }
+
+    /// Discard the live shadow worktree, if any (`git worktree remove --force` via its
+    /// drop), returning to the real HEAD.
+    fn discard_shadow(&mut self) {
+        if let Some(worktree) = self.shadow.take() {
+            if let Err(err) = worktree.discard() {
+                tracing::warn!(%err, "failed to remove shadow worktree");
+            }
+        }
     }
 
     /// Refresh the dock from the repository of the process working directory (a v1
@@ -946,6 +1127,7 @@ impl App {
             Action::PrevTab => self.cycle_tab(false),
             Action::ToggleSidebar => self.toggle_sidebar(),
             Action::ShowGitDiff => self.toggle_git_dock(),
+            Action::ShowTimeline => self.toggle_timeline(),
             Action::OpenSettings => self.open_settings(),
             Action::ThemeDark => self.apply_theme("ossein-dark"),
             Action::ThemeLight => self.apply_theme("ossein-light"),
@@ -1014,6 +1196,11 @@ impl App {
             if let Key::Character(ch) = key_event.logical_key.as_ref() {
                 if ch.eq_ignore_ascii_case("g") && self.modifiers.shift_key() {
                     self.toggle_git_dock();
+                    return;
+                }
+                if ch.eq_ignore_ascii_case("h") && self.modifiers.shift_key() {
+                    // Switch to the timeline dock (the two right docks are exclusive).
+                    self.toggle_timeline();
                     return;
                 }
                 if ch.eq_ignore_ascii_case("q") {
@@ -1117,6 +1304,19 @@ impl App {
         match repo.commit(&message) {
             Ok(()) => {
                 let sha = repo.head_short().unwrap_or_default();
+                // Record a restorable timeline event for the commit (first line as title).
+                let subject = message.lines().next().unwrap_or("").to_owned();
+                let branch = repo
+                    .status()
+                    .ok()
+                    .and_then(|s| s.branch)
+                    .unwrap_or_default();
+                self.record_event(
+                    Actor::Human,
+                    format!("git commit - {subject}"),
+                    format!("{sha} - {branch}"),
+                    (!sha.is_empty()).then(|| sha.clone()),
+                );
                 self.git_dock.set_committed(sha);
                 self.reload_git_status();
             }
@@ -1160,7 +1360,15 @@ impl App {
             repo.stage(&path)
         };
         match result {
-            Ok(()) => self.reload_git_status(),
+            Ok(()) => {
+                let name = path.file_name().map_or_else(
+                    || path.to_string_lossy().into_owned(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                let verb = if fully_staged { "Unstaged" } else { "Staged" };
+                self.record_event(Actor::Human, format!("{verb} {name}"), String::new(), None);
+                self.reload_git_status();
+            }
             Err(err) => self.git_dock.set_error(err.to_string()),
         }
         self.request_redraw();
@@ -1194,7 +1402,10 @@ impl App {
             return;
         };
         match repo.stage_all() {
-            Ok(()) => self.reload_git_status(),
+            Ok(()) => {
+                self.record_event(Actor::Human, "Staged all changes", String::new(), None);
+                self.reload_git_status();
+            }
             Err(err) => self.git_dock.set_error(err.to_string()),
         }
         self.request_redraw();
@@ -1216,6 +1427,70 @@ impl App {
         }
     }
 
+    /// Handle a key while the session-timeline dock is open. `⇧⌘G` switches to the git dock,
+    /// `⇧⌘H`/`Esc` close, `⌘Q` quits; `↑/↓` (or `⌥⌘←/→`) scrub events, `⌥⌘0` returns to now.
+    /// The terminal stays live underneath but receives no keys until close.
+    fn on_timeline_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
+        if self.modifiers.super_key() {
+            if let Key::Character(ch) = key_event.logical_key.as_ref() {
+                if ch.eq_ignore_ascii_case("g") && self.modifiers.shift_key() {
+                    self.toggle_git_dock();
+                    return;
+                }
+                if ch.eq_ignore_ascii_case("h") && self.modifiers.shift_key() {
+                    self.toggle_timeline();
+                    return;
+                }
+                if ch.eq_ignore_ascii_case("q") {
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
+        // Session bindings: `⌥⌘←/→` step, `⌥⌘0` return to now (the guide's Session & Git
+        // shortcuts).
+        if self.modifiers.alt_key() && self.modifiers.super_key() {
+            match key_event.logical_key.as_ref() {
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.timeline_step(-1);
+                    return;
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.timeline_step(1);
+                    return;
+                }
+                Key::Character("0") => {
+                    self.timeline_return_to_now();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape) => self.toggle_timeline(),
+            Key::Named(NamedKey::ArrowUp) => self.timeline_step(-1),
+            Key::Named(NamedKey::ArrowDown) => self.timeline_step(1),
+            Key::Named(NamedKey::Home) => self.timeline_return_to_now(),
+            _ => {}
+        }
+    }
+
+    /// Move the timeline selection by `delta` and reconcile the shadow worktree to it.
+    fn timeline_step(&mut self, delta: i32) {
+        if self.timeline.move_selection(delta) {
+            self.reconcile_shadow();
+        }
+        self.request_redraw();
+    }
+
+    /// Snap the timeline selection back to now (HEAD), discarding any shadow worktree.
+    fn timeline_return_to_now(&mut self) {
+        if self.timeline.select_now() {
+            self.reconcile_shadow();
+        }
+        self.request_redraw();
+    }
+
     /// Handle a key press: the palette (when open), platform combos (quit/copy/paste/
     /// palette), pane chords, scrollback keys, then terminal input to the focused pane.
     fn on_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
@@ -1233,6 +1508,10 @@ impl App {
         }
         if self.git_dock.open {
             self.on_gitdock_key(event_loop, key_event);
+            return;
+        }
+        if self.timeline.open {
+            self.on_timeline_key(event_loop, key_event);
             return;
         }
         // Tab management (⌘T new, ⌘W close, ⌘1..9 go-to, ⌥⇧[ ] cycle). Matched on the
@@ -1270,6 +1549,10 @@ impl App {
                 }
                 if ch.eq_ignore_ascii_case("g") && self.modifiers.shift_key() {
                     self.toggle_git_dock();
+                    return;
+                }
+                if ch.eq_ignore_ascii_case("h") && self.modifiers.shift_key() {
+                    self.toggle_timeline();
                     return;
                 }
                 if ch == "," {
@@ -1441,6 +1724,21 @@ struct GitDockFrame {
     diff_scroll: usize,
 }
 
+/// Owned timeline-dock frame data the borrowed [`TimelineView`] points at.
+struct TimelineFrame {
+    panel: PxRect,
+    origin: (f32, f32),
+    rows: Vec<Vec<GridCell>>,
+    selected_row: Option<usize>,
+    viewing_row: Option<usize>,
+}
+
+/// The current branch of the process-cwd repo (for the timeline summary), best-effort.
+fn current_branch() -> Option<String> {
+    let start = std::env::current_dir().ok()?;
+    Repo::discover(&start).ok().flatten()?.status().ok()?.branch
+}
+
 /// Resolve a terminal cell into a render cell against the active ANSI palette,
 /// folding in the palette-dependent SGR effects: *dim* reduces the foreground
 /// intensity and *reverse video* swaps foreground and background (using the
@@ -1532,6 +1830,9 @@ impl ApplicationHandler<Wakeup> for App {
             event_loop.exit();
             return;
         }
+        // Seed the session timeline with its "session started" anchor, so it is the first
+        // event even if the user commits before ever opening the timeline (guarded to once).
+        self.record_session_start();
         tracing::info!(
             panes = self.active_tab().panes.len(),
             "window, GPU, and shell ready"

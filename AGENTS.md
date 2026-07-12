@@ -34,7 +34,7 @@ rows wrapped in the text buffer (doubling the line pitch and desyncing glyphs fr
 the bg/cursor/underline/selection quads); the buffer now uses `Wrap::None` so a grid
 row is always one visual line. **M3 (Skelly shell UX) is essentially complete** (pane
 tree, sidebar + tabs, command palette, settings view, live theming) and **M4 (signature
-features) is under way**: the read-only git diff model (`skelly-session`, ADR-0006) and
+features) is COMPLETE**: the read-only git diff model (`skelly-session`, ADR-0006) and
 the **git diff dock** landed. The dock is a right-edge layer (`⇧⌘G`, `Esc`; Hard rule 4)
 over the live terminal - a status bar, the changed-file list, and the selected file's
 unified diff (`diff.*` tokens, separate from the ANSI palette per Hard rule 2), driven by
@@ -46,10 +46,19 @@ the pure `gitdock` module over `skelly_session::Repo` (process cwd for now). Fix
 `Focus::{List,Commit}` model - `Tab` switches, typing edits the message, `Enter` commits
 when >=1 file is staged, then a "committed <sha>" line offers `u` to undo), and hunk-level
 staging (`[`/`]` move the focused hunk, `⌘↵` stages/unstages it via
-`git apply --cached [--reverse]` of a reconstructed one-hunk patch). The session timeline +
-non-destructive rewind is the remaining M4 feature. Renderer chrome layers (sidebar / git
-dock / palette / settings) now share a `ChromeLayer` (quads + text + active). The build target is native Rust, not the
-mockup HTML. See `ROADMAP.md`.
+`git apply --cached [--reverse]` of a reconstructed one-hunk patch). The **session timeline +
+non-destructive rewind** (`⇧⌘H`, ADR-0007) completes M4: settling the three open design
+decisions (in-session event log; read-only-inspection rewind; layout-only persist), it adds a
+`skelly-session` model (`Timeline`/`SessionEvent`/`Actor` = an append-only, clock-free event
+log; `Repo::shadow_checkout` -> `ShadowWorktree` = `git worktree add --detach` into a temp dir,
+HEAD/refs untouched per Hard rule 3, backed by an adversarial trust-contract test) and a right
+dock (the pure `timeline` module, mutually exclusive with the git dock) that lists the events
+with a viewing banner + actor legend + session summary - `↑/↓` (or `⌥⌘←/→`) scrub, `⌥⌘0` returns
+to now, and selecting a past **commit** rewinds to it read-only (staging events are recorded but
+not restorable; the `Agent` actor's transport stays the open AI-actions contract). Event times
+are session-relative (`M:SS`), avoiding a date dependency. Renderer chrome layers (sidebar / git
+dock / timeline / palette / settings) now share a `ChromeLayer` (quads + text + active). The build
+target is native Rust, not the mockup HTML. See `ROADMAP.md`.
 
 **Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
 workspace. Foundation crates are *proposed* in ADR-0001..0004 (terminal core

@@ -4,17 +4,19 @@ Delivery is sequenced in milestones, each a set of thin vertical slices with a
 demoable outcome. We never start a later milestone's polish before the current one
 runs end-to-end. Rationale and detail are in the engineering playbook.
 
-## Current: M3 -> M4
+## Current: M4 -> M5
 
 M0, M1, the core of M2 (core terminal), and all the big M3 slices (sidebar + tabs,
 pane tree, command palette, settings view, live theming) are in place and run
 end-to-end. M2 has a handful of tracked carry-overs - the unchecked boxes below
 (bespoke cell renderer, cargo-fuzz, reflow/theme polish, SGR fidelity follow-ups) -
-plus a few M3 follow-ups, which we finish opportunistically rather than block M4 on.
-M4 (signature features) is under way: the **per-repo git diff dock** (`⇧⌘G`) is
-complete - the diff model, the dock UI, per-file + hunk-level staging, and the commit
-box all land end-to-end. The session timeline / non-destructive rewind is the remaining
-M4 feature (blocked on the open design decisions).
+plus a few M3 follow-ups, which we finish opportunistically rather than block on.
+**M4 (signature features) is complete**: the **per-repo git diff dock** (`⇧⌘G`) - the
+diff model, the dock UI, per-file + hunk-level staging, and the commit box - and the
+**session timeline + non-destructive rewind** (`⇧⌘H`, ADR-0007) both land end-to-end.
+Next is M5 (hardening & release): edge/empty/error states, perf budgets, packaging,
+and the first tagged release - plus the tracked M2-M4 follow-ups, finished
+opportunistically.
 
 - [x] **M0 - Foundation.** Workspace, quality gates, CI, docs, ADR log, and the
   `skelly-config` slice (schema + load + validate + tests), with a runnable binary
@@ -200,10 +202,22 @@ M4 feature (blocked on the open design decisions).
         (integration-tested staging one hunk of a two-hunk file). In the dock, `[` / `]`
         move the focused hunk (highlighted, with a `stage`/`unstage ⌘↵` affordance) and
         `⌘↵` stages it (or unstages when viewing the staged diff).
-  - [ ] Session timeline + non-destructive rewind (shadow worktree via
+  - [x] Session timeline + non-destructive rewind (shadow worktree via
     `git worktree add --detach`; Hard rule 3 - HEAD/refs untouched, adversarially
-    tested). Blocked on the open decisions (timeline AI-actions contract, rewind +
-    edit, persist scope) in `design/README.md`.
+    tested). The three open decisions are settled (ADR-0007 + `design/README.md`):
+    the timeline is an **in-session event log** Skelly records itself (a `System`
+    session-start anchor + the `Human` git events it witnesses - commits, which are
+    restorable, and staging, which is not); rewind is **read-only inspection** (a
+    shadow worktree, HEAD/refs untouched); persist is **layout only**. The
+    `skelly-session` model (`Timeline` / `SessionEvent` / `Actor`,
+    `Repo::shadow_checkout` -> `ShadowWorktree`) has a mandatory trust-contract
+    integration suite; the right-dock UI (`⇧⌘H`, mutually exclusive with the git
+    dock) lists the events with a viewing banner + actor legend, `↑/↓` (or `⌥⌘←/→`)
+    scrub, `⌥⌘0` returns to now, and selecting a past commit rewinds to it. Verified
+    by the `timeline_capture` headless PNG in both themes + a clean boot. Follow-ups:
+    the `Agent` actor's transport (the still-open AI-actions contract), the
+    launch-time layout restore (`session.persist`), fork-on-edit, off-thread git,
+    and global `⌥⌘←/→/0` while the dock is closed.
 - [ ] **M5 - Hardening & release.** Edge/empty/error states, perf budgets,
   packaging (signed macOS `.app`, Linux artifacts), first tagged release.
 

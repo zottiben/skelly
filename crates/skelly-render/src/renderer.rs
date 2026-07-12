@@ -15,7 +15,7 @@ use crate::cells::{grid_quads, push_outline, Quad, QuadLayer};
 use crate::error::RenderError;
 use crate::text::{PaneTextInput, TextLayer};
 use crate::theme::Theme;
-use crate::{GitDockView, OverlayView, PaneView, SettingsView, SidebarView};
+use crate::{GitDockView, OverlayView, PaneView, SettingsView, SidebarView, TimelineView};
 
 /// One chrome layer drawn over the terminal with `LoadOp::Load`: a quad pass then a text
 /// pass, gated by whether it is currently shown. The sidebar, git dock, command palette,
@@ -106,6 +106,9 @@ pub struct Renderer {
     sidebar: ChromeLayer,
     /// The per-repo git diff dock, drawn as base chrome on the right when open.
     gitdock: ChromeLayer,
+    /// The session-timeline dock, drawn as base chrome on the right when open (mutually
+    /// exclusive with the git dock - only one right-dock surface at a time, Hard rule 4).
+    timeline: ChromeLayer,
     /// The command-palette / overlay layer, drawn over the live terminal when active.
     overlay: ChromeLayer,
     /// The full-window settings view, drawn over everything when open.
@@ -209,9 +212,10 @@ impl Renderer {
                 appearance,
             )
         };
-        // Bind the four chrome layers before the struct literal so the closure's borrows
+        // Bind the five chrome layers before the struct literal so the closure's borrows
         // of `device`/`queue`/`config` end (NLL) before those move into `Self`.
-        let (sidebar, gitdock, overlay, settings) = (chrome(), chrome(), chrome(), chrome());
+        let (sidebar, gitdock, timeline, overlay, settings) =
+            (chrome(), chrome(), chrome(), chrome(), chrome());
 
         Self {
             theme: Theme::resolve(&appearance.theme),
@@ -219,6 +223,7 @@ impl Renderer {
             text,
             sidebar,
             gitdock,
+            timeline,
             overlay,
             settings,
             surface,
@@ -240,6 +245,7 @@ impl Renderer {
         self.text.resize(width, height);
         self.sidebar.resize(width, height);
         self.gitdock.resize(width, height);
+        self.timeline.resize(width, height);
         self.overlay.resize(width, height);
         self.settings.resize(width, height);
     }
@@ -260,6 +266,7 @@ impl Renderer {
         self.text.set_default_fg(self.theme.fg_primary);
         self.sidebar.set_default_fg(self.theme.fg_primary);
         self.gitdock.set_default_fg(self.theme.fg_primary);
+        self.timeline.set_default_fg(self.theme.fg_primary);
         self.overlay.set_default_fg(self.theme.fg_primary);
         self.settings.set_default_fg(self.theme.fg_primary);
     }
@@ -380,6 +387,33 @@ impl Renderer {
         );
     }
 
+    /// Set the session-timeline dock to draw next frame, or clear it with `None` (closed).
+    /// Builds the left-edge divider, the selected event's `accent.subtle` fill, and - when
+    /// rewound - the viewed event's `accent` bar; the text comes baked into `dock.rows`.
+    /// Drawn as base chrome on the right edge (mutually exclusive with the git dock), with
+    /// the pane viewport inset to its left.
+    pub fn set_timeline(&mut self, dock: Option<&TimelineView>) {
+        let Some(view) = dock else {
+            self.timeline.clear();
+            return;
+        };
+        let scale = self.timeline.text.scale();
+        let (cell_w, cell_h, _) = self.timeline.text.cell_metrics();
+        let quads = crate::cells::timeline_quads(view, &self.theme, cell_w, cell_h, scale);
+        self.timeline.set(
+            &self.device,
+            &self.queue,
+            (self.config.width, self.config.height),
+            &quads,
+            PaneTextInput {
+                rows: view.rows,
+                left: view.text_origin.0,
+                top: view.text_origin.1,
+                clip: (view.panel.x, view.panel.y, view.panel.w, view.panel.h),
+            },
+        );
+    }
+
     /// Set the command-palette overlay to draw over the terminal next frame, or clear
     /// it with `None`. Builds the panel surface (`bg.elevated`), its `border.strong`
     /// outline, the selected-row highlight, and the input caret; the text colors come
@@ -486,6 +520,10 @@ impl Renderer {
         // Passes 5-6: the git diff dock, loaded over the cleared right strip (base
         // chrome, like the sidebar; the pane viewport insets to its left).
         self.gitdock.draw(&self.device, &self.queue, &view, w, h)?;
+        // The session-timeline dock shares the right strip and is mutually exclusive with
+        // the git dock (only one right-dock surface open at a time), so at most one of
+        // these two draws.
+        self.timeline.draw(&self.device, &self.queue, &view, w, h)?;
         // Passes 7-8: the command palette / overlay, loaded over everything.
         self.overlay.draw(&self.device, &self.queue, &view, w, h)?;
         // Passes 9-10: the full-window settings view, loaded over everything else. It is

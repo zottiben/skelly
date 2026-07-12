@@ -11,11 +11,12 @@ use skelly_config::Appearance;
 
 use crate::cells::{
     gitdock_quads as build_gitdock_quads, grid_quads, overlay_quads as build_overlay_quads,
-    push_outline, settings_quads as build_settings_quads, sidebar_quads, Quad, QuadLayer,
+    push_outline, settings_quads as build_settings_quads, sidebar_quads,
+    timeline_quads as build_timeline_quads, Quad, QuadLayer,
 };
 use crate::text::{measure_cell, PaneTextInput, TextLayer};
 use crate::theme::{Rgba, Theme};
-use crate::{GitDockView, GridCell, OverlayView, PxRect, SettingsView, SidebarView};
+use crate::{GitDockView, GridCell, OverlayView, PxRect, SettingsView, SidebarView, TimelineView};
 
 /// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
@@ -137,6 +138,21 @@ pub struct CaptureGitDock {
     pub caret: Option<(usize, usize)>,
 }
 
+/// The session-timeline dock for [`capture_panes_rgba`], mirroring
+/// [`TimelineView`](crate::TimelineView) but owning its rows.
+pub struct CaptureTimeline {
+    /// The dock rectangle (right edge, full height), physical px.
+    pub panel: PxRect,
+    /// Pixel position of the text grid's cell `(0, 0)` top-left.
+    pub text_origin: (f32, f32),
+    /// The dock text as a monospace grid (UI-token colored).
+    pub rows: Vec<Vec<GridCell>>,
+    /// Grid row of the selected event to highlight, if any.
+    pub selected_row: Option<usize>,
+    /// Grid row of the event viewed in the past (accent bar), when rewound.
+    pub viewing_row: Option<usize>,
+}
+
 /// A command-palette overlay for [`capture_panes_rgba`], mirroring
 /// [`OverlayView`](crate::OverlayView) but owning its rows.
 pub struct CaptureOverlay {
@@ -160,6 +176,8 @@ pub struct Chrome<'a> {
     pub sidebar: Option<&'a CaptureSidebar>,
     /// The git diff dock (passes 5-6).
     pub git_dock: Option<&'a CaptureGitDock>,
+    /// The session-timeline dock (right strip; mutually exclusive with `git_dock`).
+    pub timeline: Option<&'a CaptureTimeline>,
     /// The command-palette overlay (passes 7-8).
     pub overlay: Option<&'a CaptureOverlay>,
 }
@@ -222,6 +240,22 @@ pub fn capture_panes_rgba(
             clip: (gd.panel.x, gd.panel.y, gd.panel.w, gd.panel.h),
         }
     });
+    let timeline_scene = chrome.timeline.map(|tl| {
+        let view = TimelineView {
+            panel: tl.panel,
+            text_origin: tl.text_origin,
+            rows: &tl.rows,
+            selected_row: tl.selected_row,
+            viewing_row: tl.viewing_row,
+        };
+        Scene {
+            quads: build_timeline_quads(&view, &theme, cell_w, cell_h, scale as f32),
+            rows: &tl.rows,
+            left: tl.text_origin.0,
+            top: tl.text_origin.1,
+            clip: (tl.panel.x, tl.panel.y, tl.panel.w, tl.panel.h),
+        }
+    });
     let overlay_scene = chrome.overlay.map(|ov| {
         let view = OverlayView {
             panel: ov.panel,
@@ -245,9 +279,9 @@ pub fn capture_panes_rgba(
         scale,
         color(theme.bg_base),
         |text| paint_panes(text, panes, &theme),
-        // In the windowed renderer's order: sidebar (3-4), then the git dock (5-6),
-        // then the palette overlay (7-8) on top.
-        [sidebar_scene, gitdock_scene, overlay_scene]
+        // In the windowed renderer's order: sidebar (3-4), then the git dock / timeline
+        // dock (5-6, mutually exclusive), then the palette overlay (7-8) on top.
+        [sidebar_scene, gitdock_scene, timeline_scene, overlay_scene]
             .into_iter()
             .flatten()
             .collect(),

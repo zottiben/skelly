@@ -27,7 +27,7 @@ mod theme;
 pub use ansi::AnsiPalette;
 pub use capture::{
     capture_cells_rgba, capture_panes_rgba, capture_rgba, capture_settings_rgba, CaptureGitDock,
-    CaptureOverlay, CapturePane, CaptureSettings, CaptureSidebar, Chrome,
+    CaptureOverlay, CapturePane, CaptureSettings, CaptureSidebar, CaptureTimeline, Chrome,
 };
 pub use error::RenderError;
 pub use renderer::Renderer;
@@ -140,6 +140,27 @@ pub struct GitDockView<'a> {
     /// The commit-message input caret's `(column, row)` cell, when the commit box has
     /// focus (an `accent` bar is drawn there).
     pub caret: Option<(usize, usize)>,
+}
+
+/// The session-timeline dock to draw as base-layer chrome on the right edge.
+///
+/// Like [`GitDockView`] it sits over the surface (the pane viewport insets to its left)
+/// and never over the panes; only one right-dock surface is open at a time (AGENTS Hard
+/// rule 4 - a layer, the terminal never unmounts). The renderer draws a `border` divider
+/// on its left edge, the selected event's `accent.subtle` row fill, and - when rewound to
+/// a past state - an `accent` bar on the viewed event's row. The caller bakes the UI-token
+/// text colors into `rows`; the renderer owns only the decorative quads.
+pub struct TimelineView<'a> {
+    /// The dock rectangle on the surface (right edge, full height), physical px.
+    pub panel: PxRect,
+    /// Pixel position of the text grid's cell `(0, 0)` top-left, physical px.
+    pub text_origin: (f32, f32),
+    /// The dock's text as a monospace grid (rows top to bottom), UI-token colored.
+    pub rows: &'a [Vec<GridCell>],
+    /// Grid row of the selected event (`accent.subtle` fill).
+    pub selected_row: Option<usize>,
+    /// Grid row of the event being viewed in the past (`accent` bar), when rewound.
+    pub viewing_row: Option<usize>,
 }
 
 /// The full-window settings view to draw over the live terminal (AGENTS Hard rule

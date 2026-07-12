@@ -399,6 +399,57 @@ pub(crate) fn gitdock_quads(
     quads
 }
 
+/// Build the decorative quads for the session-timeline dock: the selected event's
+/// `accent.subtle` row fill, an `accent` bar on the viewed event's row when rewound to a
+/// past state, and a `border` divider down the dock's *left* edge. Like the git dock it
+/// shares `bg.base`, so there is no panel fill; text colors come baked into `view.rows`.
+/// Shared by the windowed [`Renderer`](crate::Renderer) and the headless capture.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "row indices into a short dock grid are exact as f32"
+)]
+pub(crate) fn timeline_quads(
+    view: &crate::TimelineView,
+    theme: &crate::theme::Theme,
+    _cell_w: f32,
+    cell_h: f32,
+    scale: f32,
+) -> Vec<Quad> {
+    let panel = view.panel;
+    let stroke = scale.max(1.0);
+    let row_y = |row: usize| view.text_origin.1 + row as f32 * cell_h;
+    let mut quads = Vec::new();
+
+    // The selected event's row fill (a subtle accent tint, like the git dock's selection).
+    if let Some(row) = view.selected_row {
+        let mut subtle = theme.accent.to_linear();
+        subtle[3] = SELECTED_ROW_ALPHA;
+        quads.push(Quad::new(panel.x, row_y(row), panel.w, cell_h, subtle));
+    }
+
+    // When rewound to the past, mark the viewed event with a solid `accent` bar on the
+    // left edge (the guide's "VIEWING" marker).
+    if let Some(row) = view.viewing_row {
+        quads.push(Quad::new(
+            panel.x,
+            row_y(row),
+            (2.0 * scale).max(1.0),
+            cell_h,
+            theme.accent.to_linear(),
+        ));
+    }
+
+    // The divider on the dock's left edge, drawn last so it sits over the row fill.
+    quads.push(Quad::new(
+        panel.x,
+        panel.y,
+        stroke,
+        panel.h,
+        theme.border.to_linear(),
+    ));
+    quads
+}
+
 /// Append a rectangular outline (four `thickness`-px bars) around the pixel rect
 /// `(x, y, w, h)` in linear `color`, drawn *inside* the rect's edges so it never
 /// escapes the pane. Used for the per-pane divider and the focused pane's ring.

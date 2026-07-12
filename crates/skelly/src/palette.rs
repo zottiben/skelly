@@ -53,6 +53,8 @@ pub(crate) enum Action {
     ToggleSidebar,
     /// Open or close the per-repo git diff dock.
     ShowGitDiff,
+    /// Open or close the session-timeline dock.
+    ShowTimeline,
     /// Open the full-window settings view.
     OpenSettings,
     /// Switch the UI theme to Ossein Dark.
@@ -139,6 +141,11 @@ pub(crate) const COMMANDS: &[Command] = &[
         label: "Show git diff",
         hint: "shift cmd G",
         action: Action::ShowGitDiff,
+    },
+    Command {
+        label: "Show session timeline",
+        hint: "shift cmd H",
+        action: Action::ShowTimeline,
     },
     Command {
         label: "Open settings",
