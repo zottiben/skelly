@@ -20,8 +20,7 @@ use crate::prose::{ProseLabel, ProseLayer};
 use crate::text::{PaneTextInput, TextLayer};
 use crate::theme::Theme;
 use crate::{
-    DeadPaneView, GitDockView, OverlayView, PaneView, PxRect, SettingsView, SidebarView,
-    TimelineView,
+    ChromeQuad, GitDockView, OverlayView, PaneView, PxRect, SettingsView, SidebarView, TimelineView,
 };
 
 /// One chrome layer drawn over the terminal with `LoadOp::Load`: a quad pass then a text
@@ -63,23 +62,6 @@ impl ChromeLayer {
     /// Update the fallback glyph color after a theme switch.
     fn set_default_fg(&mut self, fg: crate::theme::Srgb) {
         self.text.set_default_fg(fg);
-    }
-
-    /// A layer made of several independently positioned monospace text grids (the "shell
-    /// exited" scrims - one message per pane); active only when there is something to draw.
-    /// Proportional surfaces use [`set_paint`](Self::set_paint) instead.
-    fn set_all(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        surface: (u32, u32),
-        quads: &[Quad],
-        texts: &[PaneTextInput],
-    ) {
-        self.active = !texts.is_empty() || !quads.is_empty();
-        self.quads.set(device, queue, surface.0, surface.1, quads);
-        self.text.set_panes(texts);
-        self.prose.clear();
     }
 
     /// Upload a proportional-chrome display list: decorative `quads` plus positioned prose
@@ -389,33 +371,41 @@ impl Renderer {
         self.text.set_panes(&text_inputs);
     }
 
-    /// Set the dim "shell exited" overlays to draw next frame (one per pane whose shell
-    /// ended), or clear them with an empty slice. Each draws a translucent `bg.base` scrim
-    /// over the pane's rect - dimming its preserved grid - then its centered message on top.
-    /// Drawn above the terminal text but beneath every other chrome layer (Hard rule 4 - a
-    /// layer; the panes never unmount, so a restart just respawns the shell in place).
-    pub fn set_pane_overlays(&mut self, overlays: &[DeadPaneView]) {
-        if overlays.is_empty() {
+    /// Set the pane-level overlays to draw next frame: a translucent `bg.base` `scrim` over
+    /// each exited pane's rect (dimming its preserved grid), plus the binary's content
+    /// `quads` (empty-state hint-chip pills) and proportional `labels` (the "shell exited"
+    /// message, the empty-state chip text). Clears when all are empty. Drawn above the
+    /// terminal text but beneath every other chrome layer (Hard rule 4 - a layer; the panes
+    /// never unmount, so a restart just respawns the shell in place).
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "surface dimensions are far within f32's exact-integer range"
+    )]
+    pub fn set_pane_overlays(
+        &mut self,
+        scrims: &[PxRect],
+        quads: &[ChromeQuad],
+        labels: &[ProseLabel],
+    ) {
+        if scrims.is_empty() && quads.is_empty() && labels.is_empty() {
             self.pane_overlay.clear();
             return;
         }
-        let mut quads = Vec::with_capacity(overlays.len());
-        let mut texts = Vec::with_capacity(overlays.len());
-        for view in overlays {
-            quads.push(scrim_quad(view.rect, &self.theme));
-            texts.push(PaneTextInput {
-                rows: view.rows,
-                left: view.text_origin.0,
-                top: view.text_origin.1,
-                clip: (view.rect.x, view.rect.y, view.rect.w, view.rect.h),
-            });
-        }
-        self.pane_overlay.set_all(
+        let mut all: Vec<Quad> = scrims.iter().map(|r| scrim_quad(*r, &self.theme)).collect();
+        all.extend(quads.iter().map(chrome_quad));
+        let surface = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: self.config.width as f32,
+            h: self.config.height as f32,
+        };
+        self.pane_overlay.set_paint(
             &self.device,
             &self.queue,
             (self.config.width, self.config.height),
-            &quads,
-            &texts,
+            &all,
+            labels,
+            surface,
         );
     }
 

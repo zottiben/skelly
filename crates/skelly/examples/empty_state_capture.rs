@@ -14,7 +14,10 @@ use std::time::{Duration, Instant};
 
 use skelly_config::Appearance;
 use skelly_pane::{PaneTree, Rect};
-use skelly_render::{measure_cell, AnsiPalette, CapturePane, GridCell, PxRect, Srgb, Theme};
+use skelly_render::{
+    measure_cell, AnsiPalette, CapturePane, ChromeQuad, FontRole, GridCell, PaneOverlay,
+    ProseLabel, PxRect, Srgb, TextMeasure, Theme,
+};
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 
 /// Logical padding around the whole pane area - mirrors the binary's `WINDOW_PAD`.
@@ -28,11 +31,13 @@ const CHIPS: [(&str, &str); 3] = [
     ("\u{2318}T", "new tab"),
     ("\u{2325}|", "split"),
 ];
-const CHIP_PAD: usize = 1;
-const CHIP_GAP: usize = 2;
-/// The vertebra brand mark's logical size + its gap above the chips (design §10.2).
 const MARK_SIZE: f32 = 56.0;
-const MARK_GAP: f32 = 14.0;
+const MARK_GAP: f32 = 18.0;
+const CHIP_H: f32 = 28.0;
+const CHIP_PAD: f32 = 11.0;
+const CHIP_GAP: f32 = 10.0;
+const CHIP_KEY_GAP: f32 = 6.0;
+const CHIP_RADIUS: f32 = 6.0;
 
 fn main() {
     let path = std::env::args()
@@ -74,27 +79,27 @@ fn main() {
 
     let palette = AnsiPalette::resolve(&appearance.theme);
     let theme = Theme::resolve(&appearance.theme);
-    let mut grid: Vec<Vec<GridCell>> = term
+    let grid: Vec<Vec<GridCell>> = term
         .cells()
         .iter()
         .map(|row| row.iter().map(|c| resolve_cell(c, &palette)).collect())
         .collect();
-    overlay_empty_state(&mut grid, &theme);
     let px_rect = PxRect {
         x: rect.x,
         y: rect.y,
         w: rect.w,
         h: rect.h,
     };
-    let cols = grid.first().map_or(0, Vec::len);
-    let logo = empty_state_logo(
-        (rect.x + inset, rect.y + inset),
-        cols,
-        grid.len(),
-        cell_w,
-        cell_h,
-        sc,
-    );
+    // The vertebra mark (a vector overlay via CapturePane::logo) + the proportional hint
+    // chips (through the pane-overlay), mirroring the binary's `emptystate` module.
+    let mut measure = TextMeasure::new(sc);
+    let logo = logo_bounds(px_rect, sc);
+    let mut overlay = PaneOverlay::default();
+    if let Some(logo) = logo {
+        let (q, l) = chips_paint(logo, px_rect, sc, &theme, &mut measure);
+        overlay.quads = q;
+        overlay.labels = l;
+    }
 
     let panes = vec![CapturePane {
         rect: px_rect,
@@ -111,96 +116,114 @@ fn main() {
         height,
         scale,
         &panes,
-        &skelly_render::Chrome::default(),
+        &skelly_render::Chrome {
+            pane_overlay: overlay,
+            ..Default::default()
+        },
     );
     write_png(&path, width, height, &rgba);
     println!("wrote {path}");
 }
 
-/// Bake the empty-state hint chips into `grid` - a faithful copy of the binary's
-/// `emptystate::overlay_onto`. The vertebra mark above them is a vector overlay the renderer
-/// paints from `CapturePane::logo` (see [`empty_state_logo`]), not grid text.
-fn overlay_empty_state(rows: &mut [Vec<GridCell>], theme: &Theme) {
-    let width = rows.first().map_or(0, Vec::len);
-    let Some(chip_row) = chip_row(rows.len()) else {
-        return;
-    };
-    if width == 0 {
-        return;
-    }
-    write_chips(&mut rows[chip_row], width, theme);
-}
-
-/// The chip row (mirrors `emptystate::chip_row`).
-fn chip_row(height: usize) -> Option<usize> {
-    let chip_row = height * 9 / 20 + 2;
-    (chip_row < height).then_some(chip_row)
-}
-
-/// The brand mark's square bounding box, centered on the cell grid and seated above the
-/// chips (mirrors the binary's `empty_state_logo`).
-fn empty_state_logo(
-    origin: (f32, f32),
-    cols: usize,
-    rows_len: usize,
-    cell_w: f32,
-    cell_h: f32,
-    scale: f32,
-) -> Option<PxRect> {
-    let chip_row = chip_row(rows_len)?;
+/// The vertebra mark's square bounding box, centered in `rect` (mirrors the binary's
+/// `emptystate::logo_bounds`).
+fn logo_bounds(rect: PxRect, scale: f32) -> Option<PxRect> {
     let mark = MARK_SIZE * scale;
-    let gap = MARK_GAP * scale;
-    let chip_top = origin.1 + chip_row as f32 * cell_h;
-    let grid_center_x = origin.0 + cols as f32 * cell_w / 2.0;
+    if rect.w < mark * 2.0 || rect.h < mark + (MARK_GAP + CHIP_H) * scale + 60.0 * scale {
+        return None;
+    }
+    let cx = rect.x + rect.w * 0.5;
+    let cy = rect.y + rect.h * 0.42;
     Some(PxRect {
-        x: grid_center_x - mark / 2.0,
-        y: (chip_top - gap - mark).max(origin.1),
+        x: cx - mark * 0.5,
+        y: cy - mark * 0.5,
         w: mark,
         h: mark,
     })
 }
 
-fn write_chips(row: &mut [GridCell], width: usize, theme: &Theme) {
-    let chip_width = |key: &str, label: &str| {
-        CHIP_PAD + key.chars().count() + 1 + label.chars().count() + CHIP_PAD
-    };
-    let total: usize =
-        CHIPS.iter().map(|(k, l)| chip_width(k, l)).sum::<usize>() + CHIP_GAP * (CHIPS.len() - 1);
-    let mut col = width.saturating_sub(total) / 2;
-    for (key, label) in CHIPS {
-        let pill = chip_width(key, label);
-        for c in col..col + pill {
-            if let Some(slot) = row.get_mut(c) {
-                *slot = ui_cell(' ', theme.fg_muted, Some(theme.bg_elevated));
-            }
-        }
-        let mut inner = col + CHIP_PAD;
-        for ch in key.chars() {
-            if let Some(slot) = row.get_mut(inner) {
-                *slot = ui_cell(ch, theme.fg_secondary, Some(theme.bg_elevated));
-            }
-            inner += 1;
-        }
-        inner += 1; // the space between key and label
-        for ch in label.chars() {
-            if let Some(slot) = row.get_mut(inner) {
-                *slot = ui_cell(ch, theme.fg_muted, Some(theme.bg_elevated));
-            }
-            inner += 1;
-        }
-        col += pill + CHIP_GAP;
+/// The proportional hint chips seated below the mark (mirrors `emptystate::chips_paint`):
+/// rounded `bg.elevated` pills with the mono key chord + caption label.
+fn chips_paint(
+    logo: PxRect,
+    rect: PxRect,
+    scale: f32,
+    theme: &Theme,
+    m: &mut TextMeasure,
+) -> (Vec<ChromeQuad>, Vec<ProseLabel>) {
+    let (pad, gap, h, key_gap) = (
+        CHIP_PAD * scale,
+        CHIP_GAP * scale,
+        CHIP_H * scale,
+        CHIP_KEY_GAP * scale,
+    );
+    let sizes: Vec<(f32, f32, f32)> = CHIPS
+        .iter()
+        .map(|(k, l)| {
+            let kw = m.width(k, FontRole::Micro, None);
+            let lw = m.width(l, FontRole::Caption, None);
+            (kw, lw, pad + kw + key_gap + lw + pad)
+        })
+        .collect();
+    let total: f32 =
+        sizes.iter().map(|(_, _, pw)| pw).sum::<f32>() + gap * (CHIPS.len() - 1) as f32;
+    let mut x = rect.x + (rect.w - total) * 0.5;
+    let y = logo.y + logo.h + MARK_GAP * scale;
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
+    for (i, (key, label)) in CHIPS.iter().enumerate() {
+        let (kw, _, pw) = sizes[i];
+        quads.push(ChromeQuad::rounded(
+            PxRect { x, y, w: pw, h },
+            theme.bg_elevated,
+            CHIP_RADIUS * scale,
+        ));
+        push_chip(
+            &mut labels,
+            m,
+            key,
+            FontRole::Micro,
+            theme.fg_secondary,
+            x + pad,
+            y,
+            h,
+        );
+        push_chip(
+            &mut labels,
+            m,
+            label,
+            FontRole::Caption,
+            theme.fg_muted,
+            x + pad + kw + key_gap,
+            y,
+            h,
+        );
+        x += pw + gap;
     }
+    (quads, labels)
 }
 
-fn ui_cell(c: char, fg: Srgb, bg: Option<Srgb>) -> GridCell {
-    GridCell {
-        c,
-        fg,
-        bg,
-        bold: false,
-        italic: false,
-        underline: false,
-    }
+#[allow(clippy::too_many_arguments, reason = "one focused example helper")]
+fn push_chip(
+    labels: &mut Vec<ProseLabel>,
+    m: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    x: f32,
+    y: f32,
+    h: f32,
+) {
+    let line = m.line_height(role);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x,
+        y: y + (h - line) * 0.5,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
 }
 
 fn write_png(path: &str, width: u32, height: u32, rgba: &[u8]) {

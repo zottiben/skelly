@@ -149,23 +149,26 @@ pub struct CaptureOverlay {
     pub labels: Vec<ProseLabel>,
 }
 
-/// A dim "shell exited" overlay for [`capture_panes_rgba`], mirroring
-/// [`DeadPaneView`](crate::DeadPaneView) but owning its rows.
-pub struct CaptureDeadPane {
-    /// The exited pane's rectangle (the scrim fills it), physical px.
-    pub rect: PxRect,
-    /// Pixel position of the centered message grid's cell `(0, 0)` top-left.
-    pub text_origin: (f32, f32),
-    /// The exit message as a monospace grid (UI-token colored).
-    pub rows: Vec<Vec<GridCell>>,
+/// The pane-level overlay for [`capture_panes_rgba`], mirroring `Renderer::set_pane_overlays`:
+/// a `bg.base` scrim over each exited pane, plus content quads (empty-state chip pills) and
+/// proportional labels (the exit message, chip text).
+#[derive(Default)]
+pub struct PaneOverlay {
+    /// The exited-pane rects to scrim, physical px.
+    pub scrims: Vec<PxRect>,
+    /// Content quads over the scrims (empty-state chip pills).
+    pub quads: Vec<ChromeQuad>,
+    /// Positioned proportional labels (the exit message, empty-state chip text).
+    pub labels: Vec<ProseLabel>,
 }
 
 /// The optional chrome layers to composite over the panes in [`capture_panes_rgba`],
 /// mirroring the windowed renderer's base-chrome + overlay passes.
 #[derive(Default)]
 pub struct Chrome<'a> {
-    /// The dim "shell exited" overlays, one per exited pane (drawn just above the panes).
-    pub dead_panes: &'a [CaptureDeadPane],
+    /// The pane-level overlays (exited-pane scrims/messages + empty-state chips), drawn just
+    /// above the panes.
+    pub pane_overlay: PaneOverlay,
     /// The left sidebar (passes 3-4).
     pub sidebar: Option<&'a CaptureSidebar>,
     /// The git diff dock (passes 5-6).
@@ -187,7 +190,8 @@ pub struct Chrome<'a> {
 #[must_use]
 #[allow(
     clippy::cast_possible_truncation,
-    reason = "DPI scale precision loss is irrelevant for the overlay stroke width"
+    clippy::cast_precision_loss,
+    reason = "DPI scale precision loss is irrelevant for stroke width; surface dims are exact in f32"
 )]
 pub fn capture_panes_rgba(
     appearance: &Appearance,
@@ -199,18 +203,21 @@ pub fn capture_panes_rgba(
 ) -> Vec<u8> {
     let theme = Theme::resolve(&appearance.theme);
     // The "shell exited" scrims + messages, drawn just above the panes (before the sidebar).
-    let dead_pane_scenes: Vec<Scene> = chrome
-        .dead_panes
-        .iter()
-        .map(|dp| Scene {
-            quads: vec![scrim_quad(dp.rect, &theme)],
-            rows: &dp.rows,
-            left: dp.text_origin.0,
-            top: dp.text_origin.1,
-            clip: (dp.rect.x, dp.rect.y, dp.rect.w, dp.rect.h),
-            prose: Vec::new(),
-        })
-        .collect();
+    let po = &chrome.pane_overlay;
+    let pane_overlay_scene =
+        (!po.scrims.is_empty() || !po.quads.is_empty() || !po.labels.is_empty()).then(|| {
+            let mut quads: Vec<Quad> = po.scrims.iter().map(|r| scrim_quad(*r, &theme)).collect();
+            quads.extend(po.quads.iter().map(chrome_quad));
+            Scene {
+                quads,
+                rows: &[],
+                left: 0.0,
+                top: 0.0,
+                clip: (0.0, 0.0, width as f32, height as f32),
+                prose: po.labels.clone(),
+            }
+        });
+    let dead_pane_scenes: Vec<Scene> = pane_overlay_scene.into_iter().collect();
     let sidebar_scene = chrome.sidebar.map(|sb| SidebarScene {
         quads: sb.quads.iter().map(chrome_quad).collect(),
         rows: &[],

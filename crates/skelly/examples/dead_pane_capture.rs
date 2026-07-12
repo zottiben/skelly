@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 use skelly_config::Appearance;
 use skelly_pane::{Dir, PaneTree, Rect};
 use skelly_render::{
-    measure_cell, AnsiPalette, CaptureDeadPane, CapturePane, GridCell, PxRect, Srgb, Theme,
+    measure_cell, AnsiPalette, CapturePane, FontRole, GridCell, PaneOverlay, ProseLabel, PxRect,
+    Srgb, TextMeasure, Theme,
 };
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 
@@ -59,8 +60,9 @@ fn main() {
 
     let palette = AnsiPalette::resolve(&appearance.theme);
     let theme = Theme::resolve(&appearance.theme);
+    let mut measure = TextMeasure::new(sc);
     let mut panes = Vec::new();
-    let mut dead_panes = Vec::new();
+    let mut overlay = PaneOverlay::default();
     for (id, rect) in &layout {
         let cols = ((rect.w - 2.0 * inset) / cell_w).floor().max(2.0) as u16;
         let rows = ((rect.h - 2.0 * inset) / cell_h).floor().max(1.0) as u16;
@@ -113,10 +115,14 @@ fn main() {
             logo: None,
         });
         if *id == right {
-            dead_panes.push(exit_overlay(px, cell_w, cell_h, &theme));
+            overlay.scrims.push(px);
+            overlay
+                .labels
+                .extend(exit_message(px, sc, &theme, &mut measure));
         }
     }
 
+    let dead = overlay.scrims.len();
     let rgba = skelly_render::capture_panes_rgba(
         &appearance,
         width,
@@ -124,78 +130,45 @@ fn main() {
         scale,
         &panes,
         &skelly_render::Chrome {
-            dead_panes: &dead_panes,
+            pane_overlay: overlay,
             ..Default::default()
         },
     );
 
     write_png(&path, width, height, &rgba);
-    println!(
-        "wrote {path} ({} panes, {} exited)",
-        panes.len(),
-        dead_panes.len()
-    );
+    println!("wrote {path} ({} panes, {dead} exited)", panes.len());
 }
 
-/// Build the exited-pane overlay - the same layout the binary's `deadpane` module
-/// produces - centered in `rect`: "shell exited" / "exit code 0" (green) / restart hint.
-fn exit_overlay(rect: PxRect, cell_w: f32, cell_h: f32, theme: &Theme) -> CaptureDeadPane {
-    let lines: [Vec<(String, Srgb)>; 4] = [
-        vec![("shell exited".to_owned(), theme.fg_primary)],
-        vec![("exit code 0".to_owned(), theme.diff_add)],
-        Vec::new(),
-        vec![
-            ("\u{21b5} restart".to_owned(), theme.accent),
-            ("   ".to_owned(), theme.fg_muted),
-            ("\u{2325}w close".to_owned(), theme.accent),
-        ],
-    ];
-    let grid_cols = lines
-        .iter()
-        .map(|segs| segs.iter().map(|(t, _)| t.chars().count()).sum())
-        .max()
-        .unwrap_or(0);
-    let rows: Vec<Vec<GridCell>> = lines
-        .iter()
-        .map(|segs| centered_row(segs, grid_cols, theme.fg_muted))
-        .collect();
-    let grid_w = grid_cols as f32 * cell_w;
-    let grid_h = rows.len() as f32 * cell_h;
-    CaptureDeadPane {
-        rect,
-        text_origin: (
-            rect.x + ((rect.w - grid_w) / 2.0).max(0.0),
-            rect.y + ((rect.h - grid_h) / 2.0).max(0.0),
+/// The exited-pane message centered in `rect` - the same layout the binary's `deadpane`
+/// module produces: "shell exited" (title) / "exit code 0" (green body) / restart hint.
+fn exit_message(rect: PxRect, scale: f32, theme: &Theme, m: &mut TextMeasure) -> Vec<ProseLabel> {
+    let lines: [(&str, FontRole, Srgb); 3] = [
+        ("shell exited", FontRole::Title, theme.fg_primary),
+        ("exit code 0", FontRole::Body, theme.diff_add),
+        (
+            "\u{21b5} restart    \u{2325}w close",
+            FontRole::Caption,
+            theme.accent,
         ),
-        rows,
+    ];
+    let gap = 8.0 * scale;
+    let total: f32 = lines.iter().map(|(_, r, _)| m.line_height(*r)).sum::<f32>() + gap * 2.0;
+    let mut y = rect.y + (rect.h - total) * 0.5;
+    let mut labels = Vec::new();
+    for (text, role, color) in lines {
+        let w = m.width(text, role, None);
+        labels.push(ProseLabel {
+            text: text.to_owned(),
+            x: rect.x + (rect.w - w) * 0.5,
+            y,
+            role,
+            color,
+            weight: None,
+            max_w: f32::MAX,
+        });
+        y += m.line_height(role) + gap;
     }
-}
-
-/// A `width`-cell row with `segments` (text + color) laid out centered.
-fn centered_row(segments: &[(String, Srgb)], width: usize, blank_fg: Srgb) -> Vec<GridCell> {
-    let content: usize = segments.iter().map(|(t, _)| t.chars().count()).sum();
-    let mut row = vec![ui_cell(' ', blank_fg); width];
-    let mut col = width.saturating_sub(content) / 2;
-    for (text, fg) in segments {
-        for ch in text.chars() {
-            if let Some(slot) = row.get_mut(col) {
-                *slot = ui_cell(ch, *fg);
-            }
-            col += 1;
-        }
-    }
-    row
-}
-
-fn ui_cell(c: char, fg: Srgb) -> GridCell {
-    GridCell {
-        c,
-        fg,
-        bg: None,
-        bold: false,
-        italic: false,
-        underline: false,
-    }
+    labels
 }
 
 /// Encode tight RGBA8 bytes to a PNG at `path`.

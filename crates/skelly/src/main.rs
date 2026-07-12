@@ -28,11 +28,11 @@ use anyhow::Context as _;
 use skelly_config::Config;
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
 use skelly_render::{
-    AnsiPalette, DeadPaneView, GitDockView, GridCell, OverlayView, PaneView, PxRect, Renderer,
+    AnsiPalette, GitDockView, GridCell, OverlayView, PaneView, ProseLabel, PxRect, Renderer,
     SettingsView, SidebarView, Srgb, TextMeasure, Theme, TimelineView,
 };
 use skelly_session::{Actor, Repo, SessionEvent, ShadowWorktree};
-use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
+use skelly_term::{CellAttrs, CellColor, ExitStatus, TermCell, Terminal};
 
 use confirm::{CloseTarget, Confirm};
 use gitdock::GitDock;
@@ -444,7 +444,6 @@ impl App {
     /// resolved cell grid, cursor, selection, rectangle, and focus flag.
     fn pane_frames(&self) -> Vec<PaneFrame> {
         let inset = self.pane_inset();
-        let (cell_w, cell_h) = self.cell_size();
         let scale = scale32(self.scale);
         let viewport = self.viewport_rect();
         let ws = self.active_tab();
@@ -457,7 +456,7 @@ impl App {
             .into_iter()
             .filter_map(|(id, rect)| {
                 let term = ws.panes.get(&id)?;
-                let mut rows: Vec<Vec<GridCell>> = term
+                let rows: Vec<Vec<GridCell>> = term
                     .cells()
                     .iter()
                     .map(|row| {
@@ -474,9 +473,10 @@ impl App {
                     h: rect.h,
                 };
                 let cols = rows.first().map_or(0, Vec::len);
+                // A pristine tab paints the vertebra mark (here) + hint chips (built as a
+                // proportional pane-overlay in `redraw`) over its blank grid.
                 let logo = if empty_state && term.exit_status().is_none() {
-                    emptystate::overlay_onto(&mut rows, &self.theme);
-                    empty_state_logo(origin, cols, rows.len(), cell_w, cell_h, scale)
+                    emptystate::logo_bounds(rect, scale)
                 } else {
                     None
                 };
@@ -497,41 +497,62 @@ impl App {
             .collect()
     }
 
-    /// Build the "shell exited" overlay for each visible pane whose shell has ended: the
-    /// centered exit-message grid, positioned within the pane's rectangle. Empty while
-    /// every pane's shell is alive (the common case), so it costs nothing then.
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "the message grid is a handful of small cells; the usize->f32 cast is exact"
-    )]
-    fn dead_pane_frames(&self) -> Vec<DeadPaneFrame> {
-        let (cell_w, cell_h) = self.cell_size();
+    /// Build the pane-level overlay display list drawn above the terminal text: a `bg.base`
+    /// scrim + centered "shell exited" message for each pane whose shell ended, and - on a
+    /// pristine single-pane tab - the empty-state hint chips beneath the vertebra mark. Empty
+    /// while every pane is a live shell (the common case), so it costs nothing then.
+    fn pane_overlay_paint(
+        &mut self,
+    ) -> (Vec<PxRect>, Vec<skelly_render::ChromeQuad>, Vec<ProseLabel>) {
+        let scale = scale32(self.scale);
         let viewport = self.viewport_rect();
-        let ws = self.active_tab();
-        ws.tree
+        let ws = &self.tabs[self.active];
+        let empty_state = ws.is_empty_state();
+        // Collect the pane rects + exit statuses first, so the tab borrow ends before the
+        // measurer's mutable borrow.
+        let panes: Vec<(PxRect, Option<ExitStatus>)> = ws
+            .tree
             .layout(viewport)
             .into_iter()
             .filter_map(|(id, rect)| {
-                let status = ws.panes.get(&id)?.exit_status()?;
-                let rows = deadpane::overlay_grid(&status, &self.theme);
-                // Center the message grid within the pane rect.
-                let grid_w = rows.first().map_or(0, Vec::len) as f32 * cell_w;
-                let grid_h = rows.len() as f32 * cell_h;
-                Some(DeadPaneFrame {
-                    rect: PxRect {
-                        x: rect.x,
-                        y: rect.y,
-                        w: rect.w,
-                        h: rect.h,
-                    },
-                    text_origin: (
-                        rect.x + ((rect.w - grid_w) / 2.0).max(0.0),
-                        rect.y + ((rect.h - grid_h) / 2.0).max(0.0),
-                    ),
-                    rows,
-                })
+                let term = ws.panes.get(&id)?;
+                let px = PxRect {
+                    x: rect.x,
+                    y: rect.y,
+                    w: rect.w,
+                    h: rect.h,
+                };
+                Some((px, term.exit_status()))
             })
-            .collect()
+            .collect();
+
+        let mut scrims = Vec::new();
+        let mut quads = Vec::new();
+        let mut labels = Vec::new();
+        for (rect, status) in &panes {
+            if let Some(status) = status {
+                scrims.push(*rect);
+                labels.extend(deadpane::message_labels(
+                    status,
+                    *rect,
+                    scale,
+                    &self.theme,
+                    &mut self.measure,
+                ));
+            }
+        }
+        // The empty state (a pristine single-pane tab, no exited panes): the hint chips.
+        if empty_state && scrims.is_empty() {
+            if let Some((rect, None)) = panes.first() {
+                if let Some(logo) = emptystate::logo_bounds(*rect, scale) {
+                    let (q, l) =
+                        emptystate::chips_paint(logo, *rect, scale, &self.theme, &mut self.measure);
+                    quads.extend(q);
+                    labels.extend(l);
+                }
+            }
+        }
+        (scrims, quads, labels)
     }
 
     /// Repaint every visible pane from its terminal grid, resolving cell colors and
@@ -541,9 +562,9 @@ impl App {
 
         let views: Vec<PaneView> = frames.iter().map(PaneFrame::view).collect();
 
-        // Build the dim overlays for any exited panes and the chrome frames, all before
-        // the mutable renderer borrow.
-        let dead = self.dead_pane_frames();
+        // Build the pane-level overlays (exited-pane scrims/messages + empty-state chips) and
+        // the chrome frames, all before the mutable renderer borrow.
+        let (scrims, pane_overlay_quads, pane_overlay_labels) = self.pane_overlay_paint();
         let sidebar = self.sidebar.visible().then(|| self.build_sidebar_frame());
         let git_dock = self.git_dock.open.then(|| self.build_git_dock_frame());
         let timeline = self.timeline.open.then(|| self.build_timeline_frame());
@@ -560,15 +581,7 @@ impl App {
 
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_panes(&views);
-            let dead_views: Vec<DeadPaneView> = dead
-                .iter()
-                .map(|f| DeadPaneView {
-                    rect: f.rect,
-                    text_origin: f.text_origin,
-                    rows: &f.rows,
-                })
-                .collect();
-            renderer.set_pane_overlays(&dead_views);
+            renderer.set_pane_overlays(&scrims, &pane_overlay_quads, &pane_overlay_labels);
             match &sidebar {
                 Some(paint) => renderer.set_sidebar(Some(&SidebarView {
                     panel: paint.panel,
@@ -2018,14 +2031,6 @@ impl PaneFrame {
     }
 }
 
-/// Owned "shell exited" overlay data the borrowed [`DeadPaneView`]s point at during a
-/// repaint (the scrimmed pane rect + its centered exit message).
-struct DeadPaneFrame {
-    rect: PxRect,
-    text_origin: (f32, f32),
-    rows: Vec<Vec<GridCell>>,
-}
-
 /// Owned command-palette frame data the borrowed [`OverlayView`] points at.
 struct PaletteFrame {
     panel: PxRect,
@@ -2487,39 +2492,6 @@ fn is_palette_dismiss(key_event: &KeyEvent, mods: ModifiersState) -> bool {
     }
 }
 
-/// The empty-state brand watermark's square bounding box for a pristine pane: a
-/// `MARK_SIZE` square (physical px) seated `MARK_GAP` above the hint-chip row (design
-/// §10.2), so the vector mark and the chip text read as one lockup. It is centered on the
-/// *cell grid* (`origin.x + cols·cell_w/2`), not the pane rect - the chips are centered on
-/// the grid too, and a pane's content width is rarely an exact multiple of `cell_w`, so
-/// centering on the rect would leave the mark up to half a cell off from the chips. `origin`
-/// is the pane's cell `(0,0)` top-left; `cols`/`rows_len` the grid dimensions. `None` when
-/// the grid is too small to seat the lockup (mirrors [`emptystate::chip_row`]).
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "grid row/column counts are small non-negative values, exact as f32"
-)]
-fn empty_state_logo(
-    origin: (f32, f32),
-    cols: usize,
-    rows_len: usize,
-    cell_w: f32,
-    cell_h: f32,
-    scale: f32,
-) -> Option<PxRect> {
-    let chip_row = emptystate::chip_row(rows_len)?;
-    let mark = emptystate::MARK_SIZE * scale;
-    let gap = emptystate::MARK_GAP * scale;
-    let chip_top = origin.1 + chip_row as f32 * cell_h;
-    let grid_center_x = origin.0 + cols as f32 * cell_w / 2.0;
-    Some(PxRect {
-        x: grid_center_x - mark / 2.0,
-        y: (chip_top - gap - mark).max(origin.1),
-        w: mark,
-        h: mark,
-    })
-}
-
 /// Cast a pointer position to `f32`.
 #[allow(
     clippy::cast_possible_truncation,
@@ -2754,10 +2726,9 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cycle_index, dim, empty_state_logo, index_after_close, order, overlay_panel_top,
-        overlay_rise_offset, pane_action, pane_dims, panic_message, pointer_cell_in, process_name,
-        resolve_cell, selection_cells, selection_text, tab_action, PaneAction, Selection,
-        TabAction,
+        cycle_index, dim, index_after_close, order, overlay_panel_top, overlay_rise_offset,
+        pane_action, pane_dims, panic_message, pointer_cell_in, process_name, resolve_cell,
+        selection_cells, selection_text, tab_action, PaneAction, Selection, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -2778,25 +2749,6 @@ mod tests {
             .iter()
             .map(|line| line.chars().map(plain).collect())
             .collect()
-    }
-
-    #[test]
-    fn empty_state_logo_centers_the_mark_on_the_grid_above_the_chips() {
-        // 80x24 grid, cell (0,0) at (12,12), 8x16 cells, scale 1: a roomy grid seats a mark.
-        let bounds = empty_state_logo((12.0, 12.0), 80, 24, 8.0, 16.0, 1.0).expect("seats a mark");
-        // A MARK_SIZE (56) square at scale 1.
-        assert!((bounds.w - 56.0).abs() < 1e-3 && (bounds.h - 56.0).abs() < 1e-3);
-        // Centered on the grid content (origin.x + cols*cell_w/2) so it lines up with the
-        // grid-centered chips, NOT on the pane rect.
-        let grid_center_x = 12.0 + 80.0 * 8.0 / 2.0;
-        assert!((bounds.x + bounds.w / 2.0 - grid_center_x).abs() < 1e-3);
-        // Seated in the upper half, above the (centered) chip row.
-        assert!(bounds.y + bounds.h < 12.0 + 24.0 * 16.0 / 2.0);
-    }
-
-    #[test]
-    fn empty_state_logo_is_none_when_the_grid_is_too_small() {
-        assert!(empty_state_logo((0.0, 0.0), 20, 3, 8.0, 16.0, 1.0).is_none());
     }
 
     #[test]

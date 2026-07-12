@@ -1,46 +1,32 @@
 //! The "shell exited" overlay content (the design "Shell exits / crashes" edge state).
 //!
-//! When a pane's shell ends, the renderer dims the pane and draws a small centered
-//! message over its preserved scrollback. This module is the pure part: it turns an
-//! [`ExitStatus`] into that message as a UI-token-colored [`GridCell`] grid, sized to its
-//! widest line. The binary centers the grid in the pane rect and hands it to
-//! `Renderer::set_pane_overlays`; the wiring (detecting the exit, restart on `↵`) lives in
-//! `main.rs`. Kept here so the message layout is unit-testable without a GPU.
+//! When a pane's shell ends, the renderer dims the pane (a `bg.base` scrim over its
+//! preserved scrollback) and draws a small centered message over it. This module is the
+//! pure part: it turns an [`ExitStatus`] into that message as centered proportional
+//! [`ProseLabel`]s in the guide's fonts. The binary hands the labels (plus the scrim rect)
+//! to `Renderer::set_pane_overlays`; the wiring (detecting the exit, restart on `↵`) lives
+//! in `main.rs`. Kept here so the message layout is unit-testable without a GPU.
 
-use skelly_render::{GridCell, Srgb, Theme};
+use skelly_render::{FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
 use skelly_term::ExitStatus;
 
 /// The restart / close hint shown beneath the exit line. `↵` restarts the shell in place;
 /// `⌥w` closes the pane (this app's pane-close chord; the design's `⌘W` closes the tab).
-const HINT_RESTART: &str = "\u{21b5} restart";
-const HINT_CLOSE: &str = "\u{2325}w close";
+const HINT: &str = "\u{21b5} restart    \u{2325}w close";
+/// Vertical gap (logical px) between message lines.
+const LINE_GAP: f32 = 8.0;
 
-/// One colored run within a message line.
-struct Segment {
-    text: String,
-    fg: Srgb,
-}
-
-impl Segment {
-    fn new(text: impl Into<String>, fg: Srgb) -> Self {
-        Self {
-            text: text.into(),
-            fg,
-        }
-    }
-
-    fn width(&self) -> usize {
-        self.text.chars().count()
-    }
-}
-
-/// Build the centered exit message for a pane whose shell ended, as a UI-token-colored
-/// grid sized to its widest line (the caller centers it within the pane).
-///
-/// Reads only theme tokens (Hard rule 2): the title in `fg.primary`, the exit detail in
-/// `diff.add` when clean or `diff.del` when it failed / was signalled, and the key hints
-/// with `accent` chords over `fg.muted` words.
-pub(crate) fn overlay_grid(status: &ExitStatus, theme: &Theme) -> Vec<Vec<GridCell>> {
+/// Build the centered "shell exited" message for a pane whose shell ended, as proportional
+/// labels centered within `rect` (physical px). Reads only theme tokens (Hard rule 2): the
+/// title in `fg.primary`, the exit detail in `diff.add` when clean or `diff.del` when it
+/// failed / was signalled, and the restart/close hint in `accent`.
+pub(crate) fn message_labels(
+    status: &ExitStatus,
+    rect: PxRect,
+    scale: f32,
+    theme: &Theme,
+    measure: &mut TextMeasure,
+) -> Vec<ProseLabel> {
     let detail = match &status.signal {
         Some(signal) => format!("killed by {signal}"),
         None => format!("exit code {}", status.code),
@@ -48,76 +34,65 @@ pub(crate) fn overlay_grid(status: &ExitStatus, theme: &Theme) -> Vec<Vec<GridCe
     let detail_fg = if status.success() {
         theme.diff_add
     } else {
-        theme.diff_del
+        theme.fg_muted
     };
-    let lines: Vec<Vec<Segment>> = vec![
-        vec![Segment::new("shell exited", theme.fg_primary)],
-        vec![Segment::new(detail, detail_fg)],
-        Vec::new(), // spacer
-        vec![
-            Segment::new(HINT_RESTART, theme.accent),
-            Segment::new("   ", theme.fg_muted),
-            Segment::new(HINT_CLOSE, theme.accent),
-        ],
+    let lines: [(&str, FontRole, Srgb); 3] = [
+        ("shell exited", FontRole::Title, theme.fg_primary),
+        (&detail, FontRole::Body, detail_fg),
+        (HINT, FontRole::Caption, theme.accent),
     ];
-
-    let width = lines
+    let gap = LINE_GAP * scale;
+    let total: f32 = lines
         .iter()
-        .map(|segments| segments.iter().map(Segment::width).sum())
-        .max()
-        .unwrap_or(0);
-    lines
-        .iter()
-        .map(|segments| render_line(segments, width, theme.fg_muted))
-        .collect()
-}
-
-/// Render one line's segments centered in a `width`-cell row (blank cells `blank_fg`).
-fn render_line(segments: &[Segment], width: usize, blank_fg: Srgb) -> Vec<GridCell> {
-    let content: usize = segments.iter().map(Segment::width).sum();
-    let mut row = vec![cell(' ', blank_fg); width];
-    let mut col = width.saturating_sub(content) / 2;
-    for segment in segments {
-        for ch in segment.text.chars() {
-            if let Some(slot) = row.get_mut(col) {
-                *slot = cell(ch, segment.fg);
-            }
-            col += 1;
-        }
+        .map(|(_, role, _)| measure.line_height(*role))
+        .sum::<f32>()
+        + gap * 2.0;
+    let mut y = rect.y + (rect.h - total) * 0.5;
+    let mut labels = Vec::new();
+    for (text, role, color) in lines {
+        let w = measure.width(text, role, None);
+        labels.push(ProseLabel {
+            text: text.to_owned(),
+            x: rect.x + (rect.w - w) * 0.5,
+            y,
+            role,
+            color,
+            weight: None,
+            max_w: f32::MAX,
+        });
+        y += measure.line_height(role) + gap;
     }
-    row
-}
-
-/// A plain UI cell: a glyph in `fg`, no background or attributes.
-fn cell(c: char, fg: Srgb) -> GridCell {
-    GridCell {
-        c,
-        fg,
-        bg: None,
-        bold: false,
-        italic: false,
-        underline: false,
-    }
+    labels
 }
 
 #[cfg(test)]
 mod tests {
-    use super::overlay_grid;
-    use skelly_render::Theme;
+    use super::message_labels;
+    use skelly_render::{PxRect, TextMeasure, Theme};
     use skelly_term::ExitStatus;
 
-    fn joined(status: &ExitStatus) -> String {
+    fn rect() -> PxRect {
+        PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 400.0,
+        }
+    }
+
+    fn texts(status: &ExitStatus) -> String {
         let theme = Theme::resolve("ossein-dark");
-        overlay_grid(status, &theme)
+        let mut m = TextMeasure::new(2.0);
+        message_labels(status, rect(), 2.0, &theme, &mut m)
             .iter()
-            .map(|row| row.iter().map(|c| c.c).collect::<String>())
+            .map(|l| l.text.clone())
             .collect::<Vec<_>>()
             .join("\n")
     }
 
     #[test]
     fn clean_exit_shows_code_and_restart_hint() {
-        let text = joined(&ExitStatus {
+        let text = texts(&ExitStatus {
             code: 0,
             signal: None,
         });
@@ -129,58 +104,48 @@ mod tests {
 
     #[test]
     fn nonzero_exit_reports_its_code() {
-        let text = joined(&ExitStatus {
+        assert!(texts(&ExitStatus {
             code: 130,
             signal: None,
-        });
-        assert!(text.contains("exit code 130"), "{text}");
+        })
+        .contains("exit code 130"));
     }
 
     #[test]
     fn signalled_exit_names_the_signal() {
-        let text = joined(&ExitStatus {
+        assert!(texts(&ExitStatus {
             code: 1,
             signal: Some("SIGTERM".to_owned()),
-        });
-        assert!(text.contains("killed by SIGTERM"), "{text}");
+        })
+        .contains("killed by SIGTERM"));
     }
 
     #[test]
     fn detail_color_reflects_success() {
         let theme = Theme::resolve("ossein-dark");
-        let clean = overlay_grid(
+        let mut m = TextMeasure::new(2.0);
+        let clean = message_labels(
             &ExitStatus {
                 code: 0,
                 signal: None,
             },
+            rect(),
+            2.0,
             &theme,
+            &mut m,
         );
-        let failed = overlay_grid(
+        // The exit-detail line (index 1) is green on a clean exit.
+        assert_eq!(clean[1].color, theme.diff_add);
+        let failed = message_labels(
             &ExitStatus {
                 code: 1,
                 signal: None,
             },
+            rect(),
+            2.0,
             &theme,
+            &mut m,
         );
-        // The exit-detail row (row 1) is green on success, red on failure.
-        let color_of = |grid: &[Vec<skelly_render::GridCell>]| {
-            grid[1].iter().find(|c| c.c == 'e').map(|c| c.fg)
-        };
-        assert_eq!(color_of(&clean), Some(theme.diff_add));
-        assert_eq!(color_of(&failed), Some(theme.diff_del));
-    }
-
-    #[test]
-    fn every_row_has_equal_width() {
-        let grid = overlay_grid(
-            &ExitStatus {
-                code: 0,
-                signal: None,
-            },
-            &Theme::resolve("ossein-dark"),
-        );
-        let width = grid[0].len();
-        assert!(width > 0);
-        assert!(grid.iter().all(|row| row.len() == width), "ragged grid");
+        assert_ne!(failed[1].color, theme.diff_add, "a failed exit isn't green");
     }
 }
