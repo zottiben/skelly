@@ -432,16 +432,16 @@ fn push_event(
 ) {
     let (panel, theme, scale, row_h) = (ctx.panel, ctx.theme, ctx.scale, ctx.row_h);
     if ev.fill {
-        quads.push(ChromeQuad::tint(
+        // accent.subtle selected-row band, sRGB-composited over the dock's bg.base backing so
+        // it reads at the guide's weight (not the brighter linear-space blend).
+        quads.push(ChromeQuad::fill(
             PxRect {
                 x: panel.x,
                 y: ev.row_top,
                 w: panel.w,
                 h: row_h,
             },
-            theme.accent,
-            0.14,
-            0.0,
+            theme.accent_subtle_on(theme.bg_base.to_srgb()),
         ));
         if ev.selected {
             quads.push(ChromeQuad::fill(
@@ -703,8 +703,16 @@ mod tests {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
         let paint = dock.build(panel(), 2.0, &theme, &mut m);
-        // Rewound: a selected-row accent.subtle fill plus a solid accent viewing bar.
-        assert!(paint.quads.iter().any(|q| q.alpha < 1.0), "selected fill");
+        // Rewound: a selected-row accent.subtle fill (opaque, pre-composited over bg.base) plus
+        // a solid accent viewing bar.
+        let selected_fill = theme.accent_subtle_on(theme.bg_base.to_srgb());
+        assert!(
+            paint
+                .quads
+                .iter()
+                .any(|q| q.color == selected_fill && (q.alpha - 1.0).abs() < 1e-6),
+            "selected fill"
+        );
         assert!(
             paint
                 .quads

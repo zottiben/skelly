@@ -142,15 +142,14 @@ fn build_dock(width: u32, height: u32, scale: f32, norepo: bool, theme: &Theme) 
         let by = mid + 34.0 * scale;
         let w = m.width("Init repo  \u{21a9}", FontRole::Body, None);
         let bx = panel.x + (panel.w - w) * 0.5;
-        quads.push(ChromeQuad::tint(
+        quads.push(ChromeQuad::rounded(
             PxRect {
                 x: bx - 10.0 * scale,
                 y: by,
                 w: w + 20.0 * scale,
                 h: 28.0 * scale,
             },
-            theme.accent,
-            0.14,
+            theme.accent_subtle_on(theme.bg_base.to_srgb()),
             6.0 * scale,
         ));
         gpush(
@@ -282,16 +281,15 @@ fn build_dock(width: u32, height: u32, scale: f32, norepo: bool, theme: &Theme) 
     for (i, (check, letter, path, add, del, lfg, selected)) in files.iter().enumerate() {
         let top = y + i as f32 * G_FILE_ROW_H * scale;
         if *selected {
-            quads.push(ChromeQuad::tint(
+            // accent.subtle selected-row fill, sRGB-composited over bg.base (mirrors the binary).
+            quads.push(ChromeQuad::fill(
                 PxRect {
                     x: panel.x,
                     y: top,
                     w: panel.w,
                     h: G_FILE_ROW_H * scale,
                 },
-                theme.accent,
-                G_DIFF_BG_ALPHA,
-                0.0,
+                theme.accent_subtle_on(theme.bg_base.to_srgb()),
             ));
         }
         let mut fx = cx;
@@ -403,14 +401,14 @@ fn build_dock(width: u32, height: u32, scale: f32, norepo: bool, theme: &Theme) 
             w: panel.w,
             h: row_h,
         };
+        // Diff-row backgrounds pre-composite in sRGB over bg.base (mirrors the binary).
+        let base = theme.bg_base.to_srgb();
         if *sign == '@' {
-            quads.push(ChromeQuad::tint(
-                full,
-                theme.diff_hunk,
-                G_HUNK_BG_ALPHA,
-                0.0,
-            ));
-            quads.push(ChromeQuad::tint(full, theme.accent, G_DIFF_BG_ALPHA, 0.0));
+            // A focused hunk header: an accent wash over a diff.hunk wash over bg.base.
+            let hunk_bg = theme
+                .accent
+                .over(theme.diff_hunk.over(base, G_HUNK_BG_ALPHA), G_DIFF_BG_ALPHA);
+            quads.push(ChromeQuad::fill(full, hunk_bg));
             gpush(
                 &mut labels,
                 &mut m,
@@ -440,7 +438,7 @@ fn build_dock(width: u32, height: u32, scale: f32, norepo: bool, theme: &Theme) 
                 _ => (theme.fg_secondary, None),
             };
             if let Some(b) = bg {
-                quads.push(ChromeQuad::tint(full, b, G_DIFF_BG_ALPHA, 0.0));
+                quads.push(ChromeQuad::fill(full, b.over(base, G_DIFF_BG_ALPHA)));
             }
             let gutter_fg = if *sign == ' ' { theme.fg_muted } else { fg };
             gpush_right(

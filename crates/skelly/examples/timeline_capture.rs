@@ -232,16 +232,15 @@ fn build_dock(width: u32, height: u32, scale: f32, theme: &Theme) -> CaptureTime
     for (i, e) in events.iter().enumerate() {
         let row_top = y + i as f32 * row_h;
         if i == selected {
-            quads.push(ChromeQuad::tint(
+            // accent.subtle selected-row fill, sRGB-composited over bg.base (mirrors the binary).
+            quads.push(ChromeQuad::fill(
                 PxRect {
                     x: panel.x,
                     y: row_top,
                     w: panel.w,
                     h: row_h,
                 },
-                theme.accent,
-                0.14,
-                0.0,
+                theme.accent_subtle_on(theme.bg_base.to_srgb()),
             ));
             quads.push(ChromeQuad::fill(
                 PxRect {

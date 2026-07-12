@@ -386,15 +386,14 @@ impl GitDock {
             let by = mid + 34.0 * scale;
             let w = measure.width("Init repo  \u{21a9}", FontRole::Body, None);
             let bx = panel.x + (panel.w - w) * 0.5;
-            quads.push(ChromeQuad::tint(
+            quads.push(ChromeQuad::rounded(
                 PxRect {
                     x: bx - 10.0 * scale,
                     y: by,
                     w: w + 20.0 * scale,
                     h: 28.0 * scale,
                 },
-                theme.accent,
-                0.14,
+                theme.accent_subtle_on(theme.bg_base.to_srgb()),
                 6.0 * scale,
             ));
             push_row(
@@ -586,16 +585,16 @@ impl GitDock {
             };
             let selected = index == self.selected;
             if selected {
-                quads.push(ChromeQuad::tint(
+                // accent.subtle selected-row band, sRGB-composited over the dock's bg.base
+                // backing so it reads at the guide's weight (not the brighter linear blend).
+                quads.push(ChromeQuad::fill(
                     PxRect {
                         x: ctx.panel.x,
                         y,
                         w: ctx.panel.w,
                         h: row_h,
                     },
-                    theme.accent,
-                    DIFF_BG_ALPHA,
-                    0.0,
+                    theme.accent_subtle_on(theme.bg_base.to_srgb()),
                 ));
             }
             push_file_row(labels, measure, ctx, file, selected, y);
@@ -1029,11 +1028,18 @@ fn push_diff_line(
         w: panel.w,
         h: row_h,
     };
+    // Diff-row backgrounds pre-composite their translucent hue over the dock's bg.base backing
+    // in sRGB space (the guide's CSS weight), not the brighter linear-space GPU blend.
+    let base = theme.bg_base.to_srgb();
     if line.kind == DiffRowKind::Hunk {
-        quads.push(ChromeQuad::tint(full, theme.diff_hunk, HUNK_BG_ALPHA, 0.0));
-        if focused_hunk {
-            quads.push(ChromeQuad::tint(full, theme.accent, DIFF_BG_ALPHA, 0.0));
-        }
+        // The `@@` hunk header: a diff.hunk wash, deepened to an accent wash when it is focused.
+        let hunk_bg = theme.diff_hunk.over(base, HUNK_BG_ALPHA);
+        let row_bg = if focused_hunk {
+            theme.accent.over(hunk_bg, DIFF_BG_ALPHA)
+        } else {
+            hunk_bg
+        };
+        quads.push(ChromeQuad::fill(full, row_bg));
         let role_h = DIFF_ROW_H;
         push_row(
             labels,
@@ -1076,7 +1082,7 @@ fn push_diff_line(
             _ => None,
         };
         if let Some(bg) = alpha_token {
-            quads.push(ChromeQuad::tint(full, bg, DIFF_BG_ALPHA, 0.0));
+            quads.push(ChromeQuad::fill(full, bg.over(base, DIFF_BG_ALPHA)));
         }
         if let Some(number) = line.gutter {
             let gutter_fg = if line.sign == ' ' { theme.fg_muted } else { fg };
@@ -1411,12 +1417,13 @@ mod tests {
         assert!(joined.contains("src/session/timeline.rs"));
         assert!(joined.contains("old/legacy.rs"));
         assert!(joined.contains("CHANGED - 3"));
-        // The selected file sits behind an accent.subtle fill.
+        // The selected file sits behind an accent.subtle fill, pre-composited opaque over bg.base.
+        let selected_fill = theme.accent_subtle_on(theme.bg_base.to_srgb());
         assert!(
             paint
                 .quads
                 .iter()
-                .any(|q| q.color == theme.accent && (q.alpha - 0.14).abs() < 1e-6),
+                .any(|q| q.color == selected_fill && (q.alpha - 1.0).abs() < 1e-6),
             "selected-file fill"
         );
     }
@@ -1444,20 +1451,28 @@ mod tests {
         dock.load(sample_status());
         dock.set_diff(sample_diff(), false);
         let paint = built(&dock);
-        let count = |color, alpha: f32| {
+        // Diff-row backgrounds are now opaque, pre-composited over bg.base in sRGB space.
+        let base = theme.bg_base.to_srgb();
+        let count = |color| {
             paint
                 .quads
                 .iter()
-                .filter(|q| q.color == color && (q.alpha - alpha).abs() < 1e-6)
+                .filter(|q| q.color == color && (q.alpha - 1.0).abs() < 1e-6)
                 .count()
         };
+        // The (focused) hunk header is an accent wash over a diff.hunk wash over bg.base.
+        let hunk_bg = theme.accent.over(theme.diff_hunk.over(base, 0.08), 0.14);
+        assert_eq!(count(hunk_bg), 1, "one focused hunk-header background");
         assert_eq!(
-            count(theme.diff_hunk, 0.08),
+            count(theme.diff_add.over(base, 0.14)),
             1,
-            "one hunk-header background"
+            "one addition background"
         );
-        assert_eq!(count(theme.diff_add, 0.14), 1, "one addition background");
-        assert_eq!(count(theme.diff_del, 0.14), 1, "one deletion background");
+        assert_eq!(
+            count(theme.diff_del.over(base, 0.14)),
+            1,
+            "one deletion background"
+        );
         let joined = texts(&paint);
         // The hunk header reconstructs its counts (1 context + 1 del = 2 old; 1+1 = 2 new).
         assert!(joined.contains("@@ -18,2 +18,2 @@ impl PaneTree"));
@@ -1559,11 +1574,12 @@ mod tests {
             texts(&paint).contains("file30.rs"),
             "selected file scrolled into view"
         );
+        let selected_fill = theme.accent_subtle_on(theme.bg_base.to_srgb());
         assert!(
             paint
                 .quads
                 .iter()
-                .any(|q| q.color == theme.accent && (q.alpha - 0.14).abs() < 1e-6),
+                .any(|q| q.color == selected_fill && (q.alpha - 1.0).abs() < 1e-6),
             "selection fill"
         );
     }
