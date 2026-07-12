@@ -70,18 +70,30 @@ fn lin(channel: u8) -> f32 {
 pub struct Theme {
     /// `bg.base` - the app and terminal background (linear, for the GPU clear).
     pub bg_base: Rgba,
+    /// `bg.sidebar` - the tab sidebar surface, one step off `bg.base` (sRGB).
+    pub bg_sidebar: Srgb,
+    /// `bg.surface` - the base for panels, cards, and popovers - the docks (sRGB).
+    pub bg_surface: Srgb,
+    /// `bg.elevated` - the surface for menus, the command palette, and modals (sRGB).
+    pub bg_elevated: Srgb,
+    /// `bg.inset` - the recessed surface for inputs, wells, and code blocks (sRGB).
+    pub bg_inset: Srgb,
     /// `fg.primary` - primary UI/terminal text (sRGB, for glyph rendering).
     pub fg_primary: Srgb,
     /// `fg.secondary` - secondary UI text; also the palette's command labels (sRGB).
     pub fg_secondary: Srgb,
     /// `fg.muted` - muted UI text: key hints, group labels, placeholders (sRGB).
     pub fg_muted: Srgb,
+    /// `fg.faint` - disabled text and the empty-state watermark (sRGB).
+    pub fg_faint: Srgb,
     /// `accent` - brand / terminal cursor color; the focus ring on interactive UI
     /// elements (sRGB).
     pub accent: Srgb,
-    /// `bg.elevated` - the surface for menus, the command palette, and modals (sRGB).
-    pub bg_elevated: Srgb,
-    /// `border` - the subtle divider drawn between tiled panes (sRGB).
+    /// `accent.hover` - the brighter accent for hover / pressed states (sRGB).
+    pub accent_hover: Srgb,
+    /// `border.subtle` - hairline dividers and inner separators (sRGB).
+    pub border_subtle: Srgb,
+    /// `border` (`border.default`) - card and pane edges (sRGB).
     pub border: Srgb,
     /// `border.strong` - the stronger border on the focused pane and on elevated
     /// surfaces (sRGB).
@@ -107,12 +119,18 @@ impl Theme {
             // Catppuccin-Latte surface the palette derives from - see design/README).
             "ossein-light" => Self {
                 bg_base: srgb_hex(0xEF, 0xF1, 0xF5),
+                bg_sidebar: srgb(0xE6, 0xE9, 0xEF),
+                bg_surface: srgb(0xF7, 0xF8, 0xFC),
+                bg_elevated: srgb(0xFF, 0xFF, 0xFF),
+                bg_inset: srgb(0xE6, 0xE9, 0xEF),
                 fg_primary: srgb(0x4C, 0x4F, 0x69),
                 fg_secondary: srgb(0x5C, 0x5F, 0x77),
                 fg_muted: srgb(0x8C, 0x8F, 0xA1),
+                fg_faint: srgb(0xBC, 0xC0, 0xCC),
                 accent: srgb(0x88, 0x39, 0xEF),
-                bg_elevated: srgb(0xFF, 0xFF, 0xFF),
-                border: srgb(0xBC, 0xC0, 0xCC),
+                accent_hover: srgb(0x94, 0x50, 0xF0),
+                border_subtle: srgb(0xDC, 0xE0, 0xE8),
+                border: srgb(0xCC, 0xD0, 0xDA),
                 border_strong: srgb(0xAC, 0xB0, 0xBE),
                 diff_add: srgb(0x40, 0xA0, 0x2B),
                 diff_del: srgb(0xD2, 0x0F, 0x39),
@@ -121,18 +139,35 @@ impl Theme {
             // Ossein Dark (default) - the guide's token table.
             _ => Self {
                 bg_base: srgb_hex(0x18, 0x18, 0x25),
+                bg_sidebar: srgb(0x1E, 0x1E, 0x2E),
+                bg_surface: srgb(0x31, 0x32, 0x44),
+                bg_elevated: srgb(0x38, 0x3A, 0x54),
+                bg_inset: srgb(0x1A, 0x1A, 0x2B),
                 fg_primary: srgb(0xCD, 0xD6, 0xF4),
                 fg_secondary: srgb(0xBA, 0xC2, 0xDE),
                 fg_muted: srgb(0x7F, 0x84, 0x9C),
+                fg_faint: srgb(0x52, 0x52, 0x6A),
                 accent: srgb(0xBD, 0x93, 0xF9),
-                bg_elevated: srgb(0x38, 0x3A, 0x54),
-                border: srgb(0x31, 0x32, 0x44),
+                accent_hover: srgb(0xD6, 0xBB, 0xFC),
+                border_subtle: srgb(0x2E, 0x2E, 0x44),
+                border: srgb(0x3A, 0x3A, 0x54),
                 border_strong: srgb(0x6C, 0x6F, 0x93),
                 diff_add: srgb(0xA6, 0xE3, 0xA1),
                 diff_del: srgb(0xF3, 0x8B, 0xA8),
                 diff_hunk: srgb(0x89, 0xB4, 0xFA),
             },
         }
+    }
+
+    /// The `accent.subtle` fill - the accent at ~14% alpha - as a linear RGBA, for the
+    /// selected-row tint shared by the sidebar, palette, settings, and docks. One helper so
+    /// the alpha stays consistent (spec: 0.14 dark / 0.12 light - the difference is
+    /// imperceptible, so a single value keeps the token single-sourced).
+    #[must_use]
+    pub(crate) fn accent_subtle(self) -> [f32; 4] {
+        let mut fill = self.accent.to_linear();
+        fill[3] = 0.14;
+        fill
     }
 }
 
@@ -207,5 +242,34 @@ mod tests {
     fn srgb_endpoints_map_to_linear_endpoints() {
         assert!((srgb_to_linear(0) - 0.0).abs() < 1e-9);
         assert!((srgb_to_linear(255) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn surface_and_border_tokens_match_the_guide() {
+        // The guide's token table (§03): distinct surface + border tokens the UI reads.
+        let dark = Theme::resolve("ossein-dark");
+        assert_eq!(dark.bg_sidebar, srgb(0x1E, 0x1E, 0x2E)); // one step off bg.base
+        assert_eq!(dark.bg_surface, srgb(0x31, 0x32, 0x44));
+        assert_eq!(dark.bg_inset, srgb(0x1A, 0x1A, 0x2B));
+        assert_eq!(dark.border_subtle, srgb(0x2E, 0x2E, 0x44));
+        assert_eq!(dark.border, srgb(0x3A, 0x3A, 0x54)); // border.default, corrected
+        assert_eq!(dark.fg_faint, srgb(0x52, 0x52, 0x6A));
+        assert_eq!(dark.accent_hover, srgb(0xD6, 0xBB, 0xFC));
+        let light = Theme::resolve("ossein-light");
+        assert_eq!(light.bg_sidebar, srgb(0xE6, 0xE9, 0xEF));
+        assert_eq!(light.border, srgb(0xCC, 0xD0, 0xDA));
+        assert_eq!(light.fg_faint, srgb(0xBC, 0xC0, 0xCC));
+    }
+
+    #[test]
+    fn accent_subtle_is_the_accent_at_low_alpha() {
+        let dark = Theme::resolve("ossein-dark");
+        let fill = dark.accent_subtle();
+        assert!((fill[3] - 0.14).abs() < 1e-6, "spec accent.subtle alpha");
+        // RGB matches the opaque accent (only alpha differs).
+        let accent = dark.accent.to_linear();
+        for channel in 0..3 {
+            assert!((fill[channel] - accent[channel]).abs() < 1e-6);
+        }
     }
 }

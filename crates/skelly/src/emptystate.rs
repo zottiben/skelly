@@ -39,7 +39,7 @@ pub(crate) fn overlay_onto(rows: &mut [Vec<GridCell>], theme: &Theme) {
     if width == 0 || chip_row >= height {
         return;
     }
-    write_centered(&mut rows[mark_row], MARK, theme.fg_muted);
+    write_centered(&mut rows[mark_row], MARK, theme.fg_faint);
     write_chips(&mut rows[chip_row], width, theme);
 }
 
@@ -175,16 +175,16 @@ mod tests {
     }
 
     #[test]
-    fn mark_uses_the_muted_ui_token() {
+    fn mark_uses_the_faint_watermark_token() {
         let theme = Theme::resolve("ossein-dark");
         let mut grid = blank(60, 24);
         overlay_onto(&mut grid, &theme);
-        // The mark's first glyph is drawn in fg.muted (a quiet wordmark).
+        // The mark's first glyph is drawn in fg.faint (the guide's watermark token).
         let mark_glyph = grid
             .iter()
             .flatten()
             .find(|c| c.c == MARK.chars().next().unwrap());
-        assert_eq!(mark_glyph.map(|c| c.fg), Some(theme.fg_muted));
+        assert_eq!(mark_glyph.map(|c| c.fg), Some(theme.fg_faint));
     }
 
     #[test]

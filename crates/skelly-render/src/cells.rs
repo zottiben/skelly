@@ -136,8 +136,7 @@ pub(crate) fn overlay_quads(
         theme.bg_elevated.to_linear(),
     )];
     if let Some(row) = view.selected_row {
-        let mut highlight = theme.accent.to_linear();
-        highlight[3] = 0.16;
+        let highlight = theme.accent_subtle();
         let y = view.text_origin.1 + row as f32 * cell_h;
         quads.push(Quad::new(
             panel.x + stroke,
@@ -170,11 +169,11 @@ pub(crate) fn overlay_quads(
     quads
 }
 
-/// Build the decorative quads for the left sidebar: the active tab's `accent.subtle`
-/// fill + a 2px `accent` bar on its left edge, and a `border` divider down the right
-/// edge separating the sidebar from the pane area. The sidebar shares the app's
-/// `bg.base` (already the clear color), so there is no panel fill. Shared by the
-/// windowed [`Renderer`](crate::Renderer) and the headless capture.
+/// Build the decorative quads for the left sidebar: the `bg.sidebar` panel fill (one step
+/// off `bg.base`, per the guide's token table), the active tab's `accent.subtle` fill + a
+/// 2px `accent` bar on its left edge, and a `border` divider down the right edge separating
+/// the sidebar from the pane area. Shared by the windowed [`Renderer`](crate::Renderer) and
+/// the headless capture.
 #[allow(
     clippy::cast_precision_loss,
     reason = "the active-row index into a short tab list is exact as f32"
@@ -188,12 +187,23 @@ pub(crate) fn sidebar_quads(
 ) -> Vec<Quad> {
     let panel = view.panel;
     let stroke = scale.max(1.0);
-    let mut quads = Vec::new();
+    // The sidebar surface, distinct from the terminal's `bg.base` behind it.
+    let mut quads = vec![Quad::new(
+        panel.x,
+        panel.y,
+        panel.w,
+        panel.h,
+        theme.bg_sidebar.to_linear(),
+    )];
     if let Some(row) = view.active_row {
         let y = view.text_origin.1 + row as f32 * cell_h;
-        let mut subtle = theme.accent.to_linear();
-        subtle[3] = 0.16;
-        quads.push(Quad::new(panel.x, y, panel.w, cell_h, subtle));
+        quads.push(Quad::new(
+            panel.x,
+            y,
+            panel.w,
+            cell_h,
+            theme.accent_subtle(),
+        ));
         quads.push(Quad::new(
             panel.x,
             y,
@@ -256,14 +266,12 @@ pub(crate) fn settings_quads(
     // The active category: a subtle fill across the nav strip + an accent bar.
     if let Some(row) = view.nav_active_row {
         let y = row_y(row);
-        let mut subtle = theme.accent.to_linear();
-        subtle[3] = 0.16;
         quads.push(Quad::new(
             panel.x,
             y,
             (divider_x - panel.x).max(0.0),
             cell_h,
-            subtle,
+            theme.accent_subtle(),
         ));
         quads.push(Quad::new(
             panel.x,
@@ -277,8 +285,7 @@ pub(crate) fn settings_quads(
     // The focused control: a translucent highlight over the content strip only.
     if let Some(row) = view.selected_row {
         let y = row_y(row);
-        let mut highlight = theme.accent.to_linear();
-        highlight[3] = 0.16;
+        let highlight = theme.accent_subtle();
         let content_x = divider_x + stroke;
         quads.push(Quad::new(
             content_x,
@@ -305,9 +312,6 @@ pub(crate) fn settings_quads(
 const DIFF_LINE_ALPHA: f32 = 0.14;
 /// Alpha for a hunk header's translucent background.
 const HUNK_LINE_ALPHA: f32 = 0.08;
-/// Alpha applied to `accent` for the selected file's row fill (same as the sidebar/
-/// settings highlight).
-const SELECTED_ROW_ALPHA: f32 = 0.16;
 
 /// Build the decorative quads for the git diff dock: a full-width translucent background
 /// behind every add / del / hunk-header row (from the `diff.*` tokens), the selected
@@ -373,7 +377,7 @@ pub(crate) fn gitdock_quads(
             row_y(row),
             panel.w,
             cell_h,
-            tint(theme.accent, SELECTED_ROW_ALPHA),
+            theme.accent_subtle(),
         ));
     }
 
@@ -385,7 +389,7 @@ pub(crate) fn gitdock_quads(
             row_y(row),
             panel.w,
             cell_h,
-            tint(theme.accent, SELECTED_ROW_ALPHA),
+            theme.accent_subtle(),
         ));
     }
 
@@ -434,9 +438,13 @@ pub(crate) fn timeline_quads(
 
     // The selected event's row fill (a subtle accent tint, like the git dock's selection).
     if let Some(row) = view.selected_row {
-        let mut subtle = theme.accent.to_linear();
-        subtle[3] = SELECTED_ROW_ALPHA;
-        quads.push(Quad::new(panel.x, row_y(row), panel.w, cell_h, subtle));
+        quads.push(Quad::new(
+            panel.x,
+            row_y(row),
+            panel.w,
+            cell_h,
+            theme.accent_subtle(),
+        ));
     }
 
     // When rewound to the past, mark the viewed event with a solid `accent` bar on the
