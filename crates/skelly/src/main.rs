@@ -18,6 +18,7 @@ mod motion;
 mod palette;
 mod settings;
 mod sidebar;
+mod statusline;
 mod timeline;
 
 use std::collections::{HashMap, HashSet};
@@ -189,6 +190,12 @@ struct App {
     /// surfaces as they migrate) in the guide's fonts - GPU-free, so hit-testing and
     /// rendering agree on glyph widths. Kept in step with the DPI scale.
     measure: TextMeasure,
+    /// The per-pane status line's process-level context (cwd · branch · shell), cached at
+    /// startup. Per-pane cwd + live branch-switch tracking are follow-ups (the same blocker
+    /// as cwd-based tab titles).
+    status_cwd: String,
+    status_branch: Option<String>,
+    status_shell: String,
     /// The per-repo git diff dock (right dock) state.
     git_dock: GitDock,
     /// The session-timeline dock (right dock; mutually exclusive with the git dock).
@@ -262,6 +269,9 @@ impl App {
             settings: Settings::new(),
             sidebar,
             measure: TextMeasure::new(1.0),
+            status_cwd: String::new(),
+            status_branch: None,
+            status_shell: String::new(),
             git_dock: GitDock::new(),
             timeline: TimelineDock::new(),
             confirm: None,
@@ -401,6 +411,7 @@ impl App {
             return;
         };
         let inset = self.pane_inset();
+        let status_h = statusline::HEIGHT * scale32(self.scale);
         let viewport = self.viewport_rect();
         let proxy = self.proxy.clone();
         let layout = self.active_tab().tree.layout(viewport);
@@ -413,7 +424,7 @@ impl App {
         ws.dims.retain(|id, _| live.contains(id));
 
         for (id, rect) in layout {
-            let target = pane_dims(rect, cell_w, cell_h, inset);
+            let target = pane_dims(rect, cell_w, cell_h, inset, status_h);
             if let Some(term) = ws.panes.get_mut(&id) {
                 // Existing pane: resize only when its grid size actually changed.
                 if ws.dims.get(&id) != Some(&target) {
@@ -508,9 +519,9 @@ impl App {
         let viewport = self.viewport_rect();
         let ws = &self.tabs[self.active];
         let empty_state = ws.is_empty_state();
-        // Collect the pane rects + exit statuses first, so the tab borrow ends before the
-        // measurer's mutable borrow.
-        let panes: Vec<(PxRect, Option<ExitStatus>)> = ws
+        // Collect the pane rects + exit statuses + cursor position first, so the tab borrow ends
+        // before the measurer's mutable borrow.
+        let panes: Vec<(PxRect, Option<ExitStatus>, (usize, usize))> = ws
             .tree
             .layout(viewport)
             .into_iter()
@@ -522,14 +533,14 @@ impl App {
                     w: rect.w,
                     h: rect.h,
                 };
-                Some((px, term.exit_status()))
+                Some((px, term.exit_status(), term.cursor()))
             })
             .collect();
 
         let mut scrims = Vec::new();
         let mut quads = Vec::new();
         let mut labels = Vec::new();
-        for (rect, status) in &panes {
+        for (rect, status, cursor) in &panes {
             if let Some(status) = status {
                 scrims.push(*rect);
                 labels.extend(deadpane::message_labels(
@@ -539,11 +550,28 @@ impl App {
                     &self.theme,
                     &mut self.measure,
                 ));
+            } else if !empty_state {
+                // A live, in-use pane: seat its status line along the bottom (guide §08 anatomy
+                // #9). The pristine empty state (§10.2) shows only the mark + chips, no strip.
+                let (q, l) = statusline::paint(
+                    &statusline::Info {
+                        cwd: &self.status_cwd,
+                        branch: self.status_branch.as_deref(),
+                        shell: &self.status_shell,
+                        cursor: *cursor,
+                    },
+                    *rect,
+                    scale,
+                    &self.theme,
+                    &mut self.measure,
+                );
+                quads.extend(q);
+                labels.extend(l);
             }
         }
         // The empty state (a pristine single-pane tab, no exited panes): the hint chips.
         if empty_state && scrims.is_empty() {
-            if let Some((rect, None)) = panes.first() {
+            if let Some((rect, None, _)) = panes.first() {
                 if let Some(logo) = emptystate::logo_bounds(*rect, scale) {
                     let (q, l) =
                         emptystate::chips_paint(logo, *rect, scale, &self.theme, &mut self.measure);
@@ -2076,6 +2104,32 @@ fn current_branch() -> Option<String> {
     Repo::discover(&start).ok().flatten()?.status().ok()?.branch
 }
 
+/// `path` with the home directory collapsed to `~` (for the status line), else the path
+/// as-is. Best-effort; falls back to the lossy string form.
+fn home_relative(path: &std::path::Path) -> String {
+    let full = path.to_string_lossy().into_owned();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = std::path::Path::new(&home);
+        if let Ok(rel) = path.strip_prefix(home) {
+            return if rel.as_os_str().is_empty() {
+                "~".to_owned()
+            } else {
+                format!("~/{}", rel.to_string_lossy())
+            };
+        }
+    }
+    full
+}
+
+/// The login shell's command name (the `SHELL` env's basename), for the status line;
+/// defaults to `sh`.
+fn shell_name() -> String {
+    std::env::var_os("SHELL")
+        .map(std::path::PathBuf::from)
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "sh".to_owned())
+}
+
 /// The command name of process `pid`, for the "process running on close" confirm. Shells
 /// `ps -o comm= -p <pid>` (portable across macOS and Linux) and returns just the basename;
 /// `None` if the lookup fails. Best-effort - the caller falls back to a generic label.
@@ -2169,6 +2223,10 @@ impl ApplicationHandler<Wakeup> for App {
         self.scale = window.scale_factor();
         self.measure.set_scale(scale32(self.scale));
         self.size = (size.width, size.height);
+        // Cache the status-line context (cwd · branch · shell) once at startup.
+        self.status_cwd = home_relative(&std::env::current_dir().unwrap_or_default());
+        self.status_branch = current_branch();
+        self.status_shell = shell_name();
         let renderer = Renderer::new(
             window.clone(),
             size.width,
@@ -2509,9 +2567,11 @@ fn point_f32(pointer: (f64, f64)) -> (f32, f32) {
     clippy::cast_sign_loss,
     reason = "cols/rows are clamped to a small positive range before the cast"
 )]
-fn pane_dims(rect: Rect, cell_w: f32, cell_h: f32, inset: f32) -> (u16, u16) {
+fn pane_dims(rect: Rect, cell_w: f32, cell_h: f32, inset: f32, reserved_bottom: f32) -> (u16, u16) {
     let cols = ((rect.w - 2.0 * inset) / cell_w).floor().clamp(1.0, 1000.0) as u16;
-    let rows = ((rect.h - 2.0 * inset) / cell_h).floor().clamp(1.0, 1000.0) as u16;
+    let rows = ((rect.h - 2.0 * inset - reserved_bottom) / cell_h)
+        .floor()
+        .clamp(1.0, 1000.0) as u16;
     (cols, rows)
 }
 
@@ -2984,9 +3044,18 @@ mod tests {
     fn pane_dims_fit_cells_inside_the_inset() {
         // 800 wide, 12px inset each side, 10px cells -> floor(776 / 10) = 77 cols.
         let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
-        let (cols, rows) = pane_dims(rect, 10.0, 20.0, 12.0);
+        let (cols, rows) = pane_dims(rect, 10.0, 20.0, 12.0, 0.0);
         assert_eq!(cols, 77);
         assert_eq!(rows, 28); // floor((600 - 24) / 20)
+    }
+
+    #[test]
+    fn pane_dims_reserve_room_for_the_status_line() {
+        // Same rect, but reserving 40px at the bottom drops two rows: floor((600-24-40)/20) = 26.
+        let rect = Rect::new(0.0, 0.0, 800.0, 600.0);
+        let (cols, rows) = pane_dims(rect, 10.0, 20.0, 12.0, 40.0);
+        assert_eq!(cols, 77); // columns are unaffected
+        assert_eq!(rows, 26);
     }
 
     #[test]

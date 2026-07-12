@@ -10,6 +10,10 @@
     clippy::cast_sign_loss,
     reason = "example: surface dimensions and grid sizes are small, non-negative values"
 )]
+#![allow(
+    clippy::too_many_lines,
+    reason = "example: one straight-line scene builder mirroring the binary"
+)]
 
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -18,7 +22,7 @@ use skelly_config::Appearance;
 use skelly_pane::{Dir, PaneTree, Rect};
 use skelly_render::{
     measure_cell, AnsiPalette, CaptureOverlay, CapturePane, CaptureSidebar, ChromeQuad, FontRole,
-    GridCell, ProseLabel, PxRect, Srgb, TextMeasure, Theme,
+    GridCell, PaneOverlay, ProseLabel, PxRect, Srgb, TextMeasure, Theme,
 };
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 
@@ -30,6 +34,11 @@ const PANE_INSET: f32 = 6.0;
 const SIDEBAR_WIDTH: f32 = 240.0;
 /// Logical width of the slim icon rail - mirrors the binary's `RAIL_WIDTH`.
 const RAIL_WIDTH: f32 = 56.0;
+/// Logical height of the per-pane status line - mirrors the binary's `statusline::HEIGHT`.
+const STATUS_H: f32 = 24.0;
+/// Status-line padding/gap - mirror the binary's `statusline` module (the guide's 14px).
+const STATUS_PAD_X: f32 = 14.0;
+const STATUS_GAP: f32 = 14.0;
 
 fn main() {
     let path = std::env::args()
@@ -53,6 +62,10 @@ fn main() {
     // `overflow` renders a many-tab full panel scrolled so the active tab stays in view,
     // exercising the tab-list windowing + the ↑/↓ overflow indicators (design §12).
     let overflow = std::env::args().nth(3).as_deref() == Some("overflow");
+    // `solo` renders a single full-width pane with no palette overlay - the wide context the
+    // guide's §10.3 mockup shows, so the whole status line (cwd · ⑂ branch · shell … Ln, Col)
+    // is visible for parity comparison.
+    let solo = std::env::args().nth(3).as_deref() == Some("solo");
 
     let (cell_w, cell_h) = measure_cell(&appearance, scale);
     let sc = scale as f32;
@@ -67,11 +80,13 @@ fn main() {
         height as f32 - 2.0 * pad,
     );
 
-    // Two panes, side by side; focus lands on the new (right) pane, matching the
-    // binary's split behavior.
+    // Two panes, side by side; focus lands on the new (right) pane, matching the binary's
+    // split behavior. `solo` keeps a single full-width pane instead.
     let mut tree = PaneTree::new();
     let left = tree.focused();
-    tree.split(Dir::Right).expect("under the pane cap");
+    if !solo {
+        tree.split(Dir::Right).expect("under the pane cap");
+    }
     let focused = tree.focused();
     let layout = tree.layout(viewport);
 
@@ -79,7 +94,10 @@ fn main() {
     let mut panes = Vec::new();
     for (id, rect) in &layout {
         let cols = ((rect.w - 2.0 * inset) / cell_w).floor().max(2.0) as u16;
-        let rows = ((rect.h - 2.0 * inset) / cell_h).floor().max(1.0) as u16;
+        // Reserve the status-line strip at the bottom, as the binary's `pane_dims` does.
+        let rows = ((rect.h - 2.0 * inset - STATUS_H * sc) / cell_h)
+            .floor()
+            .max(1.0) as u16;
 
         let mut term = Terminal::spawn(cols, rows, || {}).expect("spawn shell");
         wait_until(&term, Duration::from_secs(6), |t| {
@@ -133,11 +151,33 @@ fn main() {
     // verifying the sidebar chrome and the overlay compositing together. The overlay is
     // the command palette by default, or the "running job" confirm modal for `confirm`.
     let theme = Theme::resolve(&appearance.theme);
+    // The per-pane status line at each pane's bottom (§08 anatomy #9) - mirrors the binary's
+    // `pane_overlay_paint`: the same process cwd/branch/shell, each pane's own cursor.
+    let mut measure = TextMeasure::new(sc);
+    let mut pane_overlay = PaneOverlay::default();
+    for pane in &panes {
+        let (q, l) = status_line(
+            pane.rect,
+            "~/skelly",
+            Some("main"),
+            "zsh",
+            pane.cursor,
+            sc,
+            &theme,
+            &mut measure,
+        );
+        pane_overlay.quads.extend(q);
+        pane_overlay.labels.extend(l);
+    }
     let sidebar = sidebar_panel(height, sidebar_w, sc, rail, overflow, &theme);
-    let overlay = if std::env::args().nth(3).as_deref() == Some("confirm") {
-        confirm_overlay(width, height, sc, &theme)
+    // `solo` shows the bare pane + status line (no overlay); otherwise the palette (or the
+    // confirm modal) composites on top.
+    let overlay = if solo {
+        None
+    } else if std::env::args().nth(3).as_deref() == Some("confirm") {
+        Some(confirm_overlay(width, height, sc, &theme))
     } else {
-        palette_overlay(width, height, sc, &theme)
+        Some(palette_overlay(width, height, sc, &theme))
     };
     let rgba = skelly_render::capture_panes_rgba(
         &appearance,
@@ -146,14 +186,118 @@ fn main() {
         scale,
         &panes,
         &skelly_render::Chrome {
+            pane_overlay,
             sidebar: Some(&sidebar),
-            overlay: Some(&overlay),
+            overlay: overlay.as_ref(),
             ..Default::default()
         },
     );
 
     write_png(&path, width, height, &rgba);
     println!("wrote {path} ({} panes)", panes.len());
+}
+
+/// Build one pane's status-line display list - mirrors the binary's `statusline::paint`
+/// (a `bg.inset` strip + a `border.subtle` top hairline; the cwd in `diff.add`, `⑂ branch`
+/// in `diff.hunk`, the shell muted, and `Ln, Col` right-anchored, all in `FontRole::Mono`).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one focused mirror of the binary helper"
+)]
+fn status_line(
+    rect: PxRect,
+    cwd: &str,
+    branch: Option<&str>,
+    shell: &str,
+    cursor: (usize, usize),
+    scale: f32,
+    theme: &Theme,
+    m: &mut TextMeasure,
+) -> (Vec<ChromeQuad>, Vec<ProseLabel>) {
+    let h = STATUS_H * scale;
+    let top = rect.y + rect.h - h;
+    let quads = vec![
+        ChromeQuad::fill(
+            PxRect {
+                x: rect.x,
+                y: top,
+                w: rect.w,
+                h,
+            },
+            theme.bg_inset,
+        ),
+        ChromeQuad::fill(
+            PxRect {
+                x: rect.x,
+                y: top,
+                w: rect.w,
+                h: scale.max(1.0),
+            },
+            theme.border_subtle,
+        ),
+    ];
+    let mut labels = Vec::new();
+    let line = m.line_height(FontRole::Mono);
+    let cy = top + (h - line) * 0.5;
+    let pad = STATUS_PAD_X * scale;
+    let gap = STATUS_GAP * scale;
+    let label = |text: String, x: f32, color| ProseLabel {
+        text,
+        x,
+        y: cy,
+        role: FontRole::Mono,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    };
+
+    // Right-anchored cursor readout first, then fit the left segments before it (mirrors the
+    // binary's `statusline::paint`: never overlap in a narrow split).
+    let pos = format!("Ln {}, Col {}", cursor.1 + 1, cursor.0 + 1);
+    let pos_w = m.width(&pos, FontRole::Mono, None);
+    let left_limit = if pos_w + 2.0 * pad <= rect.w {
+        labels.push(label(pos, rect.x + rect.w - pad - pos_w, theme.fg_muted));
+        rect.x + rect.w - pad - pos_w - gap
+    } else {
+        rect.x + rect.w - pad
+    };
+
+    let char_w = m.width("M", FontRole::Mono, None).max(f32::EPSILON);
+    let mut x = rect.x + pad;
+    let avail = left_limit - x;
+    if avail >= char_w {
+        let cwd = fit_lead(cwd, (avail / char_w) as usize);
+        let w = m.width(&cwd, FontRole::Mono, None);
+        labels.push(label(cwd, x, theme.diff_add));
+        x += w + gap;
+    }
+    if let Some(branch) = branch {
+        let seg = format!("\u{2442} {branch}");
+        let w = m.width(&seg, FontRole::Mono, None);
+        if x + w <= left_limit {
+            labels.push(label(seg, x, theme.diff_hunk));
+            x += w + gap;
+        }
+    }
+    let w = m.width(shell, FontRole::Mono, None);
+    if x + w <= left_limit {
+        labels.push(label(shell.to_owned(), x, theme.fg_muted));
+    }
+    (quads, labels)
+}
+
+/// `s` shortened to at most `max_chars` monospace cells behind a leading `…` - mirrors the
+/// binary's `statusline::fit_lead`.
+fn fit_lead(s: &str, max_chars: usize) -> String {
+    let count = s.chars().count();
+    if count <= max_chars {
+        return s.to_owned();
+    }
+    if max_chars <= 1 {
+        return "\u{2026}".to_owned();
+    }
+    let tail: String = s.chars().skip(count - (max_chars - 1)).collect();
+    format!("\u{2026}{tail}")
 }
 
 /// Encode tight RGBA8 bytes to a PNG at `path`.
