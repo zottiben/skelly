@@ -55,6 +55,19 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Command palette: per-command icons + category grouping (§10.8).** The palette
+  now renders the guide's grouped list: each command carries a §07 reference-glyph `icon` (drawn
+  left of the label, `accent` when selected else `fg.muted`) and a `category`; a small uppercase
+  `fg.faint` header (FontRole::Micro) precedes each group. **Ordering decision:** the result list
+  is now returned in `COMMANDS` (category) order rather than fuzzy-**score** order, because the
+  §10.8 layout is a grouped browse - score-sorting would let a command jump out of its category
+  and scatter the headers. Fuzzy matching still *filters* which commands show and *highlights*
+  matched chars in accent; only the global relevance ranking is dropped in favour of stable
+  grouping. Icons are the same unicode glyphs the guide's mockups use (no bespoke vector icon
+  subsystem yet); all verified to render via cosmic-text font fallback (▯▭⤢⊞▤←↓↑→‹›±✕⟲◐⚙⏻).
+  Still deferred: the palette mode prefixes (`>`/`/`/`?`) and surfacing tabs/themes/files, which
+  need real input-parsing + data sources.
+
 - 2026-07-13 - **Design-fidelity: pixel audit of the sidebar tab item against §09.** A close
   read of the guide (browser + HTML source) against the built sidebar found the active-tab
   styling had drifted from the authoritative §09 "Sidebar tab item" component. Corrected to

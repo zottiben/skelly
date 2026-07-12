@@ -22,6 +22,10 @@ const INPUT_H: f32 = 34.0;
 const COUNT_H: f32 = 22.0;
 /// Command row height (the guide's list rows).
 const CMD_H: f32 = 30.0;
+/// Category-header row height (design §10.8: a small uppercase mono label above each group).
+const CAT_H: f32 = 20.0;
+/// Gap between a command's icon and its label.
+const ICON_GAP: f32 = 12.0;
 /// Spacer height between the results and the footer.
 const SPACER_H: f32 = 8.0;
 /// Footer row height.
@@ -33,6 +37,12 @@ const PILL_RADIUS: f32 = 8.0;
 
 /// A runnable command surfaced in the palette.
 pub(crate) struct Command {
+    /// The category header this command sits under (design §10.8 grouped list). Consecutive
+    /// commands sharing a category render under one header.
+    pub(crate) category: &'static str,
+    /// The reference glyph shown left of the label (accent when selected, else `fg.muted`),
+    /// from the §07 icon set.
+    pub(crate) icon: &'static str,
     /// The human label, shown left-aligned.
     pub(crate) label: &'static str,
     /// The default key-chord hint, shown right-aligned in muted text.
@@ -88,109 +98,152 @@ pub(crate) enum Action {
     Quit,
 }
 
-/// The built-in command set. Order is the display order.
+/// The built-in command set. Order is the display order; consecutive commands share a
+/// category header (design §10.8). Icons are §07 reference glyphs.
 pub(crate) const COMMANDS: &[Command] = &[
     Command {
+        category: "Panes",
+        icon: "\u{25AF}", // ▯ split vertical
         label: "Split pane right",
         hint: "opt |",
         action: Action::SplitRight,
     },
     Command {
+        category: "Panes",
+        icon: "\u{25AD}", // ▭ split horizontal
         label: "Split pane down",
         hint: "opt -",
         action: Action::SplitDown,
     },
     Command {
+        category: "Panes",
+        icon: "\u{2922}", // ⤢ zoom
         label: "Zoom / unzoom pane",
         hint: "opt Z",
         action: Action::Zoom,
     },
     Command {
+        category: "Panes",
+        icon: "\u{229E}", // ⊞ even out
         label: "Even out splits",
         hint: "opt =",
         action: Action::EvenOut,
     },
     Command {
+        category: "Panes",
+        icon: "\u{2715}", // ✕ close
         label: "Close pane",
         hint: "opt W",
         action: Action::ClosePane,
     },
     Command {
+        category: "Panes",
+        icon: "\u{2190}", // ←
         label: "Focus pane left",
         hint: "opt H",
         action: Action::FocusLeft,
     },
     Command {
+        category: "Panes",
+        icon: "\u{2193}", // ↓
         label: "Focus pane down",
         hint: "opt J",
         action: Action::FocusDown,
     },
     Command {
+        category: "Panes",
+        icon: "\u{2191}", // ↑
         label: "Focus pane up",
         hint: "opt K",
         action: Action::FocusUp,
     },
     Command {
+        category: "Panes",
+        icon: "\u{2192}", // →
         label: "Focus pane right",
         hint: "opt L",
         action: Action::FocusRight,
     },
     Command {
+        category: "Tabs",
+        icon: "+",
         label: "New tab",
         hint: "cmd T",
         action: Action::NewTab,
     },
     Command {
+        category: "Tabs",
+        icon: "\u{2715}", // ✕
         label: "Close tab",
         hint: "cmd W",
         action: Action::CloseTab,
     },
     Command {
+        category: "Tabs",
+        icon: "\u{203A}", // › next
         label: "Next tab",
         hint: "opt shift ]",
         action: Action::NextTab,
     },
     Command {
+        category: "Tabs",
+        icon: "\u{2039}", // ‹ previous
         label: "Previous tab",
         hint: "opt shift [",
         action: Action::PrevTab,
     },
     Command {
+        category: "View",
+        icon: "\u{25A4}", // ▤ sidebar
         label: "Toggle sidebar",
         hint: "cmd B",
         action: Action::ToggleSidebar,
     },
     Command {
+        category: "View",
+        icon: "\u{25A4}", // ▤ sidebar
         label: "Cycle sidebar mode",
         hint: "shift cmd B",
         action: Action::CycleSidebarMode,
     },
     Command {
+        category: "View",
+        icon: "\u{00B1}", // ± diff
         label: "Show git diff",
         hint: "shift cmd G",
         action: Action::ShowGitDiff,
     },
     Command {
+        category: "View",
+        icon: "\u{27F2}", // ⟲ timeline
         label: "Show session timeline",
         hint: "shift cmd H",
         action: Action::ShowTimeline,
     },
     Command {
+        category: "View",
+        icon: "\u{2699}", // ⚙ settings
         label: "Open settings",
         hint: "cmd ,",
         action: Action::OpenSettings,
     },
     Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
         label: "Theme: Ossein Dark",
         hint: "",
         action: Action::ThemeDark,
     },
     Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
         label: "Theme: Ossein Light",
         hint: "",
         action: Action::ThemeLight,
     },
     Command {
+        category: "Session",
+        icon: "\u{23FB}", // ⏻ power
         label: "Quit skelly",
         hint: "cmd Q",
         action: Action::Quit,
@@ -236,23 +289,18 @@ impl Palette {
         self.open = false;
     }
 
-    /// The commands whose label fuzzy-matches the query, best first. Each carries the
-    /// matched character positions (for accent highlighting). An empty query matches
-    /// everything in [`COMMANDS`] order.
+    /// The commands whose label fuzzy-matches the query, in [`COMMANDS`] (category-grouped)
+    /// order. Each carries the matched character positions (for accent highlighting). The
+    /// order is preserved rather than score-sorted so the §10.8 category headers stay coherent
+    /// (a command never jumps out of its group); an empty query matches everything.
     pub(crate) fn results(&self) -> Vec<Match> {
         let query = self.query.trim();
-        let mut scored: Vec<(i32, usize, Vec<usize>)> = COMMANDS
+        COMMANDS
             .iter()
             .enumerate()
             .filter_map(|(index, cmd)| {
-                fuzzy_match(query, cmd.label).map(|(score, positions)| (score, index, positions))
+                fuzzy_match(query, cmd.label).map(|(_, positions)| Match { index, positions })
             })
-            .collect();
-        // Best score first; ties keep COMMANDS order (a stable, predictable list).
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
-        scored
-            .into_iter()
-            .map(|(_, index, positions)| Match { index, positions })
             .collect()
     }
 
@@ -310,9 +358,17 @@ impl Palette {
         content_w = content_w.max(
             measure.width("> ", FontRole::Body, None) + measure.width(query, FontRole::Body, None),
         );
+        let mut current_category = "";
+        let mut categories = 0_usize;
         for hit in &results {
             let cmd = &COMMANDS[hit.index];
-            let row = measure.width(cmd.label, FontRole::Body, None)
+            if cmd.category != current_category {
+                current_category = cmd.category;
+                categories += 1;
+            }
+            let row = measure.width(cmd.icon, FontRole::Body, None)
+                + ICON_GAP * scale
+                + measure.width(cmd.label, FontRole::Body, None)
                 + HINT_GAP * scale
                 + measure.width(cmd.hint, FontRole::Micro, None);
             content_w = content_w.max(row);
@@ -320,9 +376,14 @@ impl Palette {
         let width = content_w + 2.0 * inset;
         #[allow(
             clippy::cast_precision_loss,
-            reason = "the match count is a small, exact value"
+            reason = "the match + category counts are small, exact values"
         )]
-        let rows_h = INPUT_H + COUNT_H + results.len() as f32 * CMD_H + SPACER_H + FOOTER_H;
+        let rows_h = INPUT_H
+            + COUNT_H
+            + categories as f32 * CAT_H
+            + results.len() as f32 * CMD_H
+            + SPACER_H
+            + FOOTER_H;
         let height = rows_h * scale + 2.0 * PAD * scale;
         (width, height)
     }
@@ -368,10 +429,27 @@ impl Palette {
         );
         y += COUNT_H * scale;
 
-        // Command rows.
+        // Command rows, grouped under a category header whenever the category changes.
+        let mut current_category = "";
         for (index, hit) in results.iter().enumerate() {
             let cmd = &COMMANDS[hit.index];
-            if index == self.selected {
+            if cmd.category != current_category {
+                current_category = cmd.category;
+                push_line(
+                    &mut labels,
+                    &current_category.to_uppercase(),
+                    FontRole::Micro,
+                    theme.fg_faint,
+                    prompt_x,
+                    y,
+                    CAT_H,
+                    scale,
+                    measure,
+                );
+                y += CAT_H * scale;
+            }
+            let selected = index == self.selected;
+            if selected {
                 let inset = ROW_INSET * 0.5 * scale;
                 quads.push(ChromeQuad::tint(
                     PxRect {
@@ -389,6 +467,7 @@ impl Palette {
                 &mut labels,
                 cmd,
                 &hit.positions,
+                selected,
                 cx,
                 cw,
                 y,
@@ -546,13 +625,15 @@ fn push_line(
     });
 }
 
-/// A command row: the `label` left-aligned with matched `positions` in `accent` (the rest
-/// `fg.primary`), and the key `hint` right-anchored in muted `micro` mono.
+/// A command row: the `icon` (accent when `selected`, else `fg.muted`), then the `label`
+/// left-aligned with matched `positions` in `accent` (the rest `fg.primary`), and the key
+/// `hint` right-anchored in muted `micro` mono.
 #[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
 fn push_command(
     labels: &mut Vec<ProseLabel>,
     cmd: &Command,
     positions: &[usize],
+    selected: bool,
     cx: f32,
     cw: f32,
     top: f32,
@@ -562,8 +643,23 @@ fn push_command(
 ) {
     let line_h = measure.line_height(FontRole::Body);
     let y = top + (CMD_H * scale - line_h) * 0.5;
+    // The reference-glyph icon (accent when selected, else muted), then the label after a gap.
+    let icon_x = cx + ROW_INSET * scale;
+    labels.push(ProseLabel {
+        text: cmd.icon.to_owned(),
+        x: icon_x,
+        y,
+        role: FontRole::Body,
+        color: if selected {
+            theme.accent
+        } else {
+            theme.fg_muted
+        },
+        weight: None,
+        max_w: f32::MAX,
+    });
     // The label, split into matched / unmatched runs so matched chars draw in accent.
-    let mut x = cx + ROW_INSET * scale;
+    let mut x = icon_x + measure.width(cmd.icon, FontRole::Body, None) + ICON_GAP * scale;
     for (text, matched) in matched_runs(cmd.label, positions) {
         let color = if matched {
             theme.accent

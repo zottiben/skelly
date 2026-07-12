@@ -330,6 +330,8 @@ const PL_SPACER_H: f32 = 8.0;
 const PL_FOOTER_H: f32 = 24.0;
 const PL_HINT_GAP: f32 = 24.0;
 const PL_PILL_RADIUS: f32 = 8.0;
+const PL_CAT_H: f32 = 20.0;
+const PL_ICON_GAP: f32 = 12.0;
 const PL_FOOTER: &str = "up/down navigate    enter run    esc close";
 
 /// Build a representative command-palette overlay (input, count, a couple of command rows
@@ -341,25 +343,33 @@ const PL_FOOTER: &str = "up/down navigate    enter run    esc close";
 )]
 fn palette_overlay(width: u32, height: u32, scale: f32, theme: &Theme) -> CaptureOverlay {
     let mut m = TextMeasure::new(scale);
+    // (icon, label, hint) - two rows under one "PANES" category header (§10.8).
     let cmds = [
-        ("Zoom / unzoom pane", "opt Z"),
-        ("Even out splits", "opt ="),
+        ("\u{2922}", "Zoom / unzoom pane", "opt Z"),
+        ("\u{229E}", "Even out splits", "opt ="),
     ];
     let inset = (PL_PAD + PL_ROW_INSET) * scale;
     let mut content_w = m
         .width(PL_FOOTER, FontRole::Caption, None)
         .max(m.width("> ", FontRole::Body, None) + m.width("zoom", FontRole::Body, None));
-    for (l, h) in cmds {
+    for (ic, l, h) in cmds {
         content_w = content_w.max(
-            m.width(l, FontRole::Body, None)
+            m.width(ic, FontRole::Body, None)
+                + PL_ICON_GAP * scale
+                + m.width(l, FontRole::Body, None)
                 + PL_HINT_GAP * scale
                 + m.width(h, FontRole::Micro, None),
         );
     }
     let panel_w = content_w + 2.0 * inset;
-    let panel_h =
-        (PL_INPUT_H + PL_COUNT_H + 2.0 * PL_CMD_H + PL_SPACER_H + PL_FOOTER_H + 2.0 * PL_PAD)
-            * scale;
+    let panel_h = (PL_INPUT_H
+        + PL_COUNT_H
+        + PL_CAT_H
+        + 2.0 * PL_CMD_H
+        + PL_SPACER_H
+        + PL_FOOTER_H
+        + 2.0 * PL_PAD)
+        * scale;
     let x = ((width as f32 - panel_w) / 2.0).max(0.0);
     let y = height as f32 * 0.16;
     let panel = PxRect {
@@ -424,8 +434,23 @@ fn palette_overlay(width: u32, height: u32, scale: f32, theme: &Theme) -> Captur
     );
     yy += PL_COUNT_H * scale;
 
-    for (i, (label, hint)) in cmds.iter().enumerate() {
-        if i == 0 {
+    // The "PANES" category header above the group.
+    push_pl(
+        &mut labels,
+        &mut m,
+        "PANES",
+        FontRole::Micro,
+        theme.fg_faint,
+        px,
+        yy,
+        PL_CAT_H,
+        scale,
+    );
+    yy += PL_CAT_H * scale;
+
+    for (i, (icon, label, hint)) in cmds.iter().enumerate() {
+        let selected = i == 0;
+        if selected {
             let pi = PL_ROW_INSET * 0.5 * scale;
             quads.push(ChromeQuad::tint(
                 PxRect {
@@ -439,13 +464,30 @@ fn palette_overlay(width: u32, height: u32, scale: f32, theme: &Theme) -> Captur
                 PL_PILL_RADIUS * scale,
             ));
         }
+        // Icon (accent when selected, else muted), then the label after a gap.
+        push_pl(
+            &mut labels,
+            &mut m,
+            icon,
+            FontRole::Body,
+            if selected {
+                theme.accent
+            } else {
+                theme.fg_muted
+            },
+            px,
+            yy,
+            PL_CMD_H,
+            scale,
+        );
+        let label_x = px + m.width(icon, FontRole::Body, None) + PL_ICON_GAP * scale;
         push_pl(
             &mut labels,
             &mut m,
             label,
             FontRole::Body,
             theme.fg_primary,
-            px,
+            label_x,
             yy,
             PL_CMD_H,
             scale,
