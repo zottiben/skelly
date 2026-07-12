@@ -507,29 +507,25 @@ impl Renderer {
         );
     }
 
-    /// Set the command-palette overlay to draw over the terminal next frame, or clear
-    /// it with `None`. Builds the panel surface (`bg.elevated`), its `border.strong`
-    /// outline, the selected-row highlight, and the input caret; the text colors come
-    /// baked into `overlay.rows`.
+    /// Set the command-palette / modal overlay to draw over the terminal next frame, or
+    /// clear it with `None`. Draws the floating card (shadow + `border.strong` ring +
+    /// `bg.elevated` fill) from the panel, then the binary's content quads (selected pill,
+    /// caret) and proportional labels on top.
     pub fn set_overlay(&mut self, overlay: Option<&OverlayView>) {
         let Some(view) = overlay else {
             self.overlay.clear();
             return;
         };
         let scale = self.overlay.text.scale();
-        let (cell_w, cell_h, _) = self.overlay.text.cell_metrics();
-        let quads = crate::cells::overlay_quads(view, &self.theme, cell_w, cell_h, scale);
-        self.overlay.set(
+        let mut quads = crate::cells::card_quads(view.panel, &self.theme, scale);
+        quads.extend(view.quads.iter().map(chrome_quad));
+        self.overlay.set_paint(
             &self.device,
             &self.queue,
             (self.config.width, self.config.height),
             &quads,
-            PaneTextInput {
-                rows: view.rows,
-                left: view.text_origin.0,
-                top: view.text_origin.1,
-                clip: (view.panel.x, view.panel.y, view.panel.w, view.panel.h),
-            },
+            view.labels,
+            view.panel,
         );
     }
 

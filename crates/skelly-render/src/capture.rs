@@ -10,15 +10,14 @@
 use skelly_config::Appearance;
 
 use crate::cells::{
-    chrome_quad, gitdock_quads as build_gitdock_quads, grid_quads, logo_quads,
-    overlay_quads as build_overlay_quads, push_outline, scrim_quad,
-    settings_quads as build_settings_quads, timeline_quads as build_timeline_quads, Quad,
-    QuadLayer, LOGO_WATERMARK_OPACITY,
+    card_quads, chrome_quad, gitdock_quads as build_gitdock_quads, grid_quads, logo_quads,
+    push_outline, scrim_quad, settings_quads as build_settings_quads,
+    timeline_quads as build_timeline_quads, Quad, QuadLayer, LOGO_WATERMARK_OPACITY,
 };
 use crate::prose::{ProseLabel, ProseLayer};
 use crate::text::{measure_cell, PaneTextInput, TextLayer};
 use crate::theme::{Rgba, Theme};
-use crate::{ChromeQuad, GitDockView, GridCell, OverlayView, PxRect, SettingsView, TimelineView};
+use crate::{ChromeQuad, GitDockView, GridCell, PxRect, SettingsView, TimelineView};
 
 /// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
@@ -156,19 +155,15 @@ pub struct CaptureTimeline {
     pub viewing_row: Option<usize>,
 }
 
-/// A command-palette overlay for [`capture_panes_rgba`], mirroring
-/// [`OverlayView`](crate::OverlayView) but owning its rows.
+/// A command-palette / modal overlay for [`capture_panes_rgba`], mirroring
+/// [`OverlayView`](crate::OverlayView) but owning its display list (proportional chrome).
 pub struct CaptureOverlay {
     /// The centered panel rectangle, physical px.
     pub panel: PxRect,
-    /// Pixel position of the text grid's cell `(0, 0)` top-left.
-    pub text_origin: (f32, f32),
-    /// The overlay text as a monospace grid (UI-token colored).
-    pub rows: Vec<Vec<GridCell>>,
-    /// The selected row to highlight, if any.
-    pub selected_row: Option<usize>,
-    /// The input caret's `(column, row)` cell, if any.
-    pub caret: Option<(usize, usize)>,
+    /// The content quads over the card (selected pill, caret).
+    pub quads: Vec<ChromeQuad>,
+    /// The positioned proportional text labels.
+    pub labels: Vec<ProseLabel>,
 }
 
 /// A dim "shell exited" overlay for [`capture_panes_rgba`], mirroring
@@ -281,20 +276,15 @@ pub fn capture_panes_rgba(
         }
     });
     let overlay_scene = chrome.overlay.map(|ov| {
-        let view = OverlayView {
-            panel: ov.panel,
-            text_origin: ov.text_origin,
-            rows: &ov.rows,
-            selected_row: ov.selected_row,
-            caret: ov.caret,
-        };
+        let mut quads = card_quads(ov.panel, &theme, scale as f32);
+        quads.extend(ov.quads.iter().map(chrome_quad));
         OverlayScene {
-            quads: build_overlay_quads(&view, &theme, cell_w, cell_h, scale as f32),
-            rows: &ov.rows,
-            left: ov.text_origin.0,
-            top: ov.text_origin.1,
+            quads,
+            rows: &[],
+            left: ov.panel.x,
+            top: ov.panel.y,
             clip: (ov.panel.x, ov.panel.y, ov.panel.w, ov.panel.h),
-            prose: Vec::new(),
+            prose: ov.labels.clone(),
         }
     });
     pollster::block_on(capture_async(

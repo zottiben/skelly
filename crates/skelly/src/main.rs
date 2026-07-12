@@ -53,8 +53,6 @@ const WINDOW_PAD: f32 = 12.0;
 const PANE_INSET: f32 = 6.0;
 /// One keyboard resize step, as a fraction of the enclosing split's extent.
 const RESIZE_STEP: f32 = 0.04;
-/// Logical padding (px) inside the command palette panel.
-const PALETTE_PAD: f32 = 12.0;
 /// Logical width (px) of the slim icon rail (`⇧⌘B`), per design §08 ("Icon rail 56px").
 const RAIL_WIDTH: f32 = 56.0;
 /// Logical inset (px) of the full-window settings view's text from the window edge.
@@ -556,7 +554,7 @@ impl App {
         let overlay = self.palette.open.then(|| self.build_palette_frame());
         // The confirm modal reuses the overlay pass; it never coexists with the palette.
         let confirm = (!self.palette.open)
-            .then(|| self.confirm.as_ref().map(|c| self.build_confirm_frame(c)))
+            .then(|| self.build_confirm_frame())
             .flatten();
         let settings = self.settings.open.then(|| self.build_settings_frame());
         // Write the clamped diff scroll back so repeated paging past the end settles.
@@ -610,17 +608,13 @@ impl App {
             match (&overlay, &confirm) {
                 (Some(frame), _) => renderer.set_overlay(Some(&OverlayView {
                     panel: frame.panel,
-                    text_origin: frame.origin,
-                    rows: &frame.rows,
-                    selected_row: frame.selected_row,
-                    caret: Some(frame.caret),
+                    quads: &frame.quads,
+                    labels: &frame.labels,
                 })),
                 (None, Some(frame)) => renderer.set_overlay(Some(&OverlayView {
                     panel: frame.panel,
-                    text_origin: frame.origin,
-                    rows: &frame.rows,
-                    selected_row: frame.selected_row,
-                    caret: None,
+                    quads: &frame.quads,
+                    labels: &frame.labels,
                 })),
                 (None, None) => renderer.set_overlay(None),
             }
@@ -641,87 +635,60 @@ impl App {
         }
     }
 
-    /// Lay out the command palette as a centered panel: pick a width in cells, render
-    /// the palette grid in UI tokens, and size the panel to fit it.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "palette grid dimensions are small, non-negative values"
-    )]
-    fn build_palette_frame(&self) -> PaletteFrame {
-        let (cell_w, cell_h) = self.cell_size();
-        let pad = PALETTE_PAD * scale32(self.scale);
+    /// Lay out the command palette as a centered floating card, sized to its proportional
+    /// content, animated by the open/close rise offset.
+    fn build_palette_frame(&mut self) -> PaletteFrame {
+        let scale = scale32(self.scale);
         let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
-
-        // The palette sizes itself to its content, but never wider than fits.
-        let max_cols = ((surface_w * 0.9) / cell_w).floor().max(28.0) as usize;
-        let view = self.palette.view(max_cols, &self.theme);
-        let grid_cols = view.rows.first().map_or(max_cols, Vec::len);
-        let rows = view.rows.len();
-
-        let panel_w = grid_cols as f32 * cell_w + 2.0 * pad;
-        let panel_h = rows as f32 * cell_h + 2.0 * pad;
+        let (mut panel_w, panel_h) = self.palette.natural_size(scale, &mut self.measure);
+        panel_w = panel_w.min(surface_w * 0.9);
         let x = ((surface_w - panel_w) / 2.0).max(0.0);
-        // The resting top, plus the open animation's rise offset (0 once settled), kept within
-        // the on-screen range so the rise never pushes the panel's bottom off a short window.
         let max_y = (surface_h - panel_h).max(0.0);
         let rest_y = (surface_h * 0.16).min(max_y);
-        let offset = overlay_rise_offset(self.palette_anim, Instant::now(), scale32(self.scale));
+        let offset = overlay_rise_offset(self.palette_anim, Instant::now(), scale);
         let y = overlay_panel_top(rest_y, offset, max_y);
-
+        let panel = PxRect {
+            x,
+            y,
+            w: panel_w,
+            h: panel_h,
+        };
+        let paint = self
+            .palette
+            .build(panel, scale, &self.theme, &mut self.measure);
         PaletteFrame {
-            panel: PxRect {
-                x,
-                y,
-                w: panel_w,
-                h: panel_h,
-            },
-            origin: (x + pad, y + pad),
-            rows: view.rows,
-            selected_row: view.selected_row,
-            caret: view.caret,
+            panel,
+            quads: paint.quads,
+            labels: paint.labels,
         }
     }
 
-    /// Lay out the "running job" confirm modal as a centered panel (like the palette, but
-    /// with no input caret), sized to its content.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "confirm grid dimensions are small, non-negative values"
-    )]
-    fn build_confirm_frame(&self, confirm: &Confirm) -> ConfirmFrame {
-        let (cell_w, cell_h) = self.cell_size();
-        let pad = PALETTE_PAD * scale32(self.scale);
+    /// Lay out the "running job" confirm modal as a centered floating card (like the
+    /// palette, but with no input, just a centered message), animated by the rise offset.
+    /// Returns `None` when no confirm is pending.
+    fn build_confirm_frame(&mut self) -> Option<ConfirmFrame> {
+        let confirm = self.confirm.as_ref()?;
+        let scale = scale32(self.scale);
         let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
-
-        let view = confirm.view(&self.theme);
-        let grid_cols = view.rows.first().map_or(0, Vec::len);
-        let rows = view.rows.len();
-
-        let panel_w = grid_cols as f32 * cell_w + 2.0 * pad;
-        let panel_h = rows as f32 * cell_h + 2.0 * pad;
+        let (mut panel_w, panel_h) = confirm.natural_size(scale, &mut self.measure);
+        panel_w = panel_w.min(surface_w * 0.9);
         let x = ((surface_w - panel_w) / 2.0).max(0.0);
-        // The modal rises in / falls out like the palette (design §03 motion), clamped so the
-        // travel never pushes it off a short window.
         let max_y = (surface_h - panel_h).max(0.0);
         let rest_y = (surface_h * 0.16).min(max_y);
-        let offset = overlay_rise_offset(self.confirm_anim, Instant::now(), scale32(self.scale));
+        let offset = overlay_rise_offset(self.confirm_anim, Instant::now(), scale);
         let y = overlay_panel_top(rest_y, offset, max_y);
-
-        ConfirmFrame {
-            panel: PxRect {
-                x,
-                y,
-                w: panel_w,
-                h: panel_h,
-            },
-            origin: (x + pad, y + pad),
-            rows: view.rows,
-            selected_row: view.selected_row,
-        }
+        let panel = PxRect {
+            x,
+            y,
+            w: panel_w,
+            h: panel_h,
+        };
+        let labels = confirm.build(panel, scale, &self.theme, &mut self.measure);
+        Some(ConfirmFrame {
+            panel,
+            quads: Vec::new(),
+            labels,
+        })
     }
 
     /// Lay out the left sidebar (design §08): a full-height panel of `sidebar.width` (or
@@ -2111,19 +2078,16 @@ struct DeadPaneFrame {
 /// Owned command-palette frame data the borrowed [`OverlayView`] points at.
 struct PaletteFrame {
     panel: PxRect,
-    origin: (f32, f32),
-    rows: Vec<Vec<GridCell>>,
-    selected_row: Option<usize>,
-    caret: (usize, usize),
+    quads: Vec<skelly_render::ChromeQuad>,
+    labels: Vec<skelly_render::ProseLabel>,
 }
 
 /// Owned "running job" confirm-modal frame data the borrowed [`OverlayView`] points at
-/// (like [`PaletteFrame`], but with no input caret).
+/// (like [`PaletteFrame`], but with no content quads - just the centered message).
 struct ConfirmFrame {
     panel: PxRect,
-    origin: (f32, f32),
-    rows: Vec<Vec<GridCell>>,
-    selected_row: Option<usize>,
+    quads: Vec<skelly_render::ChromeQuad>,
+    labels: Vec<skelly_render::ProseLabel>,
 }
 
 /// Owned settings-view frame data the borrowed [`SettingsView`] points at.

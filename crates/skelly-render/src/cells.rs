@@ -51,9 +51,6 @@ pub(crate) const SHADOW_E4: Shadow = Shadow {
 /// Corner radius (logical px) for floating panels / the palette / panes (the guide's
 /// `lg` radius token).
 pub(crate) const RADIUS_LG: f32 = 10.0;
-/// Corner radius (logical px) for the selected-row pill inside a menu/palette (the
-/// guide's `md` radius: cards, menus, list rows).
-pub(crate) const RADIUS_MD: f32 = 8.0;
 
 impl Quad {
     /// A sharp-cornered quad at pixel `(x, y)` of size `(w, h)` filled with linear
@@ -212,73 +209,37 @@ pub(crate) fn grid_quads(
     quads
 }
 
-/// Build the decorative quads for a command-palette overlay: the `bg.elevated` panel
-/// fill, the translucent `accent` selected-row highlight, the `accent` input caret,
-/// and the `border.strong` outline (drawn last, on top). Shared by the windowed
+/// Build the floating-card decoration for an overlay (the command palette or a modal): the
+/// `e4` drop shadow, a rounded `border.strong` ring, and the `bg.elevated` fill inset by the
+/// stroke. The overlay's content (selected-row pill, caret, text) is supplied by the binary
+/// as a proportional display list drawn on top. Shared by the windowed
 /// [`Renderer`](crate::Renderer) and the headless capture so both draw identically.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "row/column indices into a small overlay grid are exact as f32"
-)]
-pub(crate) fn overlay_quads(
-    view: &crate::OverlayView,
+pub(crate) fn card_quads(
+    panel: crate::PxRect,
     theme: &crate::theme::Theme,
-    cell_w: f32,
-    cell_h: f32,
     scale: f32,
 ) -> Vec<Quad> {
-    let panel = view.panel;
     let stroke = scale.max(1.0);
     let radius = RADIUS_LG * scale;
-    let mut quads = Vec::new();
-
-    // The e4 drop shadow behind the floating card, then a rounded `border.strong`
-    // card with the `bg.elevated` fill inset by the stroke - a 1px rounded border ring
-    // (replacing the old four sharp edge bars, which would poke past rounded corners).
-    quads.push(Quad::shadow(panel, SHADOW_E4, scale, radius));
-    quads.push(Quad::rounded(
-        panel.x,
-        panel.y,
-        panel.w,
-        panel.h,
-        theme.border_strong.to_linear(),
-        radius,
-    ));
-    quads.push(Quad::rounded(
-        panel.x + stroke,
-        panel.y + stroke,
-        (panel.w - 2.0 * stroke).max(0.0),
-        (panel.h - 2.0 * stroke).max(0.0),
-        theme.bg_elevated.to_linear(),
-        (radius - stroke).max(0.0),
-    ));
-
-    // The selected command: a rounded `accent.subtle` pill inset from the panel edges
-    // (the guide's rounded list rows).
-    if let Some(row) = view.selected_row {
-        let inset = 6.0 * scale;
-        let y = view.text_origin.1 + row as f32 * cell_h;
-        quads.push(Quad::rounded(
-            panel.x + inset,
-            y,
-            (panel.w - 2.0 * inset).max(0.0),
-            cell_h,
-            theme.accent_subtle(),
-            RADIUS_MD * scale,
-        ));
-    }
-    if let Some((col, row)) = view.caret {
-        let x = view.text_origin.0 + col as f32 * cell_w;
-        let y = view.text_origin.1 + row as f32 * cell_h;
-        quads.push(Quad::new(
-            x,
-            y,
-            (2.0 * scale).max(1.0),
-            cell_h,
-            theme.accent.to_linear(),
-        ));
-    }
-    quads
+    vec![
+        Quad::shadow(panel, SHADOW_E4, scale, radius),
+        Quad::rounded(
+            panel.x,
+            panel.y,
+            panel.w,
+            panel.h,
+            theme.border_strong.to_linear(),
+            radius,
+        ),
+        Quad::rounded(
+            panel.x + stroke,
+            panel.y + stroke,
+            (panel.w - 2.0 * stroke).max(0.0),
+            (panel.h - 2.0 * stroke).max(0.0),
+            theme.bg_elevated.to_linear(),
+            (radius - stroke).max(0.0),
+        ),
+    ]
 }
 
 /// The vertebra logo mark's own spine opacity (the guide draws the spine at `accent`

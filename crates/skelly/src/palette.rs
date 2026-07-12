@@ -1,14 +1,35 @@
 //! The command palette: a centered overlay listing runnable commands, filtered by a
 //! typed query and navigated by keyboard (AGENTS Hard rule 4 - an overlay over the
-//! live terminal, never a route). This module is pure state + view-building: it owns
-//! the query, the filtered selection, and how the palette renders as a monospace grid
-//! of UI-token-colored cells. The binary owns opening it, routing keys, and executing
-//! the chosen command.
+//! live terminal, never a route). This module is pure state + layout: it owns the query,
+//! the filtered selection, and builds the palette as a *proportional* display list
+//! (decorative quads + positioned labels in the guide's fonts, §09 "Command palette row").
+//! The binary owns opening it, routing keys, and executing the chosen command.
 //!
 //! The built-in [`COMMANDS`] set is the seed of the keybinding registry; merging user
 //! `[keys]` overrides + surfacing tabs/themes/files is a later slice.
 
-use skelly_render::{GridCell, Srgb, Theme};
+use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
+
+/// Layout constants in **logical** px (multiplied by the DPI scale). Tuned to the guide's
+/// §09 palette: an input line, a result count, `accent.subtle` command rows with a
+/// right-anchored key hint, and a caption footer.
+const PAD: f32 = 14.0;
+/// Horizontal inset of a row's text from the padded content edge (leaves room for the pill).
+const ROW_INSET: f32 = 10.0;
+/// Input row height.
+const INPUT_H: f32 = 34.0;
+/// Result-count row height.
+const COUNT_H: f32 = 22.0;
+/// Command row height (the guide's list rows).
+const CMD_H: f32 = 30.0;
+/// Spacer height between the results and the footer.
+const SPACER_H: f32 = 8.0;
+/// Footer row height.
+const FOOTER_H: f32 = 24.0;
+/// Minimum gap between a command label and its right-anchored key hint.
+const HINT_GAP: f32 = 24.0;
+/// Corner radius (logical px) of the selected-row pill (the guide's `md` radius).
+const PILL_RADIUS: f32 = 8.0;
 
 /// A runnable command surfaced in the palette.
 pub(crate) struct Command {
@@ -176,15 +197,13 @@ pub(crate) const COMMANDS: &[Command] = &[
     },
 ];
 
-/// The rendered palette: the monospace text grid plus where the selection highlight
-/// and input caret go, for a [`skelly_render::OverlayView`].
-pub(crate) struct View {
-    /// The palette's lines as a grid of UI-colored cells.
-    pub(crate) rows: Vec<Vec<GridCell>>,
-    /// The grid row to highlight (the selected command), if any results.
-    pub(crate) selected_row: Option<usize>,
-    /// The input caret's `(column, row)` cell.
-    pub(crate) caret: (usize, usize),
+/// The palette's proportional display list for a [`skelly_render::OverlayView`]: the
+/// content quads (the selected-row pill + the input caret) and the positioned labels.
+pub(crate) struct Paint {
+    /// The content quads over the card, in draw order.
+    pub(crate) quads: Vec<ChromeQuad>,
+    /// The positioned proportional text labels.
+    pub(crate) labels: Vec<ProseLabel>,
 }
 
 /// Palette state: whether it is open, the query, and the selected match.
@@ -274,65 +293,186 @@ impl Palette {
             .map(|m| COMMANDS[m.index].action)
     }
 
-    /// Render the palette to a grid in `theme`'s UI tokens: a prompt line, a result
-    /// count, one line per match, a spacer, and a footer of key hints. The grid width
-    /// is the widest line (so nothing clips), floored at a comfortable minimum and
-    /// capped at `max_cols` (the panel must fit the window).
-    pub(crate) fn view(&self, max_cols: usize, theme: &Theme) -> View {
-        let cols = self.natural_cols().clamp(28, max_cols.max(28));
-        let mut rows: Vec<Vec<GridCell>> = Vec::new();
-
-        // Prompt line: "> " then the query (or a placeholder when empty).
-        let mut prompt = vec![cell('>', theme.accent), cell(' ', theme.fg_primary)];
-        let caret_col = prompt.len() + self.query.chars().count();
-        if self.query.is_empty() {
-            prompt.extend(text_cells("search commands", theme.fg_muted));
-        } else {
-            prompt.extend(text_cells(&self.query, theme.fg_primary));
-        }
-        rows.push(pad_to(prompt, cols, theme.fg_muted));
-
+    /// The palette's natural panel size in **physical** px (including the card padding),
+    /// for the binary to center + animate the card. Width is the widest content row (a
+    /// command's label + gap + hint, the footer, or the input) plus insets; height is the
+    /// sum of the fixed row heights.
+    pub(crate) fn natural_size(&self, scale: f32, measure: &mut TextMeasure) -> (f32, f32) {
         let results = self.results();
-        rows.push(count_row(results.len(), cols, theme.fg_muted));
-
-        let first_command_row = rows.len();
+        let inset = (PAD + ROW_INSET) * scale;
+        let mut content_w = measure.width(FOOTER, FontRole::Caption, None);
+        // The input line ("> " + query or placeholder).
+        let query = if self.query.is_empty() {
+            PLACEHOLDER
+        } else {
+            &self.query
+        };
+        content_w = content_w.max(
+            measure.width("> ", FontRole::Body, None) + measure.width(query, FontRole::Body, None),
+        );
         for hit in &results {
             let cmd = &COMMANDS[hit.index];
-            rows.push(command_row(
-                cmd.label,
-                cmd.hint,
-                cols,
-                &hit.positions,
-                theme,
-            ));
+            let row = measure.width(cmd.label, FontRole::Body, None)
+                + HINT_GAP * scale
+                + measure.width(cmd.hint, FontRole::Micro, None);
+            content_w = content_w.max(row);
         }
-
-        rows.push(pad_to(Vec::new(), cols, theme.fg_muted)); // spacer
-        rows.push(pad_to(
-            text_cells(FOOTER, theme.fg_muted),
-            cols,
-            theme.fg_muted,
-        ));
-
-        let selected_row = (!results.is_empty()).then_some(first_command_row + self.selected);
-        View {
-            rows,
-            selected_row,
-            caret: (caret_col, 0),
-        }
+        let width = content_w + 2.0 * inset;
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "the match count is a small, exact value"
+        )]
+        let rows_h = INPUT_H + COUNT_H + results.len() as f32 * CMD_H + SPACER_H + FOOTER_H;
+        let height = rows_h * scale + 2.0 * PAD * scale;
+        (width, height)
     }
 
-    /// The natural grid width: the widest line the palette wants to draw (the footer,
-    /// or the longest matched `label + hint` command row), plus side margins.
-    fn natural_cols(&self) -> usize {
-        let mut widest = FOOTER.chars().count();
-        for hit in &self.results() {
+    /// Build the palette's content display list within `panel` (the renderer draws the card
+    /// itself): the selected-row `accent.subtle` pill + the input caret as quads, and the
+    /// prompt / query / count / command rows (matched chars in `accent`, key hints right) /
+    /// footer as proportional labels.
+    pub(crate) fn build(
+        &self,
+        panel: PxRect,
+        scale: f32,
+        theme: &Theme,
+        measure: &mut TextMeasure,
+    ) -> Paint {
+        let mut quads = Vec::new();
+        let mut labels = Vec::new();
+        let cx = panel.x + PAD * scale;
+        let cw = panel.w - 2.0 * PAD * scale;
+        let prompt_x = cx + ROW_INSET * scale;
+        let mut y = panel.y + PAD * scale;
+
+        self.push_input(&mut quads, &mut labels, prompt_x, y, scale, theme, measure);
+        y += INPUT_H * scale;
+
+        // Result count.
+        let results = self.results();
+        let count = if results.len() == 1 {
+            "1 result".to_owned()
+        } else {
+            format!("{} results", results.len())
+        };
+        push_line(
+            &mut labels,
+            &count,
+            FontRole::Caption,
+            theme.fg_muted,
+            prompt_x,
+            y,
+            COUNT_H,
+            scale,
+            measure,
+        );
+        y += COUNT_H * scale;
+
+        // Command rows.
+        for (index, hit) in results.iter().enumerate() {
             let cmd = &COMMANDS[hit.index];
-            // 2 indent + label + 1 gap + hint + 1 right margin.
-            let width = 2 + cmd.label.chars().count() + 1 + cmd.hint.chars().count() + 1;
-            widest = widest.max(width);
+            if index == self.selected {
+                let inset = ROW_INSET * 0.5 * scale;
+                quads.push(ChromeQuad::tint(
+                    PxRect {
+                        x: cx + inset,
+                        y,
+                        w: (cw - 2.0 * inset).max(0.0),
+                        h: CMD_H * scale,
+                    },
+                    theme.accent,
+                    0.14,
+                    PILL_RADIUS * scale,
+                ));
+            }
+            push_command(
+                &mut labels,
+                cmd,
+                &hit.positions,
+                cx,
+                cw,
+                y,
+                scale,
+                theme,
+                measure,
+            );
+            y += CMD_H * scale;
         }
-        widest
+
+        y += SPACER_H * scale;
+        push_line(
+            &mut labels,
+            FOOTER,
+            FontRole::Caption,
+            theme.fg_muted,
+            prompt_x,
+            y,
+            FOOTER_H,
+            scale,
+            measure,
+        );
+
+        Paint { quads, labels }
+    }
+
+    /// The input line: "> " (accent) then the query (primary) or placeholder (muted), with a
+    /// caret bar after the text. `prompt_x` is the left edge; the row top is physical `y`.
+    #[allow(clippy::too_many_arguments, reason = "one focused input-row builder")]
+    fn push_input(
+        &self,
+        quads: &mut Vec<ChromeQuad>,
+        labels: &mut Vec<ProseLabel>,
+        prompt_x: f32,
+        y: f32,
+        scale: f32,
+        theme: &Theme,
+        measure: &mut TextMeasure,
+    ) {
+        push_line(
+            labels,
+            ">",
+            FontRole::Body,
+            theme.accent,
+            prompt_x,
+            y,
+            INPUT_H,
+            scale,
+            measure,
+        );
+        let query_x = prompt_x + measure.width("> ", FontRole::Body, None);
+        let (query_text, query_color) = if self.query.is_empty() {
+            (PLACEHOLDER, theme.fg_muted)
+        } else {
+            (self.query.as_str(), theme.fg_primary)
+        };
+        push_line(
+            labels,
+            query_text,
+            FontRole::Body,
+            query_color,
+            query_x,
+            y,
+            INPUT_H,
+            scale,
+            measure,
+        );
+        // Caret after the query text (or at the input start when empty).
+        let caret_x = query_x
+            + if self.query.is_empty() {
+                0.0
+            } else {
+                measure.width(&self.query, FontRole::Body, None)
+            };
+        let line_h = measure.line_height(FontRole::Body);
+        quads.push(ChromeQuad::fill(
+            PxRect {
+                x: caret_x,
+                y: y + (INPUT_H * scale - line_h) * 0.5,
+                w: (2.0 * scale).max(1.0),
+                h: line_h,
+            },
+            theme.accent,
+        ));
     }
 }
 
@@ -369,8 +509,10 @@ fn fuzzy_match(query: &str, label: &str) -> Option<(i32, Vec<usize>)> {
     Some((-first - gaps * 2, positions))
 }
 
-/// The footer hint line - also the palette's minimum width.
+/// The footer hint line.
 const FOOTER: &str = "up/down navigate    enter run    esc close";
+/// The empty-input placeholder.
+const PLACEHOLDER: &str = "search commands";
 
 impl Default for Palette {
     fn default() -> Self {
@@ -378,95 +520,137 @@ impl Default for Palette {
     }
 }
 
-/// One UI cell: a character in `fg`, no background or attributes.
-fn cell(c: char, fg: Srgb) -> GridCell {
-    GridCell {
-        c,
-        fg,
-        bg: None,
-        bold: false,
-        italic: false,
-        underline: false,
-    }
+/// Push one proportional label, vertically centered in a row of `row_h` logical px whose
+/// top is physical `top`.
+#[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
+fn push_line(
+    labels: &mut Vec<ProseLabel>,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    x: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+    measure: &mut TextMeasure,
+) {
+    let line_h = measure.line_height(role);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x,
+        y: top + (row_h * scale - line_h) * 0.5,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
 }
 
-/// A string as a run of same-colored cells.
-fn text_cells(s: &str, fg: Srgb) -> Vec<GridCell> {
-    s.chars().map(|c| cell(c, fg)).collect()
-}
-
-/// Pad (or truncate) `row` to exactly `cols` cells with spaces.
-fn pad_to(mut row: Vec<GridCell>, cols: usize, space_fg: Srgb) -> Vec<GridCell> {
-    row.truncate(cols);
-    while row.len() < cols {
-        row.push(cell(' ', space_fg));
-    }
-    row
-}
-
-/// The "N result(s)" line, indented and muted.
-fn count_row(n: usize, cols: usize, fg: Srgb) -> Vec<GridCell> {
-    let text = if n == 1 {
-        "  1 result".to_owned()
-    } else {
-        format!("  {n} results")
-    };
-    pad_to(text_cells(&text, fg), cols, fg)
-}
-
-/// A command line: an indented `label` on the left (with matched `positions` drawn in
-/// accent) and a right-aligned `hint` in muted text.
-fn command_row(
-    label: &str,
-    hint: &str,
-    cols: usize,
+/// A command row: the `label` left-aligned with matched `positions` in `accent` (the rest
+/// `fg.primary`), and the key `hint` right-anchored in muted `micro` mono.
+#[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
+fn push_command(
+    labels: &mut Vec<ProseLabel>,
+    cmd: &Command,
     positions: &[usize],
+    cx: f32,
+    cw: f32,
+    top: f32,
+    scale: f32,
     theme: &Theme,
-) -> Vec<GridCell> {
-    let indent = 2;
-    let hint_chars: Vec<char> = hint.chars().collect();
-    let mut row: Vec<GridCell> = Vec::with_capacity(cols);
-    for _ in 0..indent {
-        row.push(cell(' ', theme.fg_primary));
-    }
-    for (i, c) in label.chars().enumerate() {
-        let fg = if positions.contains(&i) {
+    measure: &mut TextMeasure,
+) {
+    let line_h = measure.line_height(FontRole::Body);
+    let y = top + (CMD_H * scale - line_h) * 0.5;
+    // The label, split into matched / unmatched runs so matched chars draw in accent.
+    let mut x = cx + ROW_INSET * scale;
+    for (text, matched) in matched_runs(cmd.label, positions) {
+        let color = if matched {
             theme.accent
         } else {
             theme.fg_primary
         };
-        row.push(cell(c, fg));
+        let w = measure.width(&text, FontRole::Body, None);
+        labels.push(ProseLabel {
+            text,
+            x,
+            y,
+            role: FontRole::Body,
+            color,
+            weight: None,
+            max_w: f32::MAX,
+        });
+        x += w;
     }
-    // Pad so the hint ends one cell from the right edge.
-    let hint_start = cols.saturating_sub(hint_chars.len() + 1);
-    while row.len() < hint_start {
-        row.push(cell(' ', theme.fg_primary));
+    // The right-anchored key hint (micro mono, muted).
+    if !cmd.hint.is_empty() {
+        let hint_w = measure.width(cmd.hint, FontRole::Micro, None);
+        let hint_x = cx + cw - ROW_INSET * scale - hint_w;
+        let hint_line = measure.line_height(FontRole::Micro);
+        labels.push(ProseLabel {
+            text: cmd.hint.to_owned(),
+            x: hint_x,
+            y: top + (CMD_H * scale - hint_line) * 0.5,
+            role: FontRole::Micro,
+            color: theme.fg_muted,
+            weight: None,
+            max_w: f32::MAX,
+        });
     }
-    for &c in &hint_chars {
-        row.push(cell(c, theme.fg_muted));
+}
+
+/// Split `label` into consecutive `(text, matched)` runs by whether each character's index
+/// is in `positions` (the fuzzy-matched positions), so matched runs can draw in accent.
+fn matched_runs(label: &str, positions: &[usize]) -> Vec<(String, bool)> {
+    let mut runs: Vec<(String, bool)> = Vec::new();
+    for (i, ch) in label.chars().enumerate() {
+        let matched = positions.contains(&i);
+        match runs.last_mut() {
+            Some((text, m)) if *m == matched => text.push(ch),
+            _ => runs.push((ch.to_string(), matched)),
+        }
     }
-    pad_to(row, cols, theme.fg_primary)
+    runs
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Action, Palette, Theme, COMMANDS};
+    use super::{matched_runs, Action, Palette, PxRect, TextMeasure, Theme, COMMANDS};
 
     #[test]
     fn matched_characters_render_in_accent_and_the_rest_in_primary() {
+        // "Zoom / unzoom pane" matched by "zm": z at 0, m at 3. matched_runs splits into
+        // ["Z"(matched), "oo"(not), "m"(matched), " / unzoom pane"(not)], so the label draws
+        // the matched runs in accent.
+        let runs = matched_runs("Zoom / unzoom pane", &[0, 3]);
+        assert_eq!(runs[0], ("Z".to_owned(), true));
+        assert_eq!(runs[1], ("oo".to_owned(), false));
+        assert_eq!(runs[2], ("m".to_owned(), true));
+        assert!(runs[3].0.starts_with(" / "));
+        assert!(!runs[3].1);
+    }
+
+    #[test]
+    fn build_emits_a_selected_pill_and_accent_matched_label_runs() {
         let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
         let mut p = Palette::new();
         p.open();
         for c in "zm".chars() {
             p.push_char(c);
         }
-        // rows: [0] prompt, [1] count, [2] the sole "Zoom / unzoom pane" match.
-        let view = p.view(60, &theme);
-        let row = &view.rows[2];
-        // 2-cell indent, so label 'Z' is col 2 (matched), 'o' col 3 (not), 'm' col 5.
-        assert_eq!(row[2].fg, theme.accent, "matched 'z'");
-        assert_eq!(row[3].fg, theme.fg_primary, "unmatched 'o'");
-        assert_eq!(row[5].fg, theme.accent, "matched 'm'");
+        let (w, h) = p.natural_size(2.0, &mut m);
+        let panel = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w,
+            h,
+        };
+        let paint = p.build(panel, 2.0, &theme, &mut m);
+        // The sole match is selected, so a pill quad plus the input caret are emitted.
+        assert!(paint.quads.len() >= 2);
+        // Some label draws in accent (the matched characters).
+        assert!(paint.labels.iter().any(|l| l.color == theme.accent));
     }
 
     #[test]

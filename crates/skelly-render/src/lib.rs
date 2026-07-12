@@ -149,24 +149,20 @@ pub struct DeadPaneView<'a> {
     pub rows: &'a [Vec<GridCell>],
 }
 
-/// The command-palette / modal overlay to draw over the live terminal.
+/// The command-palette / modal overlay to draw over the live terminal (proportional chrome).
 ///
-/// The renderer fills `panel` with `bg.elevated`, outlines it with `border.strong`,
-/// highlights `selected_row`, draws the `caret`, and paints `rows` as a monospace
-/// grid at `text_origin` (clipped to the panel). The caller bakes the UI-token colors
-/// into each cell of `rows`; the renderer owns only the decorative quads. Drawn on
-/// top of the terminal, so it never unmounts the panes beneath (AGENTS Hard rule 4).
+/// The renderer draws the floating card (the `e4` shadow, `border.strong` ring, and
+/// `bg.elevated` fill) from `panel`, then paints the binary's display list on top: the
+/// content `quads` (the selected-row `accent.subtle` pill, the input caret) and the
+/// positioned prose `labels` (the query, results, key hints, footer), clipped to the panel.
+/// Drawn over the terminal, so it never unmounts the panes beneath (AGENTS Hard rule 4).
 pub struct OverlayView<'a> {
     /// The centered panel rectangle on the surface, physical px.
     pub panel: PxRect,
-    /// Pixel position of the text grid's cell `(0, 0)` top-left, physical px.
-    pub text_origin: (f32, f32),
-    /// The overlay's text as a monospace grid (rows top to bottom), UI-token colored.
-    pub rows: &'a [Vec<GridCell>],
-    /// Row index in `rows` to highlight (the selected command), if any.
-    pub selected_row: Option<usize>,
-    /// The input caret's `(column, row)` cell, if the input line is active.
-    pub caret: Option<(usize, usize)>,
+    /// The content quads (selected-row pill, caret), in draw order over the card.
+    pub quads: &'a [ChromeQuad],
+    /// The positioned proportional text labels.
+    pub labels: &'a [ProseLabel],
 }
 
 /// The persistent left sidebar to draw as base-layer chrome (design §08).

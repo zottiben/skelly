@@ -135,9 +135,9 @@ fn main() {
     let theme = Theme::resolve(&appearance.theme);
     let sidebar = sidebar_panel(height, sidebar_w, sc, rail, overflow, &theme);
     let overlay = if std::env::args().nth(3).as_deref() == Some("confirm") {
-        confirm_overlay(width, height, cell_w, cell_h, sc, &theme)
+        confirm_overlay(width, height, sc, &theme)
     } else {
-        palette_overlay(width, height, cell_w, cell_h, sc, &theme)
+        palette_overlay(width, height, sc, &theme)
     };
     let rgba = skelly_render::capture_panes_rgba(
         &appearance,
@@ -169,113 +169,298 @@ fn write_png(path: &str, width: u32, height: u32, rgba: &[u8]) {
         .expect("png data");
 }
 
-/// Build a representative command-palette overlay (a prompt line, a few command
-/// rows, and a footer) centered on the surface - to exercise the overlay compositing
-/// path. The live binary drives this from the real `palette` module.
-fn palette_overlay(
-    width: u32,
-    height: u32,
-    cell_w: f32,
-    cell_h: f32,
-    scale: f32,
-    theme: &Theme,
-) -> CaptureOverlay {
-    let cols = 44_usize; // fits the footer (the widest line), matching the real palette
-    let rows = vec![
-        prompt_row("> zoom", cols, theme),
-        ui_row("  2 results", cols, theme.fg_muted),
-        command_row("Zoom / unzoom pane", "opt Z", cols, theme),
-        command_row("Even out splits", "opt =", cols, theme),
-        ui_row("", cols, theme.fg_muted),
-        ui_row(
-            "  up/down navigate    enter run    esc close",
-            cols,
-            theme.fg_muted,
-        ),
+// Palette layout constants (logical px) - mirror the binary's `palette` module (§09).
+const PL_PAD: f32 = 14.0;
+const PL_ROW_INSET: f32 = 10.0;
+const PL_INPUT_H: f32 = 34.0;
+const PL_COUNT_H: f32 = 22.0;
+const PL_CMD_H: f32 = 30.0;
+const PL_SPACER_H: f32 = 8.0;
+const PL_FOOTER_H: f32 = 24.0;
+const PL_HINT_GAP: f32 = 24.0;
+const PL_PILL_RADIUS: f32 = 8.0;
+const PL_FOOTER: &str = "up/down navigate    enter run    esc close";
+
+/// Build a representative command-palette overlay (input, count, a couple of command rows
+/// with the first selected, footer) as a proportional display list - mirroring the binary's
+/// `palette` module so the capture verifies the overlay. The live binary drives the real one.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one straight-line representative overlay builder mirroring the binary"
+)]
+fn palette_overlay(width: u32, height: u32, scale: f32, theme: &Theme) -> CaptureOverlay {
+    let mut m = TextMeasure::new(scale);
+    let cmds = [
+        ("Zoom / unzoom pane", "opt Z"),
+        ("Even out splits", "opt ="),
     ];
-    let pad = 12.0 * scale;
-    let panel_w = cols as f32 * cell_w + 2.0 * pad;
-    let panel_h = rows.len() as f32 * cell_h + 2.0 * pad;
+    let inset = (PL_PAD + PL_ROW_INSET) * scale;
+    let mut content_w = m
+        .width(PL_FOOTER, FontRole::Caption, None)
+        .max(m.width("> ", FontRole::Body, None) + m.width("zoom", FontRole::Body, None));
+    for (l, h) in cmds {
+        content_w = content_w.max(
+            m.width(l, FontRole::Body, None)
+                + PL_HINT_GAP * scale
+                + m.width(h, FontRole::Micro, None),
+        );
+    }
+    let panel_w = content_w + 2.0 * inset;
+    let panel_h =
+        (PL_INPUT_H + PL_COUNT_H + 2.0 * PL_CMD_H + PL_SPACER_H + PL_FOOTER_H + 2.0 * PL_PAD)
+            * scale;
     let x = ((width as f32 - panel_w) / 2.0).max(0.0);
     let y = height as f32 * 0.16;
-    CaptureOverlay {
-        panel: PxRect {
-            x,
-            y,
-            w: panel_w,
-            h: panel_h,
+    let panel = PxRect {
+        x,
+        y,
+        w: panel_w,
+        h: panel_h,
+    };
+    let cx = x + PL_PAD * scale;
+    let cw = panel_w - 2.0 * PL_PAD * scale;
+    let px = cx + PL_ROW_INSET * scale;
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
+    let mut yy = y + PL_PAD * scale;
+
+    // Input line "> zoom" + caret.
+    push_pl(
+        &mut labels,
+        &mut m,
+        ">",
+        FontRole::Body,
+        theme.accent,
+        px,
+        yy,
+        PL_INPUT_H,
+        scale,
+    );
+    let pw = m.width("> ", FontRole::Body, None);
+    push_pl(
+        &mut labels,
+        &mut m,
+        "zoom",
+        FontRole::Body,
+        theme.fg_primary,
+        px + pw,
+        yy,
+        PL_INPUT_H,
+        scale,
+    );
+    let lh = m.line_height(FontRole::Body);
+    quads.push(ChromeQuad::fill(
+        PxRect {
+            x: px + pw + m.width("zoom", FontRole::Body, None),
+            y: yy + (PL_INPUT_H * scale - lh) * 0.5,
+            w: (2.0 * scale).max(1.0),
+            h: lh,
         },
-        text_origin: (x + pad, y + pad),
-        rows,
-        selected_row: Some(2),
-        caret: Some(("> zoom".chars().count(), 0)),
+        theme.accent,
+    ));
+    yy += PL_INPUT_H * scale;
+
+    push_pl(
+        &mut labels,
+        &mut m,
+        "2 results",
+        FontRole::Caption,
+        theme.fg_muted,
+        px,
+        yy,
+        PL_COUNT_H,
+        scale,
+    );
+    yy += PL_COUNT_H * scale;
+
+    for (i, (label, hint)) in cmds.iter().enumerate() {
+        if i == 0 {
+            let pi = PL_ROW_INSET * 0.5 * scale;
+            quads.push(ChromeQuad::tint(
+                PxRect {
+                    x: cx + pi,
+                    y: yy,
+                    w: (cw - 2.0 * pi).max(0.0),
+                    h: PL_CMD_H * scale,
+                },
+                theme.accent,
+                0.14,
+                PL_PILL_RADIUS * scale,
+            ));
+        }
+        push_pl(
+            &mut labels,
+            &mut m,
+            label,
+            FontRole::Body,
+            theme.fg_primary,
+            px,
+            yy,
+            PL_CMD_H,
+            scale,
+        );
+        let hw = m.width(hint, FontRole::Micro, None);
+        push_pl(
+            &mut labels,
+            &mut m,
+            hint,
+            FontRole::Micro,
+            theme.fg_muted,
+            cx + cw - PL_ROW_INSET * scale - hw,
+            yy,
+            PL_CMD_H,
+            scale,
+        );
+        yy += PL_CMD_H * scale;
+    }
+    yy += PL_SPACER_H * scale;
+    push_pl(
+        &mut labels,
+        &mut m,
+        PL_FOOTER,
+        FontRole::Caption,
+        theme.fg_muted,
+        px,
+        yy,
+        PL_FOOTER_H,
+        scale,
+    );
+
+    CaptureOverlay {
+        panel,
+        quads,
+        labels,
     }
 }
 
-/// Build the "running job" confirm modal (design §12) - a centered panel warning that a
-/// close would kill a foreground job. Mirrors the binary's `confirm` module view. The live
-/// binary drives this from the real module.
-fn confirm_overlay(
-    width: u32,
-    height: u32,
-    cell_w: f32,
-    cell_h: f32,
-    scale: f32,
-    theme: &Theme,
-) -> CaptureOverlay {
-    // Title: the process name (accent) inside straight quotes (primary).
-    let mut title = vec![ui_cell('"', theme.fg_primary)];
-    title.extend("vim".chars().map(|c| ui_cell(c, theme.accent)));
-    title.extend(
-        "\" is still running"
-            .chars()
-            .map(|c| ui_cell(c, theme.fg_primary)),
-    );
-
-    let lines = [
-        title,
-        Vec::new(),
-        "Close this pane and end it?"
-            .chars()
-            .map(|c| ui_cell(c, theme.fg_primary))
-            .collect(),
-        Vec::new(),
-        "\u{21b5} close   esc cancel"
-            .chars()
-            .map(|c| ui_cell(c, theme.fg_muted))
-            .collect(),
+/// Build the "running job" confirm modal (design §12) as a proportional centered card -
+/// mirroring the binary's `confirm` module. The live binary drives the real one.
+fn confirm_overlay(width: u32, height: u32, scale: f32, theme: &Theme) -> CaptureOverlay {
+    let mut m = TextMeasure::new(scale);
+    let title_runs: [(&str, Srgb); 3] = [
+        ("\"", theme.fg_primary),
+        ("vim", theme.accent),
+        ("\" is still running", theme.fg_primary),
     ];
-    let widest = lines.iter().map(Vec::len).max().unwrap_or(0);
-    let cols = (widest + 4).max(30);
-    let rows: Vec<Vec<GridCell>> = lines
-        .into_iter()
-        .map(|mut line| {
-            let mut row = vec![ui_cell(' ', theme.fg_muted), ui_cell(' ', theme.fg_muted)];
-            row.append(&mut line);
-            while row.len() < cols {
-                row.push(ui_cell(' ', theme.fg_muted));
-            }
-            row
-        })
-        .collect();
-
-    let pad = 12.0 * scale;
-    let panel_w = cols as f32 * cell_w + 2.0 * pad;
-    let panel_h = rows.len() as f32 * cell_h + 2.0 * pad;
+    let action = "Close this pane and end it?";
+    let hint = "\u{21b5} close    esc cancel";
+    let title_w: f32 = title_runs
+        .iter()
+        .map(|(t, _)| m.width(t, FontRole::Title, None))
+        .sum();
+    let content_w = title_w
+        .max(m.width(action, FontRole::Body, None))
+        .max(m.width(hint, FontRole::Caption, None));
+    let panel_w = content_w + 2.0 * 18.0 * scale;
+    let panel_h = (18.0 + 28.0 + 6.0 + 24.0 + 14.0 + 22.0 + 18.0) * scale;
     let x = ((width as f32 - panel_w) / 2.0).max(0.0);
     let y = height as f32 * 0.16;
-    CaptureOverlay {
-        panel: PxRect {
-            x,
-            y,
-            w: panel_w,
-            h: panel_h,
-        },
-        text_origin: (x + pad, y + pad),
-        rows,
-        selected_row: None,
-        caret: None,
+    let panel = PxRect {
+        x,
+        y,
+        w: panel_w,
+        h: panel_h,
+    };
+    let mut labels = Vec::new();
+    let mut yy = y + 18.0 * scale;
+
+    // Title: centered, drawn as colored runs.
+    let lh = m.line_height(FontRole::Title);
+    let ty = yy + (28.0 * scale - lh) * 0.5;
+    let mut tx = x + (panel_w - title_w) * 0.5;
+    for (text, color) in title_runs {
+        labels.push(ProseLabel {
+            text: text.to_owned(),
+            x: tx,
+            y: ty,
+            role: FontRole::Title,
+            color,
+            weight: None,
+            max_w: f32::MAX,
+        });
+        tx += m.width(text, FontRole::Title, None);
     }
+    yy += 28.0 * scale + 6.0 * scale;
+    push_centered_pl(
+        &mut labels,
+        &mut m,
+        action,
+        FontRole::Body,
+        theme.fg_primary,
+        panel,
+        yy,
+        24.0,
+        scale,
+    );
+    yy += 24.0 * scale + 14.0 * scale;
+    push_centered_pl(
+        &mut labels,
+        &mut m,
+        hint,
+        FontRole::Caption,
+        theme.fg_muted,
+        panel,
+        yy,
+        22.0,
+        scale,
+    );
+
+    CaptureOverlay {
+        panel,
+        quads: Vec::new(),
+        labels,
+    }
+}
+
+/// Push a left-anchored proportional label centered vertically in a `row_h` row.
+#[allow(clippy::too_many_arguments, reason = "one focused example helper")]
+fn push_pl(
+    labels: &mut Vec<ProseLabel>,
+    m: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    x: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) {
+    let line_h = m.line_height(role);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x,
+        y: top + (row_h * scale - line_h) * 0.5,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
+}
+
+/// Push a horizontally-centered proportional label centered vertically in a `row_h` row.
+#[allow(clippy::too_many_arguments, reason = "one focused example helper")]
+fn push_centered_pl(
+    labels: &mut Vec<ProseLabel>,
+    m: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    panel: PxRect,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) {
+    let w = m.width(text, role, None);
+    let line_h = m.line_height(role);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x: panel.x + (panel.w - w) * 0.5,
+        y: top + (row_h * scale - line_h) * 0.5,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
 }
 
 // Sidebar layout constants (logical px) - mirror the binary's `sidebar` module (§08) so the
@@ -523,55 +708,6 @@ fn push_sb_label(
         weight: None,
         max_w,
     });
-}
-
-fn ui_cell(c: char, fg: Srgb) -> GridCell {
-    GridCell {
-        c,
-        fg,
-        bg: None,
-        bold: false,
-        italic: false,
-        underline: false,
-    }
-}
-
-fn ui_row(text: &str, cols: usize, fg: Srgb) -> Vec<GridCell> {
-    let mut row: Vec<GridCell> = text.chars().map(|c| ui_cell(c, fg)).collect();
-    row.truncate(cols);
-    while row.len() < cols {
-        row.push(ui_cell(' ', fg));
-    }
-    row
-}
-
-fn prompt_row(text: &str, cols: usize, theme: &Theme) -> Vec<GridCell> {
-    let mut row = vec![ui_cell('>', theme.accent)];
-    row.extend(text.chars().skip(1).map(|c| ui_cell(c, theme.fg_primary)));
-    row.truncate(cols);
-    while row.len() < cols {
-        row.push(ui_cell(' ', theme.fg_muted));
-    }
-    row
-}
-
-fn command_row(label: &str, hint: &str, cols: usize, theme: &Theme) -> Vec<GridCell> {
-    let mut row: Vec<GridCell> = "  "
-        .chars()
-        .chain(label.chars())
-        .map(|c| ui_cell(c, theme.fg_primary))
-        .collect();
-    let hint_len = hint.chars().count();
-    let hint_start = cols.saturating_sub(hint_len + 1);
-    while row.len() < hint_start {
-        row.push(ui_cell(' ', theme.fg_primary));
-    }
-    row.extend(hint.chars().map(|c| ui_cell(c, theme.fg_muted)));
-    row.truncate(cols);
-    while row.len() < cols {
-        row.push(ui_cell(' ', theme.fg_muted));
-    }
-    row
 }
 
 fn wait_until<F: Fn(&Terminal) -> bool>(term: &Terminal, timeout: Duration, ready: F) {

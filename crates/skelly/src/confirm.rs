@@ -2,10 +2,23 @@
 //! a centered overlay that warns before a close (`⌥w` pane / `⌘W` tab) which would kill a
 //! running foreground job, so a job is never destroyed silently. Confirmed with `Enter` or
 //! a second press of the close chord, dismissed with `Esc`. This module is pure state +
-//! view-building; the binary owns detecting the job (via `Terminal::foreground_job_pid`
-//! plus the process name), routing keys, and performing the actual close.
+//! layout (a proportional display list); the binary owns detecting the job (via
+//! `Terminal::foreground_job_pid` plus the process name), routing keys, and closing.
 
-use skelly_render::{GridCell, Srgb, Theme};
+use skelly_render::{FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
+
+/// Modal layout constants in **logical** px (multiplied by the DPI scale).
+const PAD: f32 = 18.0;
+/// The title line height (`"<proc>" is still running`).
+const TITLE_H: f32 = 28.0;
+/// Gap between the title and the action question.
+const GAP: f32 = 6.0;
+/// The action-question line height.
+const ACTION_H: f32 = 24.0;
+/// Gap between the action and the key hints.
+const GAP2: f32 = 14.0;
+/// The key-hint line height.
+const HINT_H: f32 = 22.0;
 
 /// What a pending close would destroy.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -34,13 +47,6 @@ pub(crate) struct Confirm {
     process: String,
 }
 
-/// The rendered modal grid plus the row to highlight (none - the process name carries the
-/// emphasis via `accent`).
-pub(crate) struct View {
-    pub(crate) rows: Vec<Vec<GridCell>>,
-    pub(crate) selected_row: Option<usize>,
-}
-
 impl Confirm {
     /// A pending confirm for closing `target`, which would kill the foreground job named
     /// `process`.
@@ -48,113 +54,176 @@ impl Confirm {
         Self { target, process }
     }
 
-    /// Render the modal to a grid in `theme`'s UI tokens: the running process (its name in
-    /// `accent`), what the close would do, and the key hints. The grid is sized to its
-    /// widest line so nothing clips.
-    pub(crate) fn view(&self, theme: &Theme) -> View {
-        // The lines, built as colored cell runs; line 0 mixes primary + accent.
-        let mut title = text_cells("\"", theme.fg_primary);
-        title.extend(text_cells(&self.process, theme.accent));
-        title.extend(text_cells("\" is still running", theme.fg_primary));
+    /// The `"<proc>" is still running` title, split so the process name draws in `accent`.
+    fn title_runs(&self, theme: &Theme) -> [(String, Srgb); 3] {
+        [
+            ("\"".to_owned(), theme.fg_primary),
+            (self.process.clone(), theme.accent),
+            ("\" is still running".to_owned(), theme.fg_primary),
+        ]
+    }
 
-        let action = format!("Close this {} and end it?", self.target.noun());
-        let hint = "\u{21b5} close   esc cancel";
+    /// The action question naming the target.
+    fn action(&self) -> String {
+        format!("Close this {} and end it?", self.target.noun())
+    }
 
-        let content = [
-            title,
-            Vec::new(),
-            text_cells(&action, theme.fg_primary),
-            Vec::new(),
-            text_cells(hint, theme.fg_muted),
-        ];
+    /// The modal's natural panel size in **physical** px (including padding), for the binary
+    /// to center + animate the card.
+    pub(crate) fn natural_size(&self, scale: f32, measure: &mut TextMeasure) -> (f32, f32) {
+        let theme = Theme::resolve("ossein-dark"); // color-independent; only widths are used
+        let title_w: f32 = self
+            .title_runs(&theme)
+            .iter()
+            .map(|(t, _)| measure.width(t, FontRole::Title, None))
+            .sum();
+        let width = title_w
+            .max(measure.width(&self.action(), FontRole::Body, None))
+            .max(measure.width(HINT, FontRole::Caption, None))
+            + 2.0 * PAD * scale;
+        let height = (PAD + TITLE_H + GAP + ACTION_H + GAP2 + HINT_H + PAD) * scale;
+        (width, height)
+    }
 
-        // Width = the widest line + a one-cell margin each side, floored so short messages
-        // still read as a dialog.
-        let widest = content.iter().map(Vec::len).max().unwrap_or(0);
-        let cols = (widest + 2 * MARGIN).max(MIN_COLS);
-        let rows = content
-            .into_iter()
-            .map(|line| indent_to(line, cols, theme.fg_muted))
-            .collect();
+    /// Build the modal's centered content labels within `panel` (the renderer draws the card
+    /// itself): the title (process name in `accent`), the action question, and the key hints.
+    pub(crate) fn build(
+        &self,
+        panel: PxRect,
+        scale: f32,
+        theme: &Theme,
+        measure: &mut TextMeasure,
+    ) -> Vec<ProseLabel> {
+        let mut labels = Vec::new();
+        let mut y = panel.y + PAD * scale;
 
-        View {
-            rows,
-            selected_row: None,
+        // Title: centered as a whole, drawn as consecutive colored runs.
+        let runs = self.title_runs(theme);
+        let total: f32 = runs
+            .iter()
+            .map(|(t, _)| measure.width(t, FontRole::Title, None))
+            .sum();
+        let line_h = measure.line_height(FontRole::Title);
+        let ty = y + (TITLE_H * scale - line_h) * 0.5;
+        let mut x = panel.x + (panel.w - total) * 0.5;
+        for (text, color) in runs {
+            let w = measure.width(&text, FontRole::Title, None);
+            labels.push(ProseLabel {
+                text,
+                x,
+                y: ty,
+                role: FontRole::Title,
+                color,
+                weight: None,
+                max_w: f32::MAX,
+            });
+            x += w;
         }
+        y += TITLE_H * scale + GAP * scale;
+
+        push_centered(
+            &mut labels,
+            &self.action(),
+            FontRole::Body,
+            theme.fg_primary,
+            panel,
+            y,
+            ACTION_H,
+            scale,
+            measure,
+        );
+        y += ACTION_H * scale + GAP2 * scale;
+        push_centered(
+            &mut labels,
+            HINT,
+            FontRole::Caption,
+            theme.fg_muted,
+            panel,
+            y,
+            HINT_H,
+            scale,
+            measure,
+        );
+        labels
     }
 }
 
-/// Left margin (cells) before each line, matching the palette's indent feel.
-const MARGIN: usize = 2;
-/// Floor width so a short message still reads as a panel, not a sliver.
-const MIN_COLS: usize = 30;
+/// The dismiss hint line.
+const HINT: &str = "\u{21b5} close    esc cancel";
 
-/// One UI cell: a character in `fg`, no background or attributes.
-fn cell(c: char, fg: Srgb) -> GridCell {
-    GridCell {
-        c,
-        fg,
-        bg: None,
-        bold: false,
-        italic: false,
-        underline: false,
-    }
-}
-
-/// A string as a run of same-colored cells.
-fn text_cells(s: &str, fg: Srgb) -> Vec<GridCell> {
-    s.chars().map(|c| cell(c, fg)).collect()
-}
-
-/// Prefix `line` with the left margin and pad it to exactly `cols` cells with spaces.
-fn indent_to(line: Vec<GridCell>, cols: usize, space_fg: Srgb) -> Vec<GridCell> {
-    let mut row: Vec<GridCell> = (0..MARGIN).map(|_| cell(' ', space_fg)).collect();
-    row.extend(line);
-    row.truncate(cols);
-    while row.len() < cols {
-        row.push(cell(' ', space_fg));
-    }
-    row
+/// Push a single label horizontally centered in `panel` and vertically centered in a row of
+/// `row_h` logical px whose top is physical `top`.
+#[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
+fn push_centered(
+    labels: &mut Vec<ProseLabel>,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    panel: PxRect,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+    measure: &mut TextMeasure,
+) {
+    let w = measure.width(text, role, None);
+    let line_h = measure.line_height(role);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x: panel.x + (panel.w - w) * 0.5,
+        y: top + (row_h * scale - line_h) * 0.5,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CloseTarget, Confirm};
-    use skelly_render::Theme;
-
-    fn row_text(row: &[super::GridCell]) -> String {
-        row.iter().map(|c| c.c).collect()
-    }
+    use super::{CloseTarget, Confirm, PxRect};
+    use skelly_render::{TextMeasure, Theme};
 
     #[test]
-    fn view_names_the_process_and_the_target() {
+    fn build_names_the_process_in_accent_and_names_the_target() {
         let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
         let confirm = Confirm::new(CloseTarget::Pane, "vim".to_owned());
-        let view = confirm.view(&theme);
-        let joined = view
-            .rows
-            .iter()
-            .map(|r| row_text(r))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let (w, h) = confirm.natural_size(2.0, &mut m);
+        let panel = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w,
+            h,
+        };
+        let labels = confirm.build(panel, 2.0, &theme, &mut m);
+        let joined: String = labels.iter().map(|l| l.text.clone()).collect();
         assert!(joined.contains("vim"), "names the running process");
         assert!(joined.contains("Close this pane"), "names the target");
         assert!(joined.contains("esc cancel"), "shows the dismiss hint");
-        assert!(view.selected_row.is_none());
+        // The process name draws in accent.
+        assert!(labels
+            .iter()
+            .any(|l| l.text == "vim" && l.color == theme.accent));
     }
 
     #[test]
-    fn the_process_name_is_drawn_in_accent() {
+    fn the_tab_target_names_the_tab() {
         let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
         let confirm = Confirm::new(CloseTarget::Tab, "cargo".to_owned());
-        let view = confirm.view(&theme);
-        // The title row holds the accent-colored process name.
-        let title = &view.rows[0];
-        assert!(
-            title.iter().any(|c| c.c == 'c' && c.fg == theme.accent),
-            "the process name is accent-colored"
+        let (w, h) = confirm.natural_size(2.0, &mut m);
+        let labels = confirm.build(
+            PxRect {
+                x: 0.0,
+                y: 0.0,
+                w,
+                h,
+            },
+            2.0,
+            &theme,
+            &mut m,
         );
-        // The tab noun appears in the action line.
-        assert!(row_text(&view.rows[2]).contains("Close this tab"));
+        let joined: String = labels.iter().map(|l| l.text.clone()).collect();
+        assert!(joined.contains("Close this tab"));
     }
 }
