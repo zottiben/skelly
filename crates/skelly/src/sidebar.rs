@@ -211,11 +211,13 @@ struct Row {
     clippy::cast_sign_loss,
     reason = "the tab-row capacity is a small, non-negative count"
 )]
-fn rows_layout(count: usize, active: usize, panel_h: f32) -> Vec<Row> {
+fn rows_layout(count: usize, active: usize, panel_h: f32, top_inset: f32) -> Vec<Row> {
     // Reserve the bottom-anchored utility bar so the top-down flow stops above it.
     let flow_h = panel_h - UTIL_H;
     let mut rows = Vec::new();
-    let mut y = PAD_TOP;
+    // Start below the control strip (macOS traffic lights); zero elsewhere. The sidebar bg
+    // still fills the strip - only the content clears it.
+    let mut y = top_inset + PAD_TOP;
     rows.push(Row {
         top: y,
         height: CMD_H,
@@ -271,11 +273,16 @@ fn rows_layout(count: usize, active: usize, panel_h: f32) -> Vec<Row> {
 /// tab rows + new-tab action; the header, spacers, and overflow indicators map to nothing.
 /// Shares [`rows_layout`] + [`utility_slots`] with [`build`] so a click lands on exactly the
 /// row/icon drawn there, scroll offset included.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the pure sidebar hit-test geometry"
+)]
 pub(crate) fn hit(
     count: usize,
     active: usize,
     panel: PxRect,
     rail: bool,
+    top_inset: f32,
     scale: f32,
     px: f32,
     py: f32,
@@ -290,7 +297,7 @@ pub(crate) fn hit(
             .map(|(action, _)| Hit::Util(action));
     }
     let y_logical = (py - panel.y) / scale;
-    for row in rows_layout(count, active, panel.h / scale) {
+    for row in rows_layout(count, active, panel.h / scale, top_inset) {
         if y_logical >= row.top && y_logical < row.top + row.height {
             return match row.kind {
                 RowKind::Command => Some(Hit::CommandInput),
@@ -346,11 +353,16 @@ pub(crate) struct Paint {
 /// picks the slim 56px icon rail (a brand mark, centered tab numbers, a centered `+`) over
 /// the full panel; both share [`rows_layout`] so [`hit`] stays valid. `measure` is used for
 /// horizontal placement (centering rail glyphs).
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the pure sidebar display-list builder"
+)]
 pub(crate) fn build(
     count: usize,
     active: usize,
     panel: PxRect,
     rail: bool,
+    top_inset: f32,
     scale: f32,
     theme: &Theme,
     measure: &mut TextMeasure,
@@ -365,7 +377,7 @@ pub(crate) fn build(
         scale,
         theme,
     };
-    for row in rows_layout(count, active, panel.h / scale) {
+    for row in rows_layout(count, active, panel.h / scale, top_inset) {
         push_row(&mut quads, &mut labels, row, &ctx, measure);
     }
 
@@ -745,16 +757,19 @@ mod tests {
         let x = 20.0 * 2.0;
         // A y inside the command well (PAD_TOP 10 .. 40) opens the palette.
         assert_eq!(
-            hit(3, 0, p, false, 2.0, x, 20.0 * 2.0),
+            hit(3, 0, p, false, 0.0, 2.0, x, 20.0 * 2.0),
             Some(Hit::CommandInput)
         );
         // The gap below the well (40 .. 52) maps to nothing.
-        assert_eq!(hit(3, 0, p, false, 2.0, x, 46.0 * 2.0), None);
+        assert_eq!(hit(3, 0, p, false, 0.0, 2.0, x, 46.0 * 2.0), None);
         // The first tab band sits below the well + gap + overflow slot: PAD_TOP(10) + CMD_H(30)
         // + CMD_GAP(12) + IND_H(16) = 68 logical, first tab (TAB_H 30) spans 68..98; 82 is inside.
-        assert_eq!(hit(3, 0, p, false, 2.0, x, 82.0 * 2.0), Some(Hit::Tab(0)));
         assert_eq!(
-            hit(3, 0, p, false, 2.0, x, (82.0 + 28.0) * 2.0),
+            hit(3, 0, p, false, 0.0, 2.0, x, 82.0 * 2.0),
+            Some(Hit::Tab(0))
+        );
+        assert_eq!(
+            hit(3, 0, p, false, 0.0, 2.0, x, (82.0 + 28.0) * 2.0),
             Some(Hit::Tab(1))
         );
     }
@@ -768,19 +783,19 @@ mod tests {
         let y = p.h - 20.0 * 2.0; // 20 logical up from the bottom
         let center = |i: f32| (15.0 + i * 34.0 + 17.0) * 2.0;
         assert_eq!(
-            hit(3, 0, p, false, 2.0, center(0.0), y),
+            hit(3, 0, p, false, 0.0, 2.0, center(0.0), y),
             Some(Hit::Util(UtilAction::Settings))
         );
         assert_eq!(
-            hit(3, 0, p, false, 2.0, center(1.0), y),
+            hit(3, 0, p, false, 0.0, 2.0, center(1.0), y),
             Some(Hit::Util(UtilAction::Theme))
         );
         assert_eq!(
-            hit(3, 0, p, false, 2.0, center(2.0), y),
+            hit(3, 0, p, false, 0.0, 2.0, center(2.0), y),
             Some(Hit::Util(UtilAction::Timeline))
         );
         assert_eq!(
-            hit(3, 0, p, false, 2.0, center(3.0), y),
+            hit(3, 0, p, false, 0.0, 2.0, center(3.0), y),
             Some(Hit::Util(UtilAction::Git))
         );
     }
@@ -789,7 +804,7 @@ mod tests {
     fn build_lists_every_tab_and_marks_the_active_one() {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
-        let paint = build(3, 1, panel(), false, 2.0, &theme, &mut m);
+        let paint = build(3, 1, panel(), false, 0.0, 2.0, &theme, &mut m);
         // A label for the header, three tabs, and the new-tab action (overflow indicators
         // are hidden with no overflow) = 5 labels.
         let tab_labels: Vec<_> = paint
@@ -814,11 +829,11 @@ mod tests {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
         // Full panel: the search glyph + the placeholder text.
-        let full = build(2, 0, panel(), false, 2.0, &theme, &mut m);
+        let full = build(2, 0, panel(), false, 0.0, 2.0, &theme, &mut m);
         assert!(full.labels.iter().any(|l| l.text == "\u{2315}"));
         assert!(full.labels.iter().any(|l| l.text.contains("Search or run")));
         // Rail: just the centered glyph, no placeholder text.
-        let rail = build(2, 0, panel(), true, 2.0, &theme, &mut m);
+        let rail = build(2, 0, panel(), true, 0.0, 2.0, &theme, &mut m);
         assert!(rail.labels.iter().any(|l| l.text == "\u{2315}"));
         assert!(rail.labels.iter().all(|l| !l.text.contains("Search")));
     }
@@ -827,7 +842,7 @@ mod tests {
     fn build_draws_the_utility_bar_glyphs() {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
-        let paint = build(2, 0, panel(), false, 2.0, &theme, &mut m);
+        let paint = build(2, 0, panel(), false, 0.0, 2.0, &theme, &mut m);
         // Each utility glyph is drawn once, in the footer (below the tab list).
         for (_, glyph) in UTIL_ICONS {
             assert!(
@@ -836,7 +851,7 @@ mod tests {
             );
         }
         // The slim rail has no room for the footer, so it omits the glyphs entirely.
-        let rail = build(2, 0, panel(), true, 2.0, &theme, &mut m);
+        let rail = build(2, 0, panel(), true, 0.0, 2.0, &theme, &mut m);
         for (_, glyph) in UTIL_ICONS {
             assert!(
                 rail.labels.iter().all(|l| l.text != glyph),
@@ -855,7 +870,7 @@ mod tests {
             w: 56.0 * 2.0,
             h: 800.0 * 2.0,
         };
-        let paint = build(3, 1, p, true, 2.0, &theme, &mut m);
+        let paint = build(3, 1, p, true, 0.0, 2.0, &theme, &mut m);
         // Rail tab labels are the bare numbers, centered (x offset from the left edge > 0).
         let two = paint.labels.iter().find(|l| l.text == "2").unwrap();
         assert!(two.x > 0.0 && two.x < p.w);

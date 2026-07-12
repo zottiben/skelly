@@ -323,21 +323,22 @@ impl App {
         }
     }
 
-    /// The pane area within the window: the surface inset by the window margin, by the top
-    /// control strip, by the sidebar's width on the left when it is shown, and by the git
-    /// dock's width on the right when it is open.
+    /// The pane area within the window: the surface inset by the window margin, by the
+    /// sidebar's width on the left when it is shown, and by the git dock's width on the right
+    /// when it is open. The pane zone fills to the window top (the guide's content zone is a
+    /// sibling of the sidebar, not below the control strip); only the sidebar reserves the
+    /// macOS traffic-light strip, since that is where the lights sit (top-left).
     fn viewport_rect(&self) -> Rect {
         let pad = WINDOW_PAD * scale32(self.scale);
-        let top = self.content_top();
         let sidebar = self.sidebar_width_px();
         let dock = self.right_dock_width_px();
         let w = dim_f32(self.size.0);
         let h = dim_f32(self.size.1);
         Rect::new(
             sidebar + pad,
-            top + pad,
+            pad,
             (w - sidebar - dock - 2.0 * pad).max(1.0),
-            (h - top - 2.0 * pad).max(1.0),
+            (h - 2.0 * pad).max(1.0),
         )
     }
 
@@ -744,18 +745,21 @@ impl App {
     fn build_sidebar_frame(&mut self) -> sidebar::Paint {
         let rail = self.sidebar.is_rail();
         let scale = scale32(self.scale);
-        let top = self.content_top();
+        // The sidebar bg fills the whole column (traffic lights sit on it); its content clears
+        // the control strip via `top_inset` (logical px, macOS only).
+        let top_inset = self.content_top() / scale;
         let panel = PxRect {
             x: 0.0,
-            y: top,
+            y: 0.0,
             w: self.sidebar_width_px(),
-            h: (dim_f32(self.size.1) - top).max(1.0),
+            h: dim_f32(self.size.1),
         };
         sidebar::build(
             self.tabs.len(),
             self.active,
             panel,
             rail,
+            top_inset,
             scale,
             &self.theme,
             &mut self.measure,
@@ -790,13 +794,12 @@ impl App {
     fn build_git_dock_frame(&mut self) -> GitDockFrame {
         let scale = scale32(self.scale);
         let dock_w = self.right_dock_width_px();
-        let top = self.content_top();
         let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
         let panel = PxRect {
             x: (surface_w - dock_w).max(0.0),
-            y: top,
+            y: 0.0,
             w: dock_w,
-            h: (surface_h - top).max(1.0),
+            h: surface_h,
         };
         let paint = self
             .git_dock
@@ -814,13 +817,12 @@ impl App {
     fn build_timeline_frame(&mut self) -> TimelineFrame {
         let scale = scale32(self.scale);
         let dock_w = self.right_dock_width_px();
-        let top = self.content_top();
         let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
         let panel = PxRect {
             x: (surface_w - dock_w).max(0.0),
-            y: top,
+            y: 0.0,
             w: dock_w,
-            h: (surface_h - top).max(1.0),
+            h: surface_h,
         };
         let paint = self
             .timeline
@@ -1101,19 +1103,21 @@ impl App {
         if px >= self.sidebar_width_px() {
             return None;
         }
-        let top = self.content_top();
+        let scale = scale32(self.scale);
+        let top_inset = self.content_top() / scale;
         let panel = PxRect {
             x: 0.0,
-            y: top,
+            y: 0.0,
             w: self.sidebar_width_px(),
-            h: (dim_f32(self.size.1) - top).max(1.0),
+            h: dim_f32(self.size.1),
         };
         sidebar::hit(
             self.tabs.len(),
             self.active,
             panel,
             self.sidebar.is_rail(),
-            scale32(self.scale),
+            top_inset,
+            scale,
             px,
             py,
         )

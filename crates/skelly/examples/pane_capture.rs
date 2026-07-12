@@ -73,18 +73,17 @@ fn main() {
     let sc = scale as f32;
     let pad = WINDOW_PAD * sc;
     let inset = PANE_INSET * sc;
-    // The macOS control strip (§08 anatomy #1): app content reserves this band at the top so
-    // the (OS-drawn) traffic lights float clear of it. Mirrors the binary's `content_top`; the
-    // lights themselves are drawn by macOS and cannot appear in a headless capture.
+    // The macOS control strip (§08 anatomy #1) is a SIDEBAR concern: the traffic lights sit
+    // top-left over the sidebar, so only the sidebar reserves this band (its content clears it,
+    // its bg fills it). The pane zone fills to the window top like the guide's content zone.
+    // The OS-drawn lights cannot appear in a headless capture.
     let strip = TITLE_STRIP * sc;
-    // The pane viewport starts to the right of the sidebar and below the control strip, as the
-    // binary insets it.
     let sidebar_w = if rail { RAIL_WIDTH } else { SIDEBAR_WIDTH } * sc;
     let viewport = Rect::new(
         sidebar_w + pad,
-        strip + pad,
+        pad,
         width as f32 - sidebar_w - 2.0 * pad,
-        height as f32 - strip - 2.0 * pad,
+        height as f32 - 2.0 * pad,
     );
 
     // Two panes, side by side; focus lands on the new (right) pane, matching the binary's
@@ -700,20 +699,21 @@ fn sidebar_panel(
     theme: &Theme,
 ) -> CaptureSidebar {
     let mut measure = TextMeasure::new(scale);
-    // Below the macOS control strip (§08 #1), mirroring the binary's `content_top`.
+    // The sidebar bg fills the whole column (the macOS traffic lights sit on its top strip);
+    // only the content clears the strip (mirrors the binary's `top_inset`).
     let panel = PxRect {
         x: 0.0,
-        y: strip,
+        y: 0.0,
         w: sidebar_w,
-        h: height as f32 - strip,
+        h: height as f32,
     };
     let (count, active): (usize, usize) = if overflow { (10, 8) } else { (2, 0) };
     let mut quads = vec![ChromeQuad::fill(panel, theme.bg_sidebar)];
     let mut labels = Vec::new();
 
-    // Command-input well (§08 #3) - full panel = a bg.surface field with ⌕ + placeholder;
-    // rail = a centered ⌕. Mirrors the binary's `push_command_well`.
-    let cmd_top = panel.y + SB_PAD_TOP * scale;
+    // Command-input well (§08 #3), below the control strip - a bg.surface field with ⌕ +
+    // placeholder (full panel) or a centered ⌕ (rail). Mirrors the binary's `push_command_well`.
+    let cmd_top = panel.y + strip + SB_PAD_TOP * scale;
     if rail {
         let w = measure.width(SB_CMD_ICON, FontRole::Caption, None);
         push_pl(
@@ -784,6 +784,7 @@ fn sidebar_panel(
         panel,
         (count, active),
         rail,
+        strip,
         scale,
         theme,
     );
@@ -845,13 +846,16 @@ fn push_sb_body(
     panel: PxRect,
     tabs: (usize, usize),
     rail: bool,
+    strip: f32,
     scale: f32,
     theme: &Theme,
 ) {
     let (count, active) = tabs;
+    // The content clears the control strip (logical) - mirrors the binary's top_inset.
+    let top = strip / scale + SB_PAD_TOP;
     let reserved_below = SB_IND_H + SB_TAB_H + SB_PAD_BOTTOM;
     let cmd_block = SB_CMD_H + SB_CMD_GAP;
-    let avail = panel.h / scale - SB_UTIL_H - SB_PAD_TOP - cmd_block - SB_IND_H - reserved_below;
+    let avail = panel.h / scale - SB_UTIL_H - top - cmd_block - SB_IND_H - reserved_below;
     let capacity = (avail / (SB_TAB_H + SB_TAB_GAP_V)).floor().max(1.0) as usize;
     let visible = count.min(capacity);
     let first = if count <= visible {
@@ -859,7 +863,7 @@ fn push_sb_body(
     } else {
         active.saturating_sub(visible - 1).min(count - visible)
     };
-    let mut y = SB_PAD_TOP + cmd_block;
+    let mut y = top + cmd_block;
     let place = |labels: &mut Vec<ProseLabel>, m: &mut TextMeasure, t: &str, r, c, yy, h| {
         push_sb_label(
             labels,

@@ -135,12 +135,16 @@ open question>)`.
   transparent, full-size-content-view title bar with the title hidden and the traffic-light
   buttons kept visible + functional (the standard native-terminal look, same as Alacritty/
   WezTerm), and app content reserves a 38px `TITLE_STRIP` band at the top (`content_top`, macOS
-  only) so nothing sits under the lights. NOTE: the traffic lights are OS-drawn and cannot
-  appear in the headless render captures, so this slice's live-window appearance (light
-  alignment, drag region) needs a look on a real macOS window - the reservation (content
-  correctly shifted below the strip) is capture-verified, the OS chrome is not. Linux keeps
-  native decorations for v1 (`content_top` = 0); the guide's Linux top-right CSD is a separate
-  follow-up.
+  only). **CORRECTED 2026-07-13:** the strip is a SIDEBAR concern, not full-width. The guide's
+  content zone (panes) is a *sibling* of the sidebar that fills to the window top with just its
+  own padding; only the sidebar holds the control strip (top-left, where the lights sit). The
+  first cut wrongly reserved `content_top` on the pane viewport + docks too, which created a
+  tall empty band across the top (user-reported). Fixed: `viewport_rect` + both docks fill to
+  the top; only the sidebar reserves the strip - and it does so as a `top_inset` on its *content*
+  while its bg fills the whole column (so the lights sit on the sidebar bg, per the guide).
+  Settings keeps its own 38px title strip. The OS-drawn lights still can't appear in captures,
+  but the reservation (panes to the top, sidebar strip) is now capture-verified. Linux keeps
+  native decorations for v1 (`content_top` = 0); the guide's Linux top-right CSD is a follow-up.
 
 - 2026-07-12 - **Design-fidelity: rounded corners + drop shadows (campaign slice 2).**
   The guide renders every chrome surface as a rounded, shadowed card, but the two
