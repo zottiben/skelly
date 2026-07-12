@@ -14,6 +14,7 @@ mod confirm;
 mod deadpane;
 mod emptystate;
 mod gitdock;
+mod motion;
 mod palette;
 mod settings;
 mod sidebar;
@@ -227,6 +228,10 @@ struct App {
     pointer: (f64, f64),
     /// Whether a mouse-drag selection is in progress (in the active tab).
     selecting: bool,
+    /// The command palette's open animation (design §03 motion), live only while it plays.
+    /// While any animation is set the event loop polls + redraws each frame; it clears
+    /// itself when done, returning the loop to its idle `Wait`.
+    palette_anim: Option<motion::Anim>,
 }
 
 impl App {
@@ -259,6 +264,7 @@ impl App {
             modifiers: ModifiersState::empty(),
             pointer: (0.0, 0.0),
             selecting: false,
+            palette_anim: None,
         }
     }
 
@@ -636,7 +642,13 @@ impl App {
         let panel_w = grid_cols as f32 * cell_w + 2.0 * pad;
         let panel_h = rows as f32 * cell_h + 2.0 * pad;
         let x = ((surface_w - panel_w) / 2.0).max(0.0);
-        let y = (surface_h * 0.16).min((surface_h - panel_h).max(0.0));
+        // The resting top, plus the open animation's rise offset (0 once settled), both kept
+        // within the on-screen range so the rise never pushes the panel's bottom off a short
+        // window (it just shrinks the rise there).
+        let max_y = (surface_h - panel_h).max(0.0);
+        let rest_y = (surface_h * 0.16).min(max_y);
+        let offset = palette_rise_offset(self.palette_anim, Instant::now(), scale32(self.scale));
+        let y = (rest_y + offset).min(max_y);
 
         PaletteFrame {
             panel: PxRect {
@@ -1833,6 +1845,8 @@ impl App {
             if let Key::Character(ch) = key_event.logical_key.as_ref() {
                 if ch.eq_ignore_ascii_case("k") {
                     self.palette.open();
+                    // Play the "enter" rise (design §03 motion); the loop polls until it settles.
+                    self.palette_anim = Some(motion::Anim::start(Instant::now(), motion::BASE));
                     self.request_redraw();
                     return;
                 }
@@ -2266,6 +2280,18 @@ impl ApplicationHandler<Wakeup> for App {
             _ => {}
         }
     }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // While any animation is live, poll and repaint each frame so it advances; otherwise
+        // idle in `Wait` until the next real event (shell output, input, resize) - a terminal
+        // stays silent when nothing is moving.
+        if self.animating(Instant::now()) {
+            event_loop.set_control_flow(ControlFlow::Poll);
+            self.request_redraw();
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+    }
 }
 
 impl App {
@@ -2276,6 +2302,22 @@ impl App {
             let (w, h, _) = r.cell_metrics();
             (w, h)
         })
+    }
+
+    /// Advance the animation clock: drop any animation that has finished (or whose surface
+    /// closed before it settled), then report whether one is still live - the signal the
+    /// event loop uses to keep polling + repainting versus falling back to idle `Wait`.
+    fn animating(&mut self, now: Instant) -> bool {
+        if let Some(anim) = self.palette_anim {
+            if anim.done(now) || !self.palette.open {
+                self.palette_anim = None;
+                // Paint one final frame at the settled position (offset 0), in case this
+                // last tick landed a hair before the resting frame was drawn. The queued
+                // redraw is delivered even under `Wait`, so no extra poll is needed.
+                self.request_redraw();
+            }
+        }
+        self.palette_anim.is_some()
     }
 }
 
@@ -2393,6 +2435,20 @@ fn scale32(scale: f64) -> f32 {
 )]
 fn dim_f32(value: u32) -> f32 {
     value as f32
+}
+
+/// Logical px the command palette rises through as it opens (the design §03 "enter" motion).
+const PALETTE_RISE: f32 = 10.0;
+
+/// The command palette's current vertical offset (physical px) for its open animation: it
+/// starts `PALETTE_RISE` logical px below its resting position and decelerates up to `0`.
+/// Returns `0.0` when no animation is playing (the resting palette). Pure, so the eased
+/// curve is unit-testable without an `App`.
+fn palette_rise_offset(anim: Option<motion::Anim>, now: Instant, scale: f32) -> f32 {
+    anim.map_or(0.0, |a| {
+        let eased = motion::DECELERATE.ease(a.progress(now));
+        (1.0 - eased) * PALETTE_RISE * scale
+    })
 }
 
 /// The empty-state brand watermark's square bounding box for a pristine pane: a
@@ -2662,9 +2718,9 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cycle_index, dim, empty_state_logo, index_after_close, order, pane_action, pane_dims,
-        panic_message, pointer_cell_in, process_name, resolve_cell, selection_cells,
-        selection_text, tab_action, PaneAction, Selection, TabAction,
+        cycle_index, dim, empty_state_logo, index_after_close, order, palette_rise_offset,
+        pane_action, pane_dims, panic_message, pointer_cell_in, process_name, resolve_cell,
+        selection_cells, selection_text, tab_action, PaneAction, Selection, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -2704,6 +2760,27 @@ mod tests {
     #[test]
     fn empty_state_logo_is_none_when_the_grid_is_too_small() {
         assert!(empty_state_logo((0.0, 0.0), 20, 3, 8.0, 16.0, 1.0).is_none());
+    }
+
+    #[test]
+    fn palette_rise_offset_decelerates_from_the_rise_to_zero() {
+        use crate::motion;
+        use std::time::Instant;
+        // No animation playing: the palette rests, no offset.
+        assert!(palette_rise_offset(None, Instant::now(), 2.0).abs() < 1e-3);
+        // A fresh open starts a full PALETTE_RISE (logical) below rest; at scale 2 => 20px.
+        let t0 = Instant::now();
+        let anim = motion::Anim::start(t0, motion::BASE);
+        let start = palette_rise_offset(Some(anim), t0, 2.0);
+        assert!(
+            (start - super::PALETTE_RISE * 2.0).abs() < 1e-3,
+            "starts lifted by the rise"
+        );
+        // It only shrinks toward 0 and reaches rest by the end (decelerate is monotonic).
+        let mid = palette_rise_offset(Some(anim), t0 + motion::BASE / 2, 2.0);
+        let end = palette_rise_offset(Some(anim), t0 + motion::BASE, 2.0);
+        assert!(mid < start, "offset shrinks as it opens");
+        assert!(end.abs() < 1e-3, "settles to rest");
     }
 
     #[test]
