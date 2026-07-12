@@ -338,7 +338,8 @@ const PL_HINT_GAP: f32 = 24.0;
 const PL_PILL_RADIUS: f32 = 8.0;
 const PL_CAT_H: f32 = 20.0;
 const PL_ICON_GAP: f32 = 12.0;
-const PL_FOOTER: &str = "up/down navigate    enter run    esc close";
+const PL_FOOTER_HINTS: &str = "\u{2195} navigate    \u{23CE} run";
+const PL_FOOTER_CLOSE: &str = "esc close";
 
 /// Build a representative command-palette overlay (input, count, a couple of command rows
 /// with the first selected, footer) as a proportional display list - mirroring the binary's
@@ -355,9 +356,11 @@ fn palette_overlay(width: u32, height: u32, scale: f32, theme: &Theme) -> Captur
         ("\u{229E}", "Even out splits", "opt ="),
     ];
     let inset = (PL_PAD + PL_ROW_INSET) * scale;
-    let mut content_w = m
-        .width(PL_FOOTER, FontRole::Caption, None)
-        .max(m.width("> ", FontRole::Body, None) + m.width("zoom", FontRole::Body, None));
+    let footer_w = m.width(PL_FOOTER_HINTS, FontRole::Caption, None)
+        + 24.0 * scale
+        + m.width(PL_FOOTER_CLOSE, FontRole::Caption, None);
+    let mut content_w =
+        footer_w.max(m.width("> ", FontRole::Body, None) + m.width("zoom", FontRole::Body, None));
     for (ic, l, h) in cmds {
         content_w = content_w.max(
             m.width(ic, FontRole::Body, None)
@@ -516,10 +519,22 @@ fn palette_overlay(width: u32, height: u32, scale: f32, theme: &Theme) -> Captur
     push_pl(
         &mut labels,
         &mut m,
-        PL_FOOTER,
+        PL_FOOTER_HINTS,
         FontRole::Caption,
         theme.fg_muted,
         px,
+        yy,
+        PL_FOOTER_H,
+        scale,
+    );
+    let close_w = m.width(PL_FOOTER_CLOSE, FontRole::Caption, None);
+    push_pl(
+        &mut labels,
+        &mut m,
+        PL_FOOTER_CLOSE,
+        FontRole::Caption,
+        theme.fg_muted,
+        cx + cw - PL_ROW_INSET * scale - close_w,
         yy,
         PL_FOOTER_H,
         scale,

@@ -432,7 +432,10 @@ impl Palette {
     pub(crate) fn natural_size(&self, scale: f32, measure: &mut TextMeasure) -> (f32, f32) {
         let rows = self.rows();
         let inset = (PAD + ROW_INSET) * scale;
-        let mut content_w = measure.width(FOOTER, FontRole::Caption, None);
+        // The footer must fit its left hints + a gap + the right-anchored `esc close`.
+        let mut content_w = measure.width(FOOTER_HINTS, FontRole::Caption, None)
+            + FOOTER_GAP * scale
+            + measure.width(FOOTER_CLOSE, FontRole::Caption, None);
         // The input line (prompt + term or placeholder).
         let (_, term) = self.mode_and_term();
         let shown = if term.is_empty() { PLACEHOLDER } else { term };
@@ -551,12 +554,25 @@ impl Palette {
         }
 
         y += SPACER_H * scale;
+        // Footer: navigation/run hints left-clustered, `esc close` right-anchored (design §10.8).
         push_line(
             &mut labels,
-            FOOTER,
+            FOOTER_HINTS,
             FontRole::Caption,
             theme.fg_muted,
             prompt_x,
+            y,
+            FOOTER_H,
+            scale,
+            measure,
+        );
+        let close_w = measure.width(FOOTER_CLOSE, FontRole::Caption, None);
+        push_line(
+            &mut labels,
+            FOOTER_CLOSE,
+            FontRole::Caption,
+            theme.fg_muted,
+            cx + cw - ROW_INSET * scale - close_w,
             y,
             FOOTER_H,
             scale,
@@ -668,8 +684,12 @@ fn fuzzy_match(query: &str, label: &str) -> Option<(i32, Vec<usize>)> {
     Some((-first - gaps * 2, positions))
 }
 
-/// The footer hint line.
-const FOOTER: &str = "up/down navigate    enter run    esc close";
+/// The footer hint clusters (design §10.8): navigation/run hints left, `esc close`
+/// right-anchored, using key glyphs (`↕` arrows, `⏎` return) like the guide.
+const FOOTER_HINTS: &str = "\u{2195} navigate    \u{23CE} run";
+const FOOTER_CLOSE: &str = "esc close";
+/// The minimum gap (logical px) kept between the left hints and the right `esc close`.
+const FOOTER_GAP: f32 = 24.0;
 /// The empty-input placeholder.
 const PLACEHOLDER: &str = "search commands";
 
