@@ -1006,6 +1006,8 @@ fn push_sb_body(
             scale,
         );
     };
+    // The overflow-up indicator only takes a row when something is hidden above (mirrors the
+    // binary), so a short tab list sits flush under the group header.
     if first > 0 {
         place(
             labels,
@@ -1016,8 +1018,8 @@ fn push_sb_body(
             y,
             SB_IND_H,
         );
+        y += SB_IND_H;
     }
-    y += SB_IND_H;
     for index in first..first + visible {
         let is_active = index == active;
         if is_active {
@@ -1072,8 +1074,8 @@ fn push_sb_body(
             y,
             SB_IND_H,
         );
+        y += SB_IND_H;
     }
-    y += SB_IND_H;
     let newtab = if rail { "+" } else { "+ New tab" };
     place(
         labels,

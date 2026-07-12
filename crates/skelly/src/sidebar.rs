@@ -292,12 +292,16 @@ fn rows_layout(
     let more_above = first;
     let more_below = count - first - visible;
 
-    rows.push(Row {
-        top: y,
-        height: IND_H,
-        kind: RowKind::OverflowUp(more_above),
-    });
-    y += IND_H;
+    // The overflow indicators only occupy a row when there is something hidden, so a short tab
+    // list sits flush under the group header / command well (no reserved gap).
+    if more_above > 0 {
+        rows.push(Row {
+            top: y,
+            height: IND_H,
+            kind: RowKind::OverflowUp(more_above),
+        });
+        y += IND_H;
+    }
     for index in first..first + visible {
         rows.push(Row {
             top: y,
@@ -306,12 +310,14 @@ fn rows_layout(
         });
         y += TAB_H + TAB_GAP_V;
     }
-    rows.push(Row {
-        top: y,
-        height: IND_H,
-        kind: RowKind::OverflowDown(more_below),
-    });
-    y += IND_H;
+    if more_below > 0 {
+        rows.push(Row {
+            top: y,
+            height: IND_H,
+            kind: RowKind::OverflowDown(more_below),
+        });
+        y += IND_H;
+    }
     rows.push(Row {
         top: y,
         height: TAB_H,
@@ -946,14 +952,15 @@ mod tests {
         );
         // The gap below the well (40 .. 52) maps to nothing.
         assert_eq!(hit(&view(3, 0, false), p, 2.0, x, 46.0 * 2.0), None);
-        // The first tab band sits below the well + gap + overflow slot: PAD_TOP(10) + CMD_H(30)
-        // + CMD_GAP(12) + IND_H(16) = 68 logical, first tab (TAB_H 30) spans 68..98; 82 is inside.
+        // With no overflow, the first tab sits flush under the well: PAD_TOP(10) + CMD_H(30) +
+        // CMD_GAP(12) = 52 logical, first tab (TAB_H 30) spans 52..82; probe its center (67).
         assert_eq!(
-            hit(&view(3, 0, false), p, 2.0, x, 82.0 * 2.0),
+            hit(&view(3, 0, false), p, 2.0, x, 67.0 * 2.0),
             Some(Hit::Tab(0))
         );
+        // The second tab: 52 + TAB_H(30) + TAB_GAP_V(3) = 85 .. 115; probe its center (100).
         assert_eq!(
-            hit(&view(3, 0, false), p, 2.0, x, (82.0 + 28.0) * 2.0),
+            hit(&view(3, 0, false), p, 2.0, x, 100.0 * 2.0),
             Some(Hit::Tab(1))
         );
     }
