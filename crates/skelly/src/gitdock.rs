@@ -32,11 +32,12 @@ const DIFF_RESERVE: usize = 4;
 const GUTTER_COLS: usize = 4;
 /// Column where a diff line's code text begins (`gutter(4) + space + sign + space`).
 const DIFF_TEXT_COL: usize = GUTTER_COLS + 3;
-/// Column of the status letter in a file row (column 0 is reserved for the future stage
-/// checkbox).
-const FILE_LETTER_COL: usize = 1;
+/// Column of the per-file stage checkbox (`[x]`/`[ ]`) at the start of a file row.
+const FILE_CHECK_COL: usize = 0;
+/// Column of the status letter in a file row (after the checkbox).
+const FILE_LETTER_COL: usize = 4;
 /// Column where a file row's path begins.
-const FILE_PATH_COL: usize = 3;
+const FILE_PATH_COL: usize = 6;
 
 /// The git diff dock's state: the open flag, the loaded git data, and the selection /
 /// scroll positions. The binary refreshes [`Self::status`]/[`Self::diff`] via the setters
@@ -206,6 +207,13 @@ impl GitDock {
             &mut grid[LABEL_ROW],
             0,
             &format!("CHANGED - {}", self.status.files.len()),
+            theme.fg_muted,
+        );
+        // A quiet key hint on the far right of the label row (staging is keyboard-driven).
+        write_before(
+            &mut grid[LABEL_ROW],
+            cols,
+            "space stage  a all",
             theme.fg_muted,
         );
         let avail = rows.saturating_sub(FILE_START);
@@ -452,9 +460,20 @@ fn scroll_window(len: usize, visible: usize, anchor: usize) -> usize {
     anchor.saturating_sub(visible / 2).min(len - visible)
 }
 
-/// Write one file row: the status letter (colored by kind), the path, and its `+add`/
-/// `-del` counts. The selected row's path is drawn in the primary color.
+/// Write one file row: the stage checkbox, the status letter (colored by kind), the
+/// path, and its `+add`/`-del` counts. The selected row's path is drawn in the primary
+/// color; a staged file shows a ticked checkbox.
 fn file_row(row: &mut [GridCell], cols: usize, file: &ChangedFile, selected: bool, theme: &Theme) {
+    // `[x]` when anything is staged, `[ ]` otherwise (the tick in `diff.add`).
+    write(row, FILE_CHECK_COL, "[", theme.fg_muted);
+    write(
+        row,
+        FILE_CHECK_COL + 1,
+        if file.staged { "x" } else { " " },
+        theme.diff_add,
+    );
+    write(row, FILE_CHECK_COL + 2, "]", theme.fg_muted);
+
     let letter_fg = match file.status {
         FileStatus::Added | FileStatus::Untracked => theme.diff_add,
         FileStatus::Deleted => theme.diff_del,
@@ -710,6 +729,30 @@ mod tests {
         assert!(joined.contains("src/session/timeline.rs"));
         assert!(joined.contains("old/legacy.rs"));
         assert!(joined.contains("CHANGED - 3"));
+    }
+
+    #[test]
+    fn file_rows_show_a_stage_checkbox_reflecting_the_staged_flag() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut dock = GitDock::new();
+        let mut staged = changed("staged.rs", FileStatus::Modified, 1, 0);
+        staged.staged = true;
+        staged.unstaged = false;
+        dock.load(Status {
+            branch: Some("main".to_owned()),
+            files: vec![staged, changed("unstaged.rs", FileStatus::Modified, 1, 0)],
+            ..Status::default()
+        });
+        let view = dock.view(60, 30, &theme);
+        // First file row is staged -> "[x]"; second is unstaged -> "[ ]".
+        assert_eq!(&row_text(&view.rows[super::FILE_START])[..3], "[x]");
+        assert_eq!(
+            &view.rows[super::FILE_START + 1]
+                .iter()
+                .map(|c| c.c)
+                .collect::<String>()[..3],
+            "[ ]"
+        );
     }
 
     #[test]

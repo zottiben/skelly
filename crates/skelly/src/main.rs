@@ -1041,7 +1041,61 @@ impl App {
                 self.git_dock.scroll_diff(DIFF_SCROLL_LINES);
                 self.request_redraw();
             }
+            // Space stages/unstages the selected file; `a` stages everything.
+            Key::Named(NamedKey::Space) => self.toggle_stage_selected(),
+            Key::Character(ch) if ch.eq_ignore_ascii_case("a") => self.stage_all(),
             _ => {}
+        }
+    }
+
+    /// Stage (or unstage) the selected file, then reload the status + diff and repaint.
+    /// A file that is fully staged toggles back to unstaged; anything else stages.
+    fn toggle_stage_selected(&mut self) {
+        let Some(repo) = self.git_repo.clone() else {
+            return;
+        };
+        let Some(file) = self.git_dock.selected_file() else {
+            return;
+        };
+        let path = file.path.clone();
+        let fully_staged = file.staged && !file.unstaged;
+        let result = if fully_staged {
+            repo.unstage(&path)
+        } else {
+            repo.stage(&path)
+        };
+        match result {
+            Ok(()) => self.reload_git_status(),
+            Err(err) => self.git_dock.set_error(err.to_string()),
+        }
+        self.request_redraw();
+    }
+
+    /// Stage every change in the working tree (`git add -A`), then reload and repaint.
+    fn stage_all(&mut self) {
+        let Some(repo) = self.git_repo.clone() else {
+            return;
+        };
+        match repo.stage_all() {
+            Ok(()) => self.reload_git_status(),
+            Err(err) => self.git_dock.set_error(err.to_string()),
+        }
+        self.request_redraw();
+    }
+
+    /// Reload the working status from the cached repo (after a stage/unstage), keeping the
+    /// file selection, then re-diff the selected file. Cheaper than [`Self::refresh_git`]
+    /// (no re-discovery).
+    fn reload_git_status(&mut self) {
+        let Some(repo) = self.git_repo.clone() else {
+            return;
+        };
+        match repo.status() {
+            Ok(status) => {
+                self.git_dock.load(status);
+                self.load_selected_diff();
+            }
+            Err(err) => self.git_dock.set_error(err.to_string()),
         }
     }
 

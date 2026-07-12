@@ -83,6 +83,49 @@ fn discovers_repo_and_reports_status_and_diff() {
 }
 
 #[test]
+fn staging_moves_a_file_between_unstaged_and_staged() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+
+    git(root, &["init", "-b", "main"]);
+    std::fs::write(root.join("a.txt"), "one\n").expect("write a");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "init", "--no-gpg-sign"]);
+
+    // Modify a tracked file (unstaged) and add a new untracked file.
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").expect("edit a");
+    std::fs::write(root.join("b.txt"), "new\n").expect("write b");
+
+    let repo = Repo::discover(root).expect("discover").expect("in a repo");
+
+    let staged_state = |repo: &Repo, name: &str| {
+        repo.status()
+            .expect("status")
+            .files
+            .into_iter()
+            .find(|f| f.path == Path::new(name))
+            .map(|f| (f.staged, f.unstaged))
+    };
+
+    // Both files start fully unstaged.
+    assert_eq!(staged_state(&repo, "a.txt"), Some((false, true)));
+    assert_eq!(staged_state(&repo, "b.txt"), Some((false, true)));
+
+    // Stage the modified file: now staged, nothing left unstaged.
+    repo.stage(Path::new("a.txt")).expect("stage a");
+    assert_eq!(staged_state(&repo, "a.txt"), Some((true, false)));
+
+    // Unstage it again: back to unstaged only.
+    repo.unstage(Path::new("a.txt")).expect("unstage a");
+    assert_eq!(staged_state(&repo, "a.txt"), Some((false, true)));
+
+    // Stage-all stages both (the untracked file becomes an added/staged entry).
+    repo.stage_all().expect("stage all");
+    assert_eq!(staged_state(&repo, "a.txt"), Some((true, false)));
+    assert_eq!(staged_state(&repo, "b.txt").map(|(s, _)| s), Some(true));
+}
+
+#[test]
 fn discover_outside_a_repo_is_none() {
     let dir = tempfile::tempdir().expect("temp dir");
     // A bare temp dir is not a git repo (and not inside one).

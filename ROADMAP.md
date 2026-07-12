@@ -182,8 +182,14 @@ timeline / non-destructive rewind are next.
       vertical stack replaces the guide's wide side-by-side layout at 420px (design
       decision, recorded in `design/README.md`). Deferred: the resizable width, the
       wide split view, click-to-select / mouse, and moving git calls off the UI thread.
-    - [ ] Per-file + hunk-level staging (`git apply --cached`), stage-all, and the
-      commit box.
+    - [~] Staging + commit box.
+      - [x] Per-file staging: `skelly_session::Repo` gained `stage` / `unstage` /
+        `stage_all` (`git add` / `git reset`, integration-tested on a temp repo); the
+        dock shows a per-file `[x]`/`[ ]` checkbox, `Space` toggles the selected file
+        (stage <-> unstage), `a` stages everything, and the status + diff reload after.
+      - [ ] Hunk-level staging (`⌘↵`, via `git apply --cached` of a constructed patch).
+      - [ ] The commit box (message input at the dock foot, Commit once >=1 file staged,
+        a success line with the short SHA + Undo = soft reset).
   - [ ] Session timeline + non-destructive rewind (shadow worktree via
     `git worktree add --detach`; Hard rule 3 - HEAD/refs untouched, adversarially
     tested). Blocked on the open decisions (timeline AI-actions contract, rewind +

@@ -119,24 +119,48 @@ fn build_dock(
     write(&mut rows[0], 28, "-11", theme.diff_del);
     write_right(&mut rows[0], cols, "esc", theme.fg_muted);
 
-    // File-list section label + the changed files.
+    // File-list section label (+ key hint) and the changed files. Each row: a stage
+    // checkbox, the status letter, the path, and its counts (staged.rs is staged: [x]).
     write(&mut rows[2], 0, "CHANGED - 3", theme.fg_muted);
+    write_right(&mut rows[2], cols, "space stage  a all", theme.fg_muted);
     let files = [
-        ('M', "src/pane/tree.rs", "+42", "-11", theme.diff_hunk),
-        ('A', "src/session/timeline.rs", "+80", "-0", theme.diff_add),
-        ('D', "old/legacy.rs", "+0", "-34", theme.diff_del),
+        (
+            'M',
+            "src/pane/tree.rs",
+            "+42",
+            "-11",
+            theme.diff_hunk,
+            false,
+        ),
+        (
+            'A',
+            "src/session/timeline.rs",
+            "+80",
+            "-0",
+            theme.diff_add,
+            true,
+        ),
+        ('D', "old/legacy.rs", "+0", "-34", theme.diff_del, false),
     ];
     let file_start = 3usize;
     let selected = 0usize;
-    for (i, (letter, path, add, del, letter_fg)) in files.iter().enumerate() {
+    for (i, (letter, path, add, del, letter_fg, staged)) in files.iter().enumerate() {
         let row = file_start + i;
         let name_fg = if i == selected {
             theme.fg_primary
         } else {
             theme.fg_secondary
         };
-        write(&mut rows[row], 1, &letter.to_string(), *letter_fg);
-        write(&mut rows[row], 3, path, name_fg);
+        write(&mut rows[row], 0, "[", theme.fg_muted);
+        write(
+            &mut rows[row],
+            1,
+            if *staged { "x" } else { " " },
+            theme.diff_add,
+        );
+        write(&mut rows[row], 2, "]", theme.fg_muted);
+        write(&mut rows[row], 4, &letter.to_string(), *letter_fg);
+        write(&mut rows[row], 6, path, name_fg);
         write_pair(&mut rows[row], cols, add, del, theme);
     }
 
@@ -150,10 +174,42 @@ fn build_dock(
     );
     write_pair(&mut rows[diff_header], cols, "+42", "-11", theme);
 
-    let mut add_rows = Vec::new();
-    let mut del_rows = Vec::new();
-    let mut hunk_rows = Vec::new();
-    let body = diff_header + 1;
+    let mut kinds = DiffRows::default();
+    write_diff_rows(&mut rows, diff_header + 1, rows_n, theme, &mut kinds);
+
+    CaptureGitDock {
+        panel: PxRect {
+            x: panel_x,
+            y: 0.0,
+            w: dock_w,
+            h: height as f32,
+        },
+        text_origin: (panel_x + pad, pad),
+        rows,
+        selected_file_row: Some(file_start + selected),
+        add_rows: kinds.add,
+        del_rows: kinds.del,
+        hunk_rows: kinds.hunk,
+    }
+}
+
+/// The add/del/hunk grid rows a diff render produced (for the background quads).
+#[derive(Default)]
+struct DiffRows {
+    add: Vec<usize>,
+    del: Vec<usize>,
+    hunk: Vec<usize>,
+}
+
+/// Render a representative unified diff into `rows[body..]`, recording the add/del/hunk
+/// grid rows into `kinds`.
+fn write_diff_rows(
+    rows: &mut [Vec<GridCell>],
+    body: usize,
+    rows_n: usize,
+    theme: &Theme,
+    kinds: &mut DiffRows,
+) {
     let lines: &[(char, &str, &str)] = &[
         ('@', "@@ -18,7 +18,9 @@ impl PaneTree", ""),
         (' ', "18", "fn split(&mut self, dir: Dir) {"),
@@ -171,34 +227,19 @@ fn build_dock(
         }
         match kind {
             '@' => {
-                hunk_rows.push(row);
+                kinds.hunk.push(row);
                 write(&mut rows[row], 0, gutter, theme.diff_hunk);
             }
             '+' => {
-                add_rows.push(row);
+                kinds.add.push(row);
                 write_diff_line(&mut rows[row], gutter, '+', text, theme.diff_add, theme);
             }
             '-' => {
-                del_rows.push(row);
+                kinds.del.push(row);
                 write_diff_line(&mut rows[row], gutter, '-', text, theme.diff_del, theme);
             }
             _ => write_diff_line(&mut rows[row], gutter, ' ', text, theme.fg_secondary, theme),
         }
-    }
-
-    CaptureGitDock {
-        panel: PxRect {
-            x: panel_x,
-            y: 0.0,
-            w: dock_w,
-            h: height as f32,
-        },
-        text_origin: (panel_x + pad, pad),
-        rows,
-        selected_file_row: Some(file_start + selected),
-        add_rows,
-        del_rows,
-        hunk_rows,
     }
 }
 

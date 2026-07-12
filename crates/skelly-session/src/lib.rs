@@ -11,9 +11,10 @@
 //! private `git_stdout` runner) and pure parsers (the `diff` module + `parse_status`),
 //! so the parsing is fully unit-tested without a git process.
 //!
-//! Status: M4 slice 1 - the read-only git diff **model** ([`Repo`] discovery, working
-//! status, and per-file unified diff). The right-dock rendering + wiring, hunk staging,
-//! the commit box, and the timeline / shadow-worktree rewind are follow-up slices.
+//! Status: M4 - the git diff **model** ([`Repo`] discovery, working status, per-file
+//! unified diff) plus **per-file staging** ([`Repo::stage`] / [`Repo::unstage`] /
+//! [`Repo::stage_all`]). Hunk-level staging, the commit box, and the timeline /
+//! shadow-worktree rewind are follow-up slices.
 
 #![doc(test(attr(deny(warnings))))]
 
@@ -133,6 +134,39 @@ impl Repo {
         args.push(&path);
         let out = self.git_stdout(&args)?;
         Ok(diff::parse_unified_diff(&out))
+    }
+
+    /// Stage `path` (repo-relative): `git add -- <path>`, which stages a modification, a
+    /// deletion, or a previously-untracked file alike.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git add` cannot be run or fails.
+    pub fn stage(&self, path: &Path) -> Result<(), GitError> {
+        let path = path.to_string_lossy();
+        self.git_stdout(&["add", "--", &path])?;
+        Ok(())
+    }
+
+    /// Unstage `path` (repo-relative): `git reset -q HEAD -- <path>`, restoring the index
+    /// entry to HEAD (leaving the working tree untouched).
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git reset` cannot be run or fails - including in a
+    /// repository with no commits yet (there is no HEAD to reset to).
+    pub fn unstage(&self, path: &Path) -> Result<(), GitError> {
+        let path = path.to_string_lossy();
+        self.git_stdout(&["reset", "-q", "HEAD", "--", &path])?;
+        Ok(())
+    }
+
+    /// Stage every change in the working tree: `git add -A` (modifications, deletions,
+    /// and untracked files).
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git add` cannot be run or fails.
+    pub fn stage_all(&self) -> Result<(), GitError> {
+        self.git_stdout(&["add", "-A"])?;
+        Ok(())
     }
 
     /// Run `git -C <root> <args>` and return its stdout, erroring on a non-zero exit.
