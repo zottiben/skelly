@@ -500,54 +500,19 @@ pub(crate) fn gitdock_quads(
     quads
 }
 
-/// Build the decorative quads for the session-timeline dock: the selected event's
-/// `accent.subtle` row fill, an `accent` bar on the viewed event's row when rewound to a
-/// past state, and a `border` divider down the dock's *left* edge. Like the git dock it
-/// shares `bg.base`, so there is no panel fill; text colors come baked into `view.rows`.
-/// Shared by the windowed [`Renderer`](crate::Renderer) and the headless capture.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "row indices into a short dock grid are exact as f32"
-)]
-pub(crate) fn timeline_quads(
-    view: &crate::TimelineView,
+/// Build the generic right-dock frame chrome, shared by the migrated proportional docks:
+/// the soft shadow the dock casts leftward onto the terminal as it slides over it, and a
+/// `border` divider down the dock's left edge. The dock's content (row fills, bars, text) is
+/// supplied by the binary as a proportional display list drawn on top. Shared by the
+/// windowed [`Renderer`](crate::Renderer) and the headless capture.
+pub(crate) fn dock_frame_quads(
+    panel: crate::PxRect,
     theme: &crate::theme::Theme,
-    _cell_w: f32,
-    cell_h: f32,
     scale: f32,
 ) -> Vec<Quad> {
-    let panel = view.panel;
     let stroke = scale.max(1.0);
-    let row_y = |row: usize| view.text_origin.1 + row as f32 * cell_h;
     let mut quads = Vec::new();
-
-    // The soft shadow the dock casts leftward onto the terminal as it slides over it.
     push_left_edge_shadow(&mut quads, panel.x, panel.y, panel.h, scale);
-
-    // The selected event's row fill (a subtle accent tint, like the git dock's selection).
-    if let Some(row) = view.selected_row {
-        quads.push(Quad::new(
-            panel.x,
-            row_y(row),
-            panel.w,
-            cell_h,
-            theme.accent_subtle(),
-        ));
-    }
-
-    // When rewound to the past, mark the viewed event with a solid `accent` bar on the
-    // left edge (the guide's "VIEWING" marker).
-    if let Some(row) = view.viewing_row {
-        quads.push(Quad::new(
-            panel.x,
-            row_y(row),
-            (2.0 * scale).max(1.0),
-            cell_h,
-            theme.accent.to_linear(),
-        ));
-    }
-
-    // The divider on the dock's left edge, drawn last so it sits over the row fill.
     quads.push(Quad::new(
         panel.x,
         panel.y,

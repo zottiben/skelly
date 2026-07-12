@@ -227,14 +227,10 @@ pub struct GitDockView<'a> {
 pub struct TimelineView<'a> {
     /// The dock rectangle on the surface (right edge, full height), physical px.
     pub panel: PxRect,
-    /// Pixel position of the text grid's cell `(0, 0)` top-left, physical px.
-    pub text_origin: (f32, f32),
-    /// The dock's text as a monospace grid (rows top to bottom), UI-token colored.
-    pub rows: &'a [Vec<GridCell>],
-    /// Grid row of the selected event (`accent.subtle` fill).
-    pub selected_row: Option<usize>,
-    /// Grid row of the event being viewed in the past (`accent` bar), when rewound.
-    pub viewing_row: Option<usize>,
+    /// The content quads over the dock frame (selected-event fill, the viewing accent bar).
+    pub quads: &'a [ChromeQuad],
+    /// The positioned proportional text labels (banner, events, legend, summary).
+    pub labels: &'a [ProseLabel],
 }
 
 /// The full-window settings view to draw over the live terminal (AGENTS Hard rule

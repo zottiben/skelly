@@ -15,19 +15,25 @@
 
 use std::time::Duration;
 
-use skelly_render::{GridCell, Srgb, Theme};
+use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
 use skelly_session::{Actor, SessionEvent, Timeline};
 
-/// Grid row of the status / "viewing" banner.
-const STATUS_ROW: usize = 0;
-/// Grid row of the `TIMELINE - N` section label.
-const LABEL_ROW: usize = 2;
-/// First grid row of the event list.
-const EVENT_START: usize = 3;
-/// Rows the foot band reserves (a divider, the legend, the session summary).
-const FOOT_ROWS: usize = 3;
-/// Column where an event's title begins (after the `M:SS ` time column).
-const TITLE_COL: usize = 7;
+/// Timeline dock layout constants in **logical** px (multiplied by the DPI scale). Tuned to
+/// the guide's §10.5 timeline: a status banner, a section label, `accent.subtle` event rows
+/// (time · title · actor tag), and a foot band (legend + session summary).
+const PAD_X: f32 = 14.0;
+/// Top padding above the status banner.
+const PAD_TOP: f32 = 12.0;
+/// Status-banner row height.
+const STATUS_H: f32 = 26.0;
+/// Section-label row height.
+const LABEL_H: f32 = 24.0;
+/// Event row height.
+const EVENT_H: f32 = 30.0;
+/// The foot band height (a divider + the legend + the summary + bottom padding).
+const FOOT_H: f32 = 60.0;
+/// Gap (logical px) between an event's title and the badge / actor tag on its right.
+const RIGHT_GAP: f32 = 10.0;
 
 /// The session-timeline dock's state: the open flag, the event log, and the selected
 /// event. The binary records events into [`Self::record`] and drives the rewind from the
@@ -123,71 +129,141 @@ impl TimelineDock {
         self.timeline.is_now(self.selected)
     }
 
-    /// Build the dock grid `cols` cells wide and `rows` cells tall, in `theme`'s UI tokens.
-    /// Returns the grid plus the renderer's row metadata (the selected row's fill and, when
-    /// viewing the past, the "viewing" accent bar row).
-    pub(crate) fn view(&self, cols: usize, rows: usize, theme: &Theme) -> View {
-        let cols = cols.max(1);
-        let rows = rows.max(1);
-        let mut grid: Vec<Vec<GridCell>> =
-            (0..rows).map(|_| blank_row(cols, theme.fg_muted)).collect();
+    /// Build the dock's proportional display list within `panel` (physical px) at DPI
+    /// `scale`, in `theme`'s UI tokens: the status banner, the `TIMELINE - N` label, the
+    /// scrolled event list (time · title · actor tag, the selected row filled + the viewed
+    /// one barred), and the foot band (legend + session summary).
+    pub(crate) fn build(
+        &self,
+        panel: PxRect,
+        scale: f32,
+        theme: &Theme,
+        measure: &mut TextMeasure,
+    ) -> Paint {
+        let mut quads = Vec::new();
+        let mut labels = Vec::new();
+        let cx = panel.x + PAD_X * scale;
+        let cr = panel.x + panel.w - PAD_X * scale;
 
         if self.timeline.is_empty() {
-            center(&mut grid, "No session events yet", theme.fg_muted);
-            return View::empty(grid);
-        }
-
-        self.write_status_bar(&mut grid[STATUS_ROW], cols, theme);
-        if LABEL_ROW < rows {
-            write(
-                &mut grid[LABEL_ROW],
-                0,
-                &format!("TIMELINE - {} events", self.timeline.len()),
+            push_centered(
+                &mut labels,
+                measure,
+                "No session events yet",
+                FontRole::Body,
                 theme.fg_muted,
+                panel,
+                panel.y + panel.h * 0.5 - EVENT_H * scale,
+                EVENT_H,
+                scale,
             );
-            write_before(&mut grid[LABEL_ROW], cols, "up down move", theme.fg_muted);
+            return Paint { quads, labels };
         }
 
-        let (selected_row, viewing_row) = self.write_events(&mut grid, rows, cols, theme);
-        self.write_foot(&mut grid, rows, cols, theme);
+        let mut y = panel.y + PAD_TOP * scale;
+        // Status banner.
+        let (banner, banner_fg) = self.status_banner(theme);
+        push_row(
+            &mut labels,
+            measure,
+            &banner,
+            FontRole::Label,
+            banner_fg,
+            cx,
+            y,
+            STATUS_H,
+            scale,
+        );
+        push_right(
+            &mut labels,
+            measure,
+            "esc",
+            FontRole::Caption,
+            theme.fg_muted,
+            cr,
+            y,
+            STATUS_H,
+            scale,
+        );
+        y += STATUS_H * scale;
 
-        View {
-            rows: grid,
-            selected_row,
-            viewing_row,
-        }
+        // Section label.
+        push_row(
+            &mut labels,
+            measure,
+            &format!("TIMELINE - {} EVENTS", self.timeline.len()),
+            FontRole::Micro,
+            theme.fg_muted,
+            cx,
+            y,
+            LABEL_H,
+            scale,
+        );
+        push_right(
+            &mut labels,
+            measure,
+            "up down move",
+            FontRole::Caption,
+            theme.fg_muted,
+            cr,
+            y,
+            LABEL_H,
+            scale,
+        );
+        y += LABEL_H * scale;
+
+        self.push_events(&mut quads, &mut labels, panel, y, scale, theme, measure);
+        self.push_foot(&mut quads, &mut labels, panel, scale, theme, measure);
+        Paint { quads, labels }
     }
 
-    /// Write the event list (scrolled to keep the selection visible) into the body between
-    /// [`EVENT_START`] and the foot band. Returns the selected event's grid row and, when
-    /// viewing a past state, the viewing event's grid row (for the accent bar).
-    fn write_events(
+    /// Lay out the scrolled event list between the header (`top`) and the foot band. Each row
+    /// draws the time, the title (clipped before the badge/actor), the actor tag, and a badge;
+    /// the selected row gets an `accent.subtle` fill and, when rewound, an `accent` bar.
+    #[allow(clippy::too_many_arguments, reason = "one focused list builder")]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "the visible-row count + slot index are small, non-negative values"
+    )]
+    fn push_events(
         &self,
-        grid: &mut [Vec<GridCell>],
-        rows: usize,
-        cols: usize,
+        quads: &mut Vec<ChromeQuad>,
+        labels: &mut Vec<ProseLabel>,
+        panel: PxRect,
+        top: f32,
+        scale: f32,
         theme: &Theme,
-    ) -> (Option<usize>, Option<usize>) {
-        let body_end = rows.saturating_sub(FOOT_ROWS);
-        let visible = body_end.saturating_sub(EVENT_START);
+        measure: &mut TextMeasure,
+    ) {
+        let cx = panel.x + PAD_X * scale;
+        let cr = panel.x + panel.w - PAD_X * scale;
+        let events_bottom = panel.y + panel.h - FOOT_H * scale;
+        let row_h = EVENT_H * scale;
+        let visible = (((events_bottom - top) / row_h).floor().max(0.0)) as usize;
         if visible == 0 {
-            return (None, None);
+            return;
         }
         let offset = scroll_window(self.timeline.len(), visible, self.selected);
         let newest = self.timeline.newest();
         let viewing_past = !self.selection_is_now();
-        let mut selected_row = None;
-        let mut viewing_row = None;
+        let ctx = EventCtx {
+            panel,
+            cx,
+            cr,
+            row_h,
+            time_w: measure.width("00:00", FontRole::Micro, None) + 8.0 * scale,
+            scale,
+            theme,
+        };
 
         for slot in 0..visible {
             let index = offset + slot;
             let Some(event) = self.timeline.events().get(index) else {
                 break;
             };
-            let row = EVENT_START + slot;
             let is_selected = index == self.selected;
-            // Events newer than the selection are the dimmed "future" (guide); the selected
-            // one is primary, the rest secondary.
             let title_fg = if index > self.selected {
                 theme.fg_muted
             } else if is_selected {
@@ -195,7 +271,6 @@ impl TimelineDock {
             } else {
                 theme.fg_secondary
             };
-            // Badges: the newest event is HEAD/now; the selected past event is "viewing".
             let badge = if Some(index) == newest {
                 Some(("now", theme.diff_hunk))
             } else if is_selected && viewing_past {
@@ -203,72 +278,107 @@ impl TimelineDock {
             } else {
                 None
             };
-            event_row(
-                &mut grid[row],
-                cols,
-                event,
-                title_fg,
-                actor_color(event.actor, theme),
-                badge,
+            push_event(
+                quads,
+                labels,
+                measure,
+                &ctx,
+                &Ev {
+                    event,
+                    row_top: top + slot as f32 * row_h,
+                    selected: is_selected && viewing_past,
+                    fill: is_selected,
+                    title_fg,
+                    badge,
+                },
             );
-            if is_selected {
-                selected_row = Some(row);
-                if viewing_past {
-                    viewing_row = Some(row);
-                }
-            }
         }
-        (selected_row, viewing_row)
     }
 
-    /// Write the status banner: whether we are at HEAD (now) or viewing a past state, plus
-    /// an `esc` hint.
-    fn write_status_bar(&self, row: &mut [GridCell], cols: usize, theme: &Theme) {
+    /// The status banner text + color: at HEAD (now) or viewing a past state.
+    fn status_banner(&self, theme: &Theme) -> (String, Srgb) {
         if self.selection_is_now() {
-            write(row, 0, "At HEAD - now", theme.diff_hunk);
+            ("At HEAD - now".to_owned(), theme.diff_hunk)
         } else {
             let time = self
                 .timeline
                 .events()
                 .get(self.selected)
                 .map_or("", |e| e.time.as_str());
-            let sha = self.selected_restore().unwrap_or_default();
-            let short: String = sha.chars().take(7).collect();
-            write(row, 0, &format!("Viewing {time} - {short}"), theme.accent);
+            let short: String = self
+                .selected_restore()
+                .unwrap_or_default()
+                .chars()
+                .take(7)
+                .collect();
+            (format!("Viewing {time} - {short}"), theme.accent)
         }
-        write_before(row, cols, "esc", theme.fg_muted);
     }
 
-    /// Write the foot band: a divider, the actor legend, and the session summary.
-    fn write_foot(&self, grid: &mut [Vec<GridCell>], rows: usize, cols: usize, theme: &Theme) {
-        if rows < FOOT_ROWS + EVENT_START {
-            return;
-        }
-        let top = rows - FOOT_ROWS;
-        write(&mut grid[top], 0, &"-".repeat(cols), theme.border_strong);
-
-        // Legend: `you N  agent N  system N`, each label in its actor color.
+    /// The foot band: a `border` divider, the actor legend (each count in its actor color),
+    /// and the session summary.
+    fn push_foot(
+        &self,
+        quads: &mut Vec<ChromeQuad>,
+        labels: &mut Vec<ProseLabel>,
+        panel: PxRect,
+        scale: f32,
+        theme: &Theme,
+        measure: &mut TextMeasure,
+    ) {
+        let cx = panel.x + PAD_X * scale;
+        let foot_top = panel.y + panel.h - FOOT_H * scale;
+        quads.push(ChromeQuad::fill(
+            PxRect {
+                x: panel.x,
+                y: foot_top,
+                w: panel.w,
+                h: scale.max(1.0),
+            },
+            theme.border,
+        ));
+        // Legend.
         let (human, agent, system) = self.timeline.counts();
-        let legend = &mut grid[top + 1];
-        let mut col = 0;
+        let mut lx = cx;
+        let legend_y = foot_top + 8.0 * scale;
         for (actor, count) in [
             (Actor::Human, human),
             (Actor::Agent, agent),
             (Actor::System, system),
         ] {
             let label = format!("{} {count}", actor.label());
-            write(legend, col, &label, actor_color(actor, theme));
-            col += label.chars().count() + 2;
+            let w = measure.width(&label, FontRole::Caption, None);
+            push_row(
+                labels,
+                measure,
+                &label,
+                FontRole::Caption,
+                actor_color(actor, theme),
+                lx,
+                legend_y,
+                20.0,
+                scale,
+            );
+            lx += w + 12.0 * scale;
         }
-
-        // Session summary: duration, event count, and branch.
+        // Summary.
         let branch = self.branch.as_deref().unwrap_or("(detached)");
         let summary = format!(
             "Session - {} - {} events - {branch}",
             fmt_duration(self.duration),
             self.timeline.len()
         );
-        write(&mut grid[top + 2], 0, &summary, theme.fg_muted);
+        push_row(
+            labels,
+            measure,
+            &summary,
+            FontRole::Caption,
+            theme.fg_muted,
+            cx,
+            legend_y + 22.0 * scale,
+            20.0,
+            scale,
+        );
     }
 }
 
@@ -278,29 +388,126 @@ impl Default for TimelineDock {
     }
 }
 
-/// The rendered dock grid plus the renderer's row metadata.
-pub(crate) struct View {
-    /// The dock's lines as a grid of UI-colored cells.
-    pub(crate) rows: Vec<Vec<GridCell>>,
-    /// Grid row of the selected event (for the `accent.subtle` fill).
-    pub(crate) selected_row: Option<usize>,
-    /// Grid row of the event being viewed in the past (for the `accent` bar), when rewound.
-    pub(crate) viewing_row: Option<usize>,
+/// The dock's proportional display list: the content quads (selected-event fill + the
+/// viewing accent bar) and the positioned labels. The renderer draws the dock frame (left
+/// shadow + divider) itself.
+pub(crate) struct Paint {
+    /// The content quads over the dock frame.
+    pub(crate) quads: Vec<ChromeQuad>,
+    /// The positioned proportional text labels.
+    pub(crate) labels: Vec<ProseLabel>,
 }
 
-impl View {
-    /// A view carrying just a grid (the empty state has no highlights).
-    fn empty(rows: Vec<Vec<GridCell>>) -> Self {
-        Self {
-            rows,
-            selected_row: None,
-            viewing_row: None,
+/// Shared geometry for laying out event rows (everything but the row itself).
+struct EventCtx<'a> {
+    panel: PxRect,
+    cx: f32,
+    cr: f32,
+    row_h: f32,
+    time_w: f32,
+    scale: f32,
+    theme: &'a Theme,
+}
+
+/// One event row's per-row inputs.
+struct Ev<'a> {
+    event: &'a SessionEvent,
+    row_top: f32,
+    /// Draw the `accent` viewing bar (selected AND rewound).
+    selected: bool,
+    /// Draw the `accent.subtle` row fill (selected).
+    fill: bool,
+    title_fg: Srgb,
+    badge: Option<(&'a str, Srgb)>,
+}
+
+/// Render one event row: its selection marks (fill + viewing bar), the time, the actor tag,
+/// a badge, and the title clipped to the space before them.
+fn push_event(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    ctx: &EventCtx,
+    ev: &Ev,
+) {
+    let (panel, theme, scale, row_h) = (ctx.panel, ctx.theme, ctx.scale, ctx.row_h);
+    if ev.fill {
+        quads.push(ChromeQuad::tint(
+            PxRect {
+                x: panel.x,
+                y: ev.row_top,
+                w: panel.w,
+                h: row_h,
+            },
+            theme.accent,
+            0.14,
+            0.0,
+        ));
+        if ev.selected {
+            quads.push(ChromeQuad::fill(
+                PxRect {
+                    x: panel.x,
+                    y: ev.row_top,
+                    w: (2.0 * scale).max(1.0),
+                    h: row_h,
+                },
+                theme.accent,
+            ));
         }
     }
+    // Time (mono, muted).
+    push_row(
+        labels,
+        measure,
+        &ev.event.time,
+        FontRole::Micro,
+        theme.fg_muted,
+        ctx.cx,
+        ev.row_top,
+        EVENT_H,
+        scale,
+    );
+    // Actor tag (right-anchored); the badge sits just left of it.
+    let actor_x = push_right(
+        labels,
+        measure,
+        ev.event.actor.label(),
+        FontRole::Micro,
+        actor_color(ev.event.actor, theme),
+        ctx.cr,
+        ev.row_top,
+        EVENT_H,
+        scale,
+    );
+    let right = match ev.badge {
+        Some((text, fg)) => push_right(
+            labels,
+            measure,
+            text,
+            FontRole::Micro,
+            fg,
+            actor_x - RIGHT_GAP * scale,
+            ev.row_top,
+            EVENT_H,
+            scale,
+        ),
+        None => actor_x,
+    };
+    // Title, clipped to the space before the badge/actor.
+    let title_x = ctx.cx + ctx.time_w;
+    labels.push(ProseLabel {
+        text: ev.event.title.clone(),
+        x: title_x,
+        y: ev.row_top + (EVENT_H * scale - measure.line_height(FontRole::Body)) * 0.5,
+        role: FontRole::Body,
+        color: ev.title_fg,
+        weight: None,
+        max_w: (right - RIGHT_GAP * scale - title_x).max(1.0),
+    });
 }
 
-/// The accent color for an event's actor tag: human = `accent`, agent = `diff.hunk`
-/// (reserved; unused in v1), system = muted.
+/// The accent color for an event's actor tag: human = `accent`, agent = `session.ai`
+/// (`diff.hunk` token, reserved), system = muted.
 fn actor_color(actor: Actor, theme: &Theme) -> Srgb {
     match actor {
         Actor::Human => theme.accent,
@@ -309,30 +516,77 @@ fn actor_color(actor: Actor, theme: &Theme) -> Srgb {
     }
 }
 
-/// Write one event row: the session-relative time (col 0), a right-anchored actor label,
-/// an optional `now`/`view` badge just left of it, and the title in between - clipped so it
-/// always keeps a gap before the badge/actor region. Placing all the right-side segments
-/// here keeps the title clip and the badge from ever colliding.
-fn event_row(
-    row: &mut [GridCell],
-    cols: usize,
-    event: &SessionEvent,
-    title_fg: Srgb,
-    actor_fg: Srgb,
-    badge: Option<(&str, Srgb)>,
+/// Push one left-anchored label vertically centered in a row of `row_h` logical px whose top
+/// is physical `top`.
+#[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
+fn push_row(
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    x: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
 ) {
-    write(row, 0, &format!("{:>5}", event.time), title_fg);
-    let actor = event.actor.label();
-    let actor_start = cols.saturating_sub(actor.chars().count() + 1);
-    write(row, actor_start, actor, actor_fg);
-    // The badge (if any) sits just left of the actor; the title ends a gap before whichever
-    // of them is leftmost.
-    let right = match badge {
-        Some((text, fg)) => write_before(row, actor_start, text, fg),
-        None => actor_start,
-    };
-    let title_max = right.saturating_sub(TITLE_COL + 1);
-    write_clipped(row, TITLE_COL, &event.title, title_max, title_fg);
+    let line_h = measure.line_height(role);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x,
+        y: top + (row_h * scale - line_h) * 0.5,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
+}
+
+/// Push a right-anchored label ending at `right`, vertically centered in the row; returns
+/// its left edge (for chaining right-to-left segments).
+#[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
+fn push_right(
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    right: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) -> f32 {
+    let w = measure.width(text, role, None);
+    let x = right - w;
+    push_row(labels, measure, text, role, color, x, top, row_h, scale);
+    x
+}
+
+/// Push a horizontally-centered label (the empty-state placeholder).
+#[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
+fn push_centered(
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    panel: PxRect,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) {
+    let w = measure.width(text, role, None);
+    push_row(
+        labels,
+        measure,
+        text,
+        role,
+        color,
+        panel.x + (panel.w - w) * 0.5,
+        top,
+        row_h,
+        scale,
+    );
 }
 
 /// Format a session duration as `H:MM` (or `M:SS` under an hour) for the summary line.
@@ -355,67 +609,22 @@ fn scroll_window(len: usize, visible: usize, anchor: usize) -> usize {
     anchor.saturating_sub(visible / 2).min(len - visible)
 }
 
-/// One UI cell: a character in `fg`, no background or attributes.
-fn cell(c: char, fg: Srgb) -> GridCell {
-    GridCell {
-        c,
-        fg,
-        bg: None,
-        bold: false,
-        italic: false,
-        underline: false,
-    }
-}
-
-/// A blank row of `cols` spaces.
-fn blank_row(cols: usize, fg: Srgb) -> Vec<GridCell> {
-    vec![cell(' ', fg); cols]
-}
-
-/// Overwrite `text` into `row` starting at `col`, clipped to the row width.
-fn write(row: &mut [GridCell], col: usize, text: &str, fg: Srgb) {
-    for (i, ch) in text.chars().enumerate() {
-        if let Some(slot) = row.get_mut(col + i) {
-            *slot = cell(ch, fg);
-        }
-    }
-}
-
-/// Like [`write()`], but truncate `text` to at most `max` cells first.
-fn write_clipped(row: &mut [GridCell], col: usize, text: &str, max: usize, fg: Srgb) {
-    if max == 0 {
-        return;
-    }
-    let clipped: String = text.chars().take(max).collect();
-    write(row, col, &clipped, fg);
-}
-
-/// Write `text` so its last cell sits just before `end`, returning the start column (for
-/// chaining right-anchored segments right to left).
-fn write_before(row: &mut [GridCell], end: usize, text: &str, fg: Srgb) -> usize {
-    let len = text.chars().count();
-    let start = end.saturating_sub(len + 1);
-    write(row, start, text, fg);
-    start
-}
-
-/// Write `text` centered on the middle row of `grid`.
-fn center(grid: &mut [Vec<GridCell>], text: &str, fg: Srgb) {
-    if grid.is_empty() {
-        return;
-    }
-    let mid = grid.len() / 2;
-    let cols = grid[mid].len();
-    let start = cols.saturating_sub(text.chars().count()) / 2;
-    write(&mut grid[mid], start, text, fg);
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{TimelineDock, EVENT_START};
-    use skelly_render::Theme;
+    use super::TimelineDock;
+    use skelly_render::{PxRect, TextMeasure, Theme};
     use skelly_session::{Actor, SessionEvent};
     use std::time::Duration;
+
+    /// A representative dock panel (the 420px right dock) at 2x DPI.
+    fn panel() -> PxRect {
+        PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: 420.0 * 2.0,
+            h: 700.0 * 2.0,
+        }
+    }
 
     fn recorded() -> TimelineDock {
         let mut dock = TimelineDock::new();
@@ -441,12 +650,14 @@ mod tests {
         dock
     }
 
-    fn joined(dock: &TimelineDock, cols: usize, rows: usize) -> String {
+    /// The joined text of every label the dock builds (for content assertions).
+    fn labels_text(dock: &TimelineDock) -> String {
         let theme = Theme::resolve("ossein-dark");
-        dock.view(cols, rows, &theme)
-            .rows
+        let mut m = TextMeasure::new(2.0);
+        dock.build(panel(), 2.0, &theme, &mut m)
+            .labels
             .iter()
-            .map(|r| r.iter().map(|c| c.c).collect::<String>())
+            .map(|l| l.text.clone())
             .collect::<Vec<_>>()
             .join("\n")
     }
@@ -473,11 +684,11 @@ mod tests {
     }
 
     #[test]
-    fn view_shows_the_events_status_banner_and_legend() {
+    fn build_shows_the_events_status_banner_and_legend() {
         let dock = recorded();
-        let text = joined(&dock, 46, 24);
+        let text = labels_text(&dock);
         assert!(text.contains("At HEAD - now"), "at-now banner");
-        assert!(text.contains("TIMELINE - 3 events"));
+        assert!(text.contains("TIMELINE - 3 EVENTS"));
         assert!(text.contains("Session started"));
         assert!(text.contains("git commit - feat: x"));
         assert!(text.contains("Session -"), "summary line");
@@ -485,22 +696,34 @@ mod tests {
     }
 
     #[test]
-    fn view_marks_the_selected_row_and_a_viewing_bar_when_rewound() {
+    fn build_marks_the_selected_row_and_a_viewing_bar_when_rewound() {
         let mut dock = recorded();
         dock.open(Some("main".to_owned()));
         dock.move_selection(-2); // to the oldest (session start), a past state
         let theme = Theme::resolve("ossein-dark");
-        let view = dock.view(46, 24, &theme);
-        assert_eq!(view.selected_row, Some(EVENT_START));
-        assert_eq!(view.viewing_row, Some(EVENT_START), "rewound -> accent bar");
-        let banner = view.rows[0].iter().map(|c| c.c).collect::<String>();
-        assert!(banner.contains("Viewing 0:00"), "viewing banner: {banner}");
+        let mut m = TextMeasure::new(2.0);
+        let paint = dock.build(panel(), 2.0, &theme, &mut m);
+        // Rewound: a selected-row accent.subtle fill plus a solid accent viewing bar.
+        assert!(paint.quads.iter().any(|q| q.alpha < 1.0), "selected fill");
+        assert!(
+            paint
+                .quads
+                .iter()
+                .any(|q| (q.alpha - 1.0).abs() < 1e-6 && q.color == theme.accent),
+            "viewing bar"
+        );
+        assert!(
+            paint
+                .labels
+                .iter()
+                .any(|l| l.text.starts_with("Viewing 0:00")),
+            "viewing banner"
+        );
     }
 
     #[test]
     fn empty_timeline_shows_a_placeholder() {
         let dock = TimelineDock::new();
-        let text = joined(&dock, 46, 20);
-        assert!(text.contains("No session events yet"));
+        assert!(labels_text(&dock).contains("No session events yet"));
     }
 }

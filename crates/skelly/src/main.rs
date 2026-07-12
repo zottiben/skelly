@@ -598,10 +598,8 @@ impl App {
             match &timeline {
                 Some(frame) => renderer.set_timeline(Some(&TimelineView {
                     panel: frame.panel,
-                    text_origin: frame.origin,
-                    rows: &frame.rows,
-                    selected_row: frame.selected_row,
-                    viewing_row: frame.viewing_row,
+                    quads: &frame.quads,
+                    labels: &frame.labels,
                 })),
                 None => renderer.set_timeline(None),
             }
@@ -783,36 +781,25 @@ impl App {
         }
     }
 
-    /// Lay out the session-timeline dock on the right edge, mirroring the git dock: the
-    /// event list + status banner + foot rendered in UI tokens and clipped to the panel.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the dock cell dimensions are small, non-negative values"
-    )]
-    fn build_timeline_frame(&self) -> TimelineFrame {
-        let (cell_w, cell_h) = self.cell_size();
-        let pad = GIT_DOCK_PAD * scale32(self.scale);
+    /// Lay out the session-timeline dock on the right edge (design §10.5): the status
+    /// banner + event list + foot as a proportional display list clipped to the panel.
+    fn build_timeline_frame(&mut self) -> TimelineFrame {
+        let scale = scale32(self.scale);
         let dock_w = self.right_dock_width_px();
         let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
-        let panel_x = (surface_w - dock_w).max(0.0);
-
-        let cols = ((dock_w - 2.0 * pad) / cell_w).floor().max(1.0) as usize;
-        let rows = ((surface_h - 2.0 * pad) / cell_h).floor().max(1.0) as usize;
-        let view = self.timeline.view(cols, rows, &self.theme);
-
+        let panel = PxRect {
+            x: (surface_w - dock_w).max(0.0),
+            y: 0.0,
+            w: dock_w,
+            h: surface_h,
+        };
+        let paint = self
+            .timeline
+            .build(panel, scale, &self.theme, &mut self.measure);
         TimelineFrame {
-            panel: PxRect {
-                x: panel_x,
-                y: 0.0,
-                w: dock_w,
-                h: surface_h,
-            },
-            origin: (panel_x + pad, pad),
-            rows: view.rows,
-            selected_row: view.selected_row,
-            viewing_row: view.viewing_row,
+            panel,
+            quads: paint.quads,
+            labels: paint.labels,
         }
     }
 
@@ -2118,10 +2105,8 @@ struct GitDockFrame {
 /// Owned timeline-dock frame data the borrowed [`TimelineView`] points at.
 struct TimelineFrame {
     panel: PxRect,
-    origin: (f32, f32),
-    rows: Vec<Vec<GridCell>>,
-    selected_row: Option<usize>,
-    viewing_row: Option<usize>,
+    quads: Vec<skelly_render::ChromeQuad>,
+    labels: Vec<skelly_render::ProseLabel>,
 }
 
 /// The current branch of the process-cwd repo (for the timeline summary), best-effort.

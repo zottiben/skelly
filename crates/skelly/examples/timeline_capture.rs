@@ -19,19 +19,24 @@
 
 use skelly_config::Appearance;
 use skelly_render::{
-    measure_cell, CapturePane, CaptureTimeline, Chrome, GridCell, PxRect, Srgb, Theme,
+    CapturePane, CaptureTimeline, Chrome, ChromeQuad, FontRole, GridCell, ProseLabel, PxRect, Srgb,
+    TextMeasure, Theme,
 };
 
 /// Logical dock width - mirrors the binary's `GIT_DOCK_WIDTH` (420, the guide's default).
 const DOCK_WIDTH: f32 = 420.0;
-/// Logical inset of the dock text - mirrors the binary's `GIT_DOCK_PAD`.
-const DOCK_PAD: f32 = 14.0;
 /// Logical window margin - mirrors the binary's `WINDOW_PAD`.
 const WINDOW_PAD: f32 = 12.0;
 /// Logical inner pane inset - mirrors the binary's `PANE_INSET`.
 const PANE_INSET: f32 = 6.0;
-/// Column where an event's title begins - mirrors the binary's `TITLE_COL`.
-const TITLE_COL: usize = 7;
+// Timeline layout constants (logical px) - mirror the binary's `timeline` module (§10.5).
+const T_PAD_X: f32 = 14.0;
+const T_PAD_TOP: f32 = 12.0;
+const T_STATUS_H: f32 = 26.0;
+const T_LABEL_H: f32 = 24.0;
+const T_EVENT_H: f32 = 30.0;
+const T_FOOT_H: f32 = 60.0;
+const T_RIGHT_GAP: f32 = 10.0;
 
 fn main() {
     let path = std::env::args()
@@ -48,7 +53,6 @@ fn main() {
         ..Appearance::default()
     };
     let theme = Theme::resolve(&appearance.theme);
-    let (cell_w, cell_h) = measure_cell(&appearance, scale);
     let sc = scale as f32;
 
     // One pane, inset on the left by the window margin and on the right by the dock -
@@ -71,7 +75,7 @@ fn main() {
         logo: None,
     };
 
-    let dock = build_dock(width, height, cell_w, cell_h, sc, &theme);
+    let dock = build_dock(width, height, sc, &theme);
     let rgba = skelly_render::capture_panes_rgba(
         &appearance,
         width,
@@ -111,34 +115,75 @@ struct Event {
 /// A representative session-timeline dock rewound to a past commit, mirroring the binary's
 /// `timeline` layout: the viewing banner, the event list (selected + viewing highlighted,
 /// future events dimmed), and the foot band (divider, legend, session summary).
-fn build_dock(
-    width: u32,
-    height: u32,
-    cell_w: f32,
-    cell_h: f32,
-    scale: f32,
-    theme: &Theme,
-) -> CaptureTimeline {
-    let pad = DOCK_PAD * scale;
+#[allow(
+    clippy::too_many_lines,
+    reason = "one straight-line representative dock builder mirroring the binary"
+)]
+fn build_dock(width: u32, height: u32, scale: f32, theme: &Theme) -> CaptureTimeline {
+    let mut m = TextMeasure::new(scale);
     let dock_w = DOCK_WIDTH * scale;
-    let panel_x = width as f32 - dock_w;
-    let cols = ((dock_w - 2.0 * pad) / cell_w).floor().max(1.0) as usize;
-    let rows_n = ((height as f32 - 2.0 * pad) / cell_h).floor().max(1.0) as usize;
+    let panel = PxRect {
+        x: width as f32 - dock_w,
+        y: 0.0,
+        w: dock_w,
+        h: height as f32,
+    };
+    let cx = panel.x + T_PAD_X * scale;
+    let cr = panel.x + panel.w - T_PAD_X * scale;
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
+    let mut y = panel.y + T_PAD_TOP * scale;
 
-    let mut rows: Vec<Vec<GridCell>> = (0..rows_n)
-        .map(|_| blank_row(cols, theme.fg_muted))
-        .collect();
+    // Status banner (viewing a past commit) + esc hint.
+    t_row(
+        &mut labels,
+        &mut m,
+        "Viewing 1:30 - 67b010a",
+        FontRole::Label,
+        theme.accent,
+        cx,
+        y,
+        T_STATUS_H,
+        scale,
+    );
+    t_right(
+        &mut labels,
+        &mut m,
+        "esc",
+        FontRole::Caption,
+        theme.fg_muted,
+        cr,
+        y,
+        T_STATUS_H,
+        scale,
+    );
+    y += T_STATUS_H * scale;
+    // Section label + hint.
+    t_row(
+        &mut labels,
+        &mut m,
+        "TIMELINE - 5 EVENTS",
+        FontRole::Micro,
+        theme.fg_muted,
+        cx,
+        y,
+        T_LABEL_H,
+        scale,
+    );
+    t_right(
+        &mut labels,
+        &mut m,
+        "up down move",
+        FontRole::Caption,
+        theme.fg_muted,
+        cr,
+        y,
+        T_LABEL_H,
+        scale,
+    );
+    y += T_LABEL_H * scale;
 
-    // Status banner: viewing a past commit, plus the `esc` hint.
-    write(&mut rows[0], 0, "Viewing 1:30 - 67b010a", theme.accent);
-    write_right(&mut rows[0], cols, "esc", theme.fg_muted);
-
-    // Section label + control hint.
-    write(&mut rows[2], 0, "TIMELINE - 5 events", theme.fg_muted);
-    write_right(&mut rows[2], cols, "up down move", theme.fg_muted);
-
-    // The event list. The selection (index 2) is a past commit, so it is primary + carries
-    // the viewing bar; the two newer events are the dimmed "future"; the newest is "now".
+    // The event list; index 2 is the selected past commit (viewing bar), 3-4 are dimmed future.
     let events = [
         Event {
             time: "0:00",
@@ -181,52 +226,174 @@ fn build_dock(
             title_fg: theme.fg_muted,
         },
     ];
-    let event_start = 3usize;
     let selected = 2usize;
+    let time_w = m.width("00:00", FontRole::Micro, None) + 8.0 * scale;
+    let row_h = T_EVENT_H * scale;
     for (i, e) in events.iter().enumerate() {
-        event_row(&mut rows[event_start + i], cols, e);
+        let row_top = y + i as f32 * row_h;
+        if i == selected {
+            quads.push(ChromeQuad::tint(
+                PxRect {
+                    x: panel.x,
+                    y: row_top,
+                    w: panel.w,
+                    h: row_h,
+                },
+                theme.accent,
+                0.14,
+                0.0,
+            ));
+            quads.push(ChromeQuad::fill(
+                PxRect {
+                    x: panel.x,
+                    y: row_top,
+                    w: (2.0 * scale).max(1.0),
+                    h: row_h,
+                },
+                theme.accent,
+            ));
+        }
+        t_row(
+            &mut labels,
+            &mut m,
+            e.time,
+            FontRole::Micro,
+            theme.fg_muted,
+            cx,
+            row_top,
+            T_EVENT_H,
+            scale,
+        );
+        let actor_x = t_right(
+            &mut labels,
+            &mut m,
+            e.actor,
+            FontRole::Micro,
+            e.actor_fg,
+            cr,
+            row_top,
+            T_EVENT_H,
+            scale,
+        );
+        let mut right = actor_x;
+        if let Some((text, fg)) = e.badge {
+            right = t_right(
+                &mut labels,
+                &mut m,
+                text,
+                FontRole::Micro,
+                fg,
+                actor_x - T_RIGHT_GAP * scale,
+                row_top,
+                T_EVENT_H,
+                scale,
+            );
+        }
+        let title_x = cx + time_w;
+        let max_w = (right - T_RIGHT_GAP * scale - title_x).max(1.0);
+        labels.push(ProseLabel {
+            text: e.title.to_owned(),
+            x: title_x,
+            y: row_top + (T_EVENT_H * scale - m.line_height(FontRole::Body)) * 0.5,
+            role: FontRole::Body,
+            color: e.title_fg,
+            weight: None,
+            max_w,
+        });
     }
 
-    // Foot band: a divider, the actor legend, and the session summary.
-    let top = rows_n - 3;
-    write(&mut rows[top], 0, &"-".repeat(cols), theme.border_strong);
-    write(&mut rows[top + 1], 0, "you 4", theme.accent);
-    write(&mut rows[top + 1], 7, "agent 0", theme.diff_hunk);
-    write(&mut rows[top + 1], 16, "system 1", theme.fg_muted);
-    write(
-        &mut rows[top + 2],
-        0,
+    // Foot band: divider, legend, summary.
+    let foot_top = panel.y + panel.h - T_FOOT_H * scale;
+    quads.push(ChromeQuad::fill(
+        PxRect {
+            x: panel.x,
+            y: foot_top,
+            w: panel.w,
+            h: scale.max(1.0),
+        },
+        theme.border,
+    ));
+    let legend_y = foot_top + 8.0 * scale;
+    let mut lx = cx;
+    for (label, color) in [
+        ("you 4", theme.accent),
+        ("agent 0", theme.diff_hunk),
+        ("system 1", theme.fg_muted),
+    ] {
+        let w = m.width(label, FontRole::Caption, None);
+        t_row(
+            &mut labels,
+            &mut m,
+            label,
+            FontRole::Caption,
+            color,
+            lx,
+            legend_y,
+            20.0,
+            scale,
+        );
+        lx += w + 12.0 * scale;
+    }
+    t_row(
+        &mut labels,
+        &mut m,
         "Session - 3m 20s - 5 events - main",
+        FontRole::Caption,
         theme.fg_muted,
+        cx,
+        legend_y + 22.0 * scale,
+        20.0,
+        scale,
     );
 
     CaptureTimeline {
-        panel: PxRect {
-            x: panel_x,
-            y: 0.0,
-            w: dock_w,
-            h: height as f32,
-        },
-        text_origin: (panel_x + pad, pad),
-        rows,
-        selected_row: Some(event_start + selected),
-        viewing_row: Some(event_start + selected),
+        panel,
+        quads,
+        labels,
     }
 }
 
-/// Write one event row: the time, the title (clipped before the actor tag), a right-anchored
-/// actor label, and an optional `now`/`view` badge - mirroring the binary's `event_row`.
-fn event_row(row: &mut [GridCell], cols: usize, e: &Event) {
-    write(row, 0, &format!("{:>5}", e.time), e.title_fg);
-    let actor_start = cols.saturating_sub(e.actor.chars().count() + 1);
-    write(row, actor_start, e.actor, e.actor_fg);
-    let right = match e.badge {
-        Some((text, fg)) => write_before(row, actor_start, text, fg),
-        None => actor_start,
-    };
-    let title_max = right.saturating_sub(TITLE_COL + 1);
-    let clipped: String = e.title.chars().take(title_max).collect();
-    write(row, TITLE_COL, &clipped, e.title_fg);
+/// Push a left-anchored label vertically centered in a `row_h` row.
+#[allow(clippy::too_many_arguments, reason = "one focused example helper")]
+fn t_row(
+    labels: &mut Vec<ProseLabel>,
+    m: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    x: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) {
+    let line_h = m.line_height(role);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x,
+        y: top + (row_h * scale - line_h) * 0.5,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
+}
+
+/// Push a right-anchored label ending at `right`; returns its left edge.
+#[allow(clippy::too_many_arguments, reason = "one focused example helper")]
+fn t_right(
+    labels: &mut Vec<ProseLabel>,
+    m: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    right: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) -> f32 {
+    let x = right - m.width(text, role, None);
+    t_row(labels, m, text, role, color, x, top, row_h, scale);
+    x
 }
 
 fn ui_cell(c: char, fg: Srgb) -> GridCell {
@@ -238,30 +405,6 @@ fn ui_cell(c: char, fg: Srgb) -> GridCell {
         italic: false,
         underline: false,
     }
-}
-
-fn blank_row(cols: usize, fg: Srgb) -> Vec<GridCell> {
-    vec![ui_cell(' ', fg); cols]
-}
-
-fn write(row: &mut [GridCell], col: usize, text: &str, fg: Srgb) {
-    for (i, ch) in text.chars().enumerate() {
-        if let Some(slot) = row.get_mut(col + i) {
-            *slot = ui_cell(ch, fg);
-        }
-    }
-}
-
-fn write_right(row: &mut [GridCell], cols: usize, text: &str, fg: Srgb) {
-    let start = cols.saturating_sub(text.chars().count() + 1);
-    write(row, start, text, fg);
-}
-
-/// Write `text` so its last cell sits just before `end`, returning its start column.
-fn write_before(row: &mut [GridCell], end: usize, text: &str, fg: Srgb) -> usize {
-    let start = end.saturating_sub(text.chars().count() + 1);
-    write(row, start, text, fg);
-    start
 }
 
 /// A few plausible terminal lines behind the dock, so the capture shows the dock over a

@@ -491,19 +491,15 @@ impl Renderer {
             return;
         };
         let scale = self.timeline.text.scale();
-        let (cell_w, cell_h, _) = self.timeline.text.cell_metrics();
-        let quads = crate::cells::timeline_quads(view, &self.theme, cell_w, cell_h, scale);
-        self.timeline.set(
+        let mut quads = crate::cells::dock_frame_quads(view.panel, &self.theme, scale);
+        quads.extend(view.quads.iter().map(chrome_quad));
+        self.timeline.set_paint(
             &self.device,
             &self.queue,
             (self.config.width, self.config.height),
             &quads,
-            PaneTextInput {
-                rows: view.rows,
-                left: view.text_origin.0,
-                top: view.text_origin.1,
-                clip: (view.panel.x, view.panel.y, view.panel.w, view.panel.h),
-            },
+            view.labels,
+            view.panel,
         );
     }
 

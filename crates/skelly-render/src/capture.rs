@@ -10,14 +10,14 @@
 use skelly_config::Appearance;
 
 use crate::cells::{
-    card_quads, chrome_quad, gitdock_quads as build_gitdock_quads, grid_quads, logo_quads,
-    push_outline, scrim_quad, settings_quads as build_settings_quads,
-    timeline_quads as build_timeline_quads, Quad, QuadLayer, LOGO_WATERMARK_OPACITY,
+    card_quads, chrome_quad, dock_frame_quads, gitdock_quads as build_gitdock_quads, grid_quads,
+    logo_quads, push_outline, scrim_quad, settings_quads as build_settings_quads, Quad, QuadLayer,
+    LOGO_WATERMARK_OPACITY,
 };
 use crate::prose::{ProseLabel, ProseLayer};
 use crate::text::{measure_cell, PaneTextInput, TextLayer};
 use crate::theme::{Rgba, Theme};
-use crate::{ChromeQuad, GitDockView, GridCell, PxRect, SettingsView, TimelineView};
+use crate::{ChromeQuad, GitDockView, GridCell, PxRect, SettingsView};
 
 /// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
@@ -145,14 +145,10 @@ pub struct CaptureGitDock {
 pub struct CaptureTimeline {
     /// The dock rectangle (right edge, full height), physical px.
     pub panel: PxRect,
-    /// Pixel position of the text grid's cell `(0, 0)` top-left.
-    pub text_origin: (f32, f32),
-    /// The dock text as a monospace grid (UI-token colored).
-    pub rows: Vec<Vec<GridCell>>,
-    /// Grid row of the selected event to highlight, if any.
-    pub selected_row: Option<usize>,
-    /// Grid row of the event viewed in the past (accent bar), when rewound.
-    pub viewing_row: Option<usize>,
+    /// The content quads over the dock frame (selected fill, viewing bar).
+    pub quads: Vec<ChromeQuad>,
+    /// The positioned proportional text labels.
+    pub labels: Vec<ProseLabel>,
 }
 
 /// A command-palette / modal overlay for [`capture_panes_rgba`], mirroring
@@ -259,20 +255,15 @@ pub fn capture_panes_rgba(
         }
     });
     let timeline_scene = chrome.timeline.map(|tl| {
-        let view = TimelineView {
-            panel: tl.panel,
-            text_origin: tl.text_origin,
-            rows: &tl.rows,
-            selected_row: tl.selected_row,
-            viewing_row: tl.viewing_row,
-        };
+        let mut quads = dock_frame_quads(tl.panel, &theme, scale as f32);
+        quads.extend(tl.quads.iter().map(chrome_quad));
         Scene {
-            quads: build_timeline_quads(&view, &theme, cell_w, cell_h, scale as f32),
-            rows: &tl.rows,
-            left: tl.text_origin.0,
-            top: tl.text_origin.1,
+            quads,
+            rows: &[],
+            left: tl.panel.x,
+            top: tl.panel.y,
             clip: (tl.panel.x, tl.panel.y, tl.panel.w, tl.panel.h),
-            prose: Vec::new(),
+            prose: tl.labels.clone(),
         }
     });
     let overlay_scene = chrome.overlay.map(|ov| {
