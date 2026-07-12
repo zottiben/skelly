@@ -131,6 +131,8 @@ pub struct CaptureGitDock {
     pub del_rows: Vec<usize>,
     /// Grid rows that are `@@` hunk headers.
     pub hunk_rows: Vec<usize>,
+    /// The commit-message caret `(column, row)`, when the commit box has focus.
+    pub caret: Option<(usize, usize)>,
 }
 
 /// A command-palette overlay for [`capture_panes_rgba`], mirroring
@@ -207,6 +209,7 @@ pub fn capture_panes_rgba(
             add_rows: &gd.add_rows,
             del_rows: &gd.del_rows,
             hunk_rows: &gd.hunk_rows,
+            caret: gd.caret,
         };
         Scene {
             quads: build_gitdock_quads(&view, &theme, cell_w, cell_h, scale as f32),

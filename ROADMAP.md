@@ -187,9 +187,14 @@ timeline / non-destructive rewind are next.
         `stage_all` (`git add` / `git reset`, integration-tested on a temp repo); the
         dock shows a per-file `[x]`/`[ ]` checkbox, `Space` toggles the selected file
         (stage <-> unstage), `a` stages everything, and the status + diff reload after.
+      - [x] The commit box: `Repo` gained `commit` / `head_short` / `undo_commit`
+        (`git commit -m` / `rev-parse --short HEAD` / `reset --soft HEAD^`,
+        integration-tested). A message input band at the dock foot (a `Focus::{List,
+        Commit}` model - `Tab` moves focus, typing edits the message, `Enter` commits
+        when >=1 file is staged and the message is non-blank, `Esc` returns to the list),
+        with an accent caret and a `N staged` status line; after a commit a "committed
+        <sha>" line offers Undo (`u`, a soft reset).
       - [ ] Hunk-level staging (`⌘↵`, via `git apply --cached` of a constructed patch).
-      - [ ] The commit box (message input at the dock foot, Commit once >=1 file staged,
-        a success line with the short SHA + Undo = soft reset).
   - [ ] Session timeline + non-destructive rewind (shadow worktree via
     `git worktree add --detach`; Hard rule 3 - HEAD/refs untouched, adversarially
     tested). Blocked on the open decisions (timeline AI-actions contract, rewind +

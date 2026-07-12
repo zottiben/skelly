@@ -38,6 +38,20 @@ const FILE_CHECK_COL: usize = 0;
 const FILE_LETTER_COL: usize = 4;
 /// Column where a file row's path begins.
 const FILE_PATH_COL: usize = 6;
+/// Rows the commit box occupies at the foot of the dock: a divider, the message input,
+/// and a status line. Only shown when there is room and the tree has changes.
+const COMMIT_ROWS: usize = 3;
+/// Column where the commit message begins (after the `> ` prompt).
+const COMMIT_TEXT_COL: usize = 2;
+
+/// Which part of the dock has keyboard focus.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Focus {
+    /// The changed-file list (arrows / Space / `a` / PageUp-Down).
+    List,
+    /// The commit-message box (typing edits the message; Enter commits).
+    Commit,
+}
 
 /// The git diff dock's state: the open flag, the loaded git data, and the selection /
 /// scroll positions. The binary refreshes [`Self::status`]/[`Self::diff`] via the setters
@@ -55,6 +69,13 @@ pub(crate) struct GitDock {
     selected: usize,
     /// Top line offset into the selected file's flattened diff (scrolled with PageUp/Dn).
     diff_scroll: usize,
+    /// Which part of the dock has keyboard focus (the list or the commit box).
+    focus: Focus,
+    /// The commit message being typed in the commit box.
+    message: String,
+    /// The short SHA of the just-made commit, shown with an Undo hint until the next
+    /// action clears it.
+    last_commit: Option<String>,
     /// A git error to surface instead of the file list, if the last refresh failed.
     error: Option<String>,
 }
@@ -69,18 +90,81 @@ impl GitDock {
             diff: FileDiff::default(),
             selected: 0,
             diff_scroll: 0,
+            focus: Focus::List,
+            message: String::new(),
+            last_commit: None,
             error: None,
         }
     }
 
-    /// Open the dock (the binary loads the repo status right after).
+    /// Open the dock on the file list (the binary loads the repo status right after).
     pub(crate) fn open(&mut self) {
         self.open = true;
+        self.focus = Focus::List;
+        self.last_commit = None;
     }
 
     /// Close the dock.
     pub(crate) fn close(&mut self) {
         self.open = false;
+    }
+
+    /// Whether the commit box currently has focus.
+    pub(crate) fn commit_focused(&self) -> bool {
+        self.focus == Focus::Commit
+    }
+
+    /// Move focus to the commit box (so typing edits the message).
+    pub(crate) fn focus_commit(&mut self) {
+        self.focus = Focus::Commit;
+    }
+
+    /// Move focus back to the file list.
+    pub(crate) fn focus_list(&mut self) {
+        self.focus = Focus::List;
+    }
+
+    /// Append a typed character to the commit message.
+    pub(crate) fn push_char(&mut self, c: char) {
+        self.message.push(c);
+    }
+
+    /// Delete the last character of the commit message.
+    pub(crate) fn backspace(&mut self) {
+        self.message.pop();
+    }
+
+    /// The commit message being edited.
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// How many changed files have something staged (the commit gate + status line).
+    pub(crate) fn staged_count(&self) -> usize {
+        self.status.files.iter().filter(|f| f.staged).count()
+    }
+
+    /// Whether a commit is allowed: at least one file staged and a non-blank message.
+    pub(crate) fn can_commit(&self) -> bool {
+        self.staged_count() > 0 && !self.message.trim().is_empty()
+    }
+
+    /// Record a successful commit: clear the message, return focus to the list, and keep
+    /// the short SHA for the Undo hint.
+    pub(crate) fn set_committed(&mut self, short_sha: String) {
+        self.message.clear();
+        self.focus = Focus::List;
+        self.last_commit = Some(short_sha);
+    }
+
+    /// The short SHA of the just-made commit, if the Undo hint is still showing.
+    pub(crate) fn last_commit(&self) -> Option<&str> {
+        self.last_commit.as_deref()
+    }
+
+    /// Clear the just-committed Undo hint (after an undo, or any other change).
+    pub(crate) fn clear_last_commit(&mut self) {
+        self.last_commit = None;
     }
 
     /// Record that the current context is not inside a git repository (the empty state).
@@ -90,6 +174,9 @@ impl GitDock {
         self.diff = FileDiff::default();
         self.selected = 0;
         self.diff_scroll = 0;
+        self.focus = Focus::List;
+        self.message.clear();
+        self.last_commit = None;
         self.error = None;
     }
 
@@ -191,18 +278,76 @@ impl GitDock {
         self.write_status_bar(&mut grid[STATUS_ROW], cols, theme);
 
         if self.status.files.is_empty() {
+            // After committing everything the tree is clean; keep the Undo hint visible.
+            let message = match &self.last_commit {
+                Some(sha) => format!("committed {sha} - press u to undo"),
+                None => "Working tree clean".to_owned(),
+            };
             if LABEL_ROW < rows {
                 write_centered(
                     &mut grid[LABEL_ROW.max(rows / 2)],
                     cols,
-                    "Working tree clean",
+                    &message,
                     theme.fg_muted,
                 );
             }
             return View::empty(grid);
         }
 
-        // The file list, sized to leave the diff room, scrolled to keep the selection in.
+        // The commit box occupies a fixed band at the foot (when there is room); the
+        // file list + diff lay out above it, in `content_rows`.
+        let commit_rows = if rows >= FILE_START + DIFF_RESERVE + COMMIT_ROWS {
+            COMMIT_ROWS
+        } else {
+            0
+        };
+        let content_rows = rows.saturating_sub(commit_rows);
+
+        // The file list (label + rows), then the diff, then the commit band.
+        let (file_visible, selected_file_row) =
+            self.write_file_list(&mut grid, content_rows, cols, theme);
+
+        // The diff section: a blank, the selected file's header, then its scrolled body.
+        let header_row = FILE_START + file_visible + 1;
+        let mut view = View {
+            rows: Vec::new(),
+            selected_file_row,
+            add_rows: Vec::new(),
+            del_rows: Vec::new(),
+            hunk_rows: Vec::new(),
+            diff_scroll: 0,
+            caret: None,
+        };
+        if let (Some(file), true) = (self.selected_file(), header_row < content_rows) {
+            let path = file.path.to_string_lossy();
+            let (added, removed) = self.diff.stats();
+            write(&mut grid[header_row], 0, &path, theme.fg_secondary);
+            write_counts(&mut grid[header_row], cols, added, removed, theme);
+        }
+        let body_start = header_row + 1;
+        let body_rows = content_rows.saturating_sub(body_start);
+        view.diff_scroll =
+            self.write_diff_body(&mut grid, body_start, body_rows, cols, theme, &mut view);
+
+        // The commit box at the foot.
+        if commit_rows > 0 {
+            view.caret = self.write_commit_band(&mut grid, content_rows, cols, theme);
+        }
+
+        view.rows = grid;
+        view
+    }
+
+    /// Render the changed-file list (its `CHANGED - N` label + a key hint, then the file
+    /// rows) into the first `content_rows` of `grid`, scrolled to keep the selection
+    /// visible. Returns the number of file rows drawn and the selected file's grid row.
+    fn write_file_list(
+        &self,
+        grid: &mut [Vec<GridCell>],
+        content_rows: usize,
+        cols: usize,
+        theme: &Theme,
+    ) -> (usize, Option<usize>) {
         write(
             &mut grid[LABEL_ROW],
             0,
@@ -216,7 +361,7 @@ impl GitDock {
             "space stage  a all",
             theme.fg_muted,
         );
-        let avail = rows.saturating_sub(FILE_START);
+        let avail = content_rows.saturating_sub(FILE_START);
         let file_visible = self
             .status
             .files
@@ -232,39 +377,79 @@ impl GitDock {
                 break;
             };
             let row = FILE_START + visible;
-            if row >= rows {
+            if row >= content_rows {
                 break;
             }
-            let selected = index == self.selected;
-            if selected {
+            if index == self.selected {
                 selected_file_row = Some(row);
             }
-            file_row(&mut grid[row], cols, file, selected, theme);
+            file_row(&mut grid[row], cols, file, index == self.selected, theme);
+        }
+        (file_visible, selected_file_row)
+    }
+
+    /// Render the commit box at the foot of the dock (a divider, the message input, and a
+    /// status line), starting at grid row `top`. Returns the caret cell when the commit
+    /// box has focus.
+    fn write_commit_band(
+        &self,
+        grid: &mut [Vec<GridCell>],
+        top: usize,
+        cols: usize,
+        theme: &Theme,
+    ) -> Option<(usize, usize)> {
+        let focused = self.focus == Focus::Commit;
+        // Divider.
+        if let Some(row) = grid.get_mut(top) {
+            write(row, 0, &"-".repeat(cols), theme.border_strong);
         }
 
-        // The diff section: a blank, the selected file's header, then its scrolled body.
-        let header_row = FILE_START + file_visible + 1;
-        let mut view = View {
-            rows: Vec::new(),
-            selected_file_row,
-            add_rows: Vec::new(),
-            del_rows: Vec::new(),
-            hunk_rows: Vec::new(),
-            diff_scroll: 0,
-        };
-        if let (Some(file), true) = (self.selected_file(), header_row < rows) {
-            let path = file.path.to_string_lossy();
-            let (added, removed) = self.diff.stats();
-            write(&mut grid[header_row], 0, &path, theme.fg_secondary);
-            write_counts(&mut grid[header_row], cols, added, removed, theme);
-        }
-        let body_start = header_row + 1;
-        let body_rows = rows.saturating_sub(body_start);
-        view.diff_scroll =
-            self.write_diff_body(&mut grid, body_start, body_rows, cols, theme, &mut view);
+        // The message input line: a prompt + the message (tail-truncated to fit).
+        let input_row = top + 1;
+        let caret = grid.get_mut(input_row).map(|row| {
+            let prompt_fg = if focused {
+                theme.accent
+            } else {
+                theme.fg_muted
+            };
+            write(row, 0, "> ", prompt_fg);
+            let max = cols.saturating_sub(COMMIT_TEXT_COL + 1);
+            let count = self.message.chars().count();
+            let shown: String = if count > max {
+                self.message.chars().skip(count - max).collect()
+            } else {
+                self.message.clone()
+            };
+            if shown.is_empty() && !focused {
+                write(row, COMMIT_TEXT_COL, "commit message", theme.fg_muted);
+            } else {
+                write(row, COMMIT_TEXT_COL, &shown, theme.fg_primary);
+            }
+            (COMMIT_TEXT_COL + shown.chars().count(), input_row)
+        });
 
-        view.rows = grid;
-        view
+        // The status line: the just-committed Undo hint, else the staged count + a hint.
+        if let Some(row) = grid.get_mut(top + 2) {
+            let staged = self.staged_count();
+            if let Some(sha) = &self.last_commit {
+                write(row, 0, &format!("committed {sha}"), theme.diff_add);
+                write_before(row, cols, "u undo", theme.fg_muted);
+            } else {
+                write(row, 0, &format!("{staged} staged"), theme.fg_muted);
+                let hint = if focused {
+                    if self.can_commit() {
+                        "enter commit  esc back"
+                    } else {
+                        "esc back"
+                    }
+                } else {
+                    "tab to write a message"
+                };
+                write_before(row, cols, hint, theme.fg_muted);
+            }
+        }
+
+        focused.then_some(caret).flatten()
     }
 
     /// Write the status bar: branch (in `diff.hunk`), ahead/behind (muted), the added/
@@ -398,6 +583,8 @@ pub(crate) struct View {
     pub(crate) hunk_rows: Vec<usize>,
     /// The clamped diff scroll actually used (the binary writes it back).
     pub(crate) diff_scroll: usize,
+    /// The commit-message caret `(column, row)`, when the commit box has focus.
+    pub(crate) caret: Option<(usize, usize)>,
 }
 
 impl View {
@@ -410,6 +597,7 @@ impl View {
             del_rows: Vec::new(),
             hunk_rows: Vec::new(),
             diff_scroll: 0,
+            caret: None,
         }
     }
 }
@@ -661,6 +849,76 @@ mod tests {
             .collect::<String>()
             .trim_end()
             .to_owned()
+    }
+
+    /// A dock loaded with one file, staged iff `staged`.
+    fn dock_with_one(staged: bool) -> GitDock {
+        let mut file = changed("s.rs", FileStatus::Modified, 1, 0);
+        file.staged = staged;
+        file.unstaged = !staged;
+        let mut dock = GitDock::new();
+        dock.load(Status {
+            branch: Some("main".to_owned()),
+            files: vec![file],
+            ..Status::default()
+        });
+        dock
+    }
+
+    #[test]
+    fn commit_box_edits_the_message_and_gates_on_a_staged_file() {
+        let mut dock = dock_with_one(true);
+        assert!(!dock.can_commit(), "a staged file but no message yet");
+        dock.focus_commit();
+        assert!(dock.commit_focused());
+        for c in "fix".chars() {
+            dock.push_char(c);
+        }
+        assert_eq!(dock.message(), "fix");
+        assert!(dock.can_commit(), "staged file + non-blank message");
+        dock.backspace();
+        assert_eq!(dock.message(), "fi");
+
+        // A committed result clears the message, returns to the list, and keeps the SHA.
+        dock.set_committed("abc1234".to_owned());
+        assert_eq!(dock.message(), "");
+        assert!(!dock.commit_focused());
+        assert_eq!(dock.last_commit(), Some("abc1234"));
+        dock.clear_last_commit();
+        assert_eq!(dock.last_commit(), None);
+    }
+
+    #[test]
+    fn commit_is_blocked_without_a_staged_file() {
+        let mut dock = dock_with_one(false); // unstaged only
+        dock.focus_commit();
+        for c in "msg".chars() {
+            dock.push_char(c);
+        }
+        assert!(!dock.can_commit(), "nothing is staged");
+    }
+
+    #[test]
+    fn view_renders_the_commit_band_with_a_caret_when_focused() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut dock = dock_with_one(true);
+        dock.focus_commit();
+        for c in "hi".chars() {
+            dock.push_char(c);
+        }
+        let view = dock.view(46, 24, &theme);
+        assert!(
+            view.caret.is_some(),
+            "the caret shows when the box has focus"
+        );
+        let joined = view
+            .rows
+            .iter()
+            .map(|r| row_text(r))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("> hi"), "the message input line");
+        assert!(joined.contains("1 staged"), "the staged-count status line");
     }
 
     #[test]

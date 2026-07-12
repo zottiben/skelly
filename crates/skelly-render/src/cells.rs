@@ -310,7 +310,7 @@ const SELECTED_ROW_ALPHA: f32 = 0.16;
 pub(crate) fn gitdock_quads(
     view: &crate::GitDockView,
     theme: &crate::theme::Theme,
-    _cell_w: f32,
+    cell_w: f32,
     cell_h: f32,
     scale: f32,
 ) -> Vec<Quad> {
@@ -362,6 +362,17 @@ pub(crate) fn gitdock_quads(
             panel.w,
             cell_h,
             tint(theme.accent, SELECTED_ROW_ALPHA),
+        ));
+    }
+
+    // The commit-message caret (an accent bar), when the commit box has focus.
+    if let Some((col, row)) = view.caret {
+        quads.push(Quad::new(
+            view.text_origin.0 + col as f32 * cell_w,
+            row_y(row),
+            (2.0 * scale).max(1.0),
+            cell_h,
+            theme.accent.to_linear(),
         ));
     }
 

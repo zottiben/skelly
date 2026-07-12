@@ -134,6 +134,9 @@ pub struct GitDockView<'a> {
     pub del_rows: &'a [usize],
     /// Grid rows that are `@@` hunk headers (translucent `diff.hunk` background).
     pub hunk_rows: &'a [usize],
+    /// The commit-message input caret's `(column, row)` cell, when the commit box has
+    /// focus (an `accent` bar is drawn there).
+    pub caret: Option<(usize, usize)>,
 }
 
 /// The full-window settings view to draw over the live terminal (AGENTS Hard rule

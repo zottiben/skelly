@@ -126,6 +126,71 @@ fn staging_moves_a_file_between_unstaged_and_staged() {
 }
 
 #[test]
+fn commit_stages_into_history_and_undo_soft_resets() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+
+    git(root, &["init", "-b", "main"]);
+    // Local identity + no signing, so `Repo::commit` (which does not inherit the test's
+    // GIT_AUTHOR_* env) has a committer regardless of the host's global git config.
+    git(root, &["config", "user.name", "Test"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
+    std::fs::write(root.join("a.txt"), "one\n").expect("write a");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "init", "--no-gpg-sign"]);
+    let first = head_sha(root);
+
+    // Stage a change and commit it through the model.
+    std::fs::write(root.join("a.txt"), "one\ntwo\n").expect("edit a");
+    let repo = Repo::discover(root).expect("discover").expect("in a repo");
+    repo.stage(Path::new("a.txt")).expect("stage");
+    repo.commit("add a line").expect("commit");
+
+    // HEAD advanced, the working tree is clean, and the short SHA resolves.
+    let after_commit = head_sha(root);
+    assert_ne!(after_commit, first, "HEAD advanced past the initial commit");
+    assert!(
+        repo.status().expect("status").files.is_empty(),
+        "tree is clean"
+    );
+    let short = repo.head_short().expect("head short");
+    assert!(
+        after_commit.starts_with(&short),
+        "short sha is a prefix of HEAD"
+    );
+
+    // Undo soft-resets: HEAD returns to the first commit, but the change is re-staged.
+    repo.undo_commit().expect("undo");
+    assert_eq!(head_sha(root), first, "HEAD moved back one commit");
+    let a = repo
+        .status()
+        .expect("status")
+        .files
+        .into_iter()
+        .find(|f| f.path == Path::new("a.txt"))
+        .expect("a.txt is changed again");
+    assert!(
+        a.staged && !a.unstaged,
+        "the undone change is staged, not lost"
+    );
+}
+
+/// The full SHA of `HEAD` in `root` (config-isolated), for asserting commit movement.
+fn head_sha(root: &Path) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "HEAD"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("run git rev-parse");
+    assert!(out.status.success(), "git rev-parse failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+#[test]
 fn discover_outside_a_repo_is_none() {
     let dir = tempfile::tempdir().expect("temp dir");
     // A bare temp dir is not a git repo (and not inside one).

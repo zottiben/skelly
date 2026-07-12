@@ -435,6 +435,7 @@ impl App {
                     add_rows: &frame.add_rows,
                     del_rows: &frame.del_rows,
                     hunk_rows: &frame.hunk_rows,
+                    caret: frame.caret,
                 })),
                 None => renderer.set_git_dock(None),
             }
@@ -596,6 +597,7 @@ impl App {
             add_rows: view.add_rows,
             del_rows: view.del_rows,
             hunk_rows: view.hunk_rows,
+            caret: view.caret,
             diff_scroll: view.diff_scroll,
         }
     }
@@ -1001,9 +1003,9 @@ impl App {
         }
     }
 
-    /// Handle a key while the git dock is open: it captures navigation input (arrows move
-    /// between files and re-diff, `PageUp/PageDown` scroll the diff, `Esc` or `⇧⌘G` close,
-    /// `⌘Q` quits). The terminal stays live underneath but receives no keys until close.
+    /// Handle a key while the git dock is open. `⇧⌘G` closes and `⌘Q` quits in either
+    /// focus; otherwise input routes to the file list or the commit box depending on which
+    /// has focus. The terminal stays live underneath but receives no keys until close.
     fn on_gitdock_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
         if self.modifiers.super_key() {
             if let Key::Character(ch) = key_event.logical_key.as_ref() {
@@ -1017,9 +1019,23 @@ impl App {
                 }
             }
         }
+        if self.git_dock.commit_focused() {
+            self.on_commit_key(key_event);
+        } else {
+            self.on_gitlist_key(key_event);
+        }
+    }
+
+    /// Keys while the file list has focus: arrows move between files (re-diffing),
+    /// `PageUp/PageDown` scroll the diff, `Space` stages/unstages the selected file, `a`
+    /// stages everything, `u` undoes the last commit, `Tab` moves to the commit box, and
+    /// `Esc` closes the dock.
+    fn on_gitlist_key(&mut self, key_event: &KeyEvent) {
         match key_event.logical_key.as_ref() {
-            Key::Named(NamedKey::Escape) => {
-                self.toggle_git_dock();
+            Key::Named(NamedKey::Escape) => self.toggle_git_dock(),
+            Key::Named(NamedKey::Tab) => {
+                self.git_dock.focus_commit();
+                self.request_redraw();
             }
             Key::Named(NamedKey::ArrowUp) => {
                 if self.git_dock.move_selection(-1) {
@@ -1041,11 +1057,71 @@ impl App {
                 self.git_dock.scroll_diff(DIFF_SCROLL_LINES);
                 self.request_redraw();
             }
-            // Space stages/unstages the selected file; `a` stages everything.
             Key::Named(NamedKey::Space) => self.toggle_stage_selected(),
             Key::Character(ch) if ch.eq_ignore_ascii_case("a") => self.stage_all(),
+            Key::Character(ch) if ch.eq_ignore_ascii_case("u") => self.undo_last_commit(),
             _ => {}
         }
+    }
+
+    /// Keys while the commit box has focus: printable characters edit the message,
+    /// `Backspace` deletes, `Enter` commits (when allowed), `Esc` / `Tab` return to the
+    /// file list.
+    fn on_commit_key(&mut self, key_event: &KeyEvent) {
+        match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape | NamedKey::Tab) => self.git_dock.focus_list(),
+            Key::Named(NamedKey::Enter) => self.commit(),
+            Key::Named(NamedKey::Backspace) => self.git_dock.backspace(),
+            _ => {
+                if let Some(text) = key_event.text.as_ref() {
+                    for c in text.chars() {
+                        if !c.is_control() {
+                            self.git_dock.push_char(c);
+                        }
+                    }
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Commit the staged changes with the box's message (when allowed), then keep the
+    /// short SHA for the Undo hint and reload the status + diff.
+    fn commit(&mut self) {
+        if !self.git_dock.can_commit() {
+            return;
+        }
+        let Some(repo) = self.git_repo.clone() else {
+            return;
+        };
+        let message = self.git_dock.message().to_owned();
+        match repo.commit(&message) {
+            Ok(()) => {
+                let sha = repo.head_short().unwrap_or_default();
+                self.git_dock.set_committed(sha);
+                self.reload_git_status();
+            }
+            Err(err) => self.git_dock.set_error(err.to_string()),
+        }
+        self.request_redraw();
+    }
+
+    /// Undo the just-made commit (soft reset), if the Undo hint is still showing.
+    fn undo_last_commit(&mut self) {
+        if self.git_dock.last_commit().is_none() {
+            return;
+        }
+        let Some(repo) = self.git_repo.clone() else {
+            return;
+        };
+        match repo.undo_commit() {
+            Ok(()) => {
+                self.git_dock.clear_last_commit();
+                self.reload_git_status();
+            }
+            Err(err) => self.git_dock.set_error(err.to_string()),
+        }
+        self.request_redraw();
     }
 
     /// Stage (or unstage) the selected file, then reload the status + diff and repaint.
@@ -1318,6 +1394,7 @@ struct GitDockFrame {
     add_rows: Vec<usize>,
     del_rows: Vec<usize>,
     hunk_rows: Vec<usize>,
+    caret: Option<(usize, usize)>,
     /// The clamped diff scroll the view actually used, written back to the dock.
     diff_scroll: usize,
 }

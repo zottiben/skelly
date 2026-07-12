@@ -12,9 +12,10 @@
 //! so the parsing is fully unit-tested without a git process.
 //!
 //! Status: M4 - the git diff **model** ([`Repo`] discovery, working status, per-file
-//! unified diff) plus **per-file staging** ([`Repo::stage`] / [`Repo::unstage`] /
-//! [`Repo::stage_all`]). Hunk-level staging, the commit box, and the timeline /
-//! shadow-worktree rewind are follow-up slices.
+//! unified diff), **per-file staging** ([`Repo::stage`] / [`Repo::unstage`] /
+//! [`Repo::stage_all`]), and **committing** ([`Repo::commit`] / [`Repo::head_short`] /
+//! [`Repo::undo_commit`]). Hunk-level staging and the timeline / shadow-worktree rewind
+//! are follow-up slices.
 
 #![doc(test(attr(deny(warnings))))]
 
@@ -166,6 +167,44 @@ impl Repo {
     /// Returns [`GitError`] if `git add` cannot be run or fails.
     pub fn stage_all(&self) -> Result<(), GitError> {
         self.git_stdout(&["add", "-A"])?;
+        Ok(())
+    }
+
+    /// Commit the currently-staged changes with `message`: `git commit -m <message>`.
+    /// The caller is responsible for ensuring something is staged and the message is
+    /// non-empty (git rejects both). Signing follows the user's git config; a repo that
+    /// requires a passphrase-prompted key can block, since the call is synchronous
+    /// (moving git off the UI thread is a tracked follow-up).
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git commit` cannot be run or fails (nothing staged, an
+    /// empty message, a failed hook, or a signing error).
+    pub fn commit(&self, message: &str) -> Result<(), GitError> {
+        self.git_stdout(&["commit", "-m", message])?;
+        Ok(())
+    }
+
+    /// The short SHA of `HEAD`: `git rev-parse --short HEAD`.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git rev-parse` cannot be run or fails (e.g. no commits).
+    pub fn head_short(&self) -> Result<String, GitError> {
+        Ok(self
+            .git_stdout(&["rev-parse", "--short", "HEAD"])?
+            .trim()
+            .to_owned())
+    }
+
+    /// Undo the last commit, keeping its changes staged: `git reset --soft HEAD^`. This
+    /// reverses a just-made [`Self::commit`] (moving `HEAD` back one, working tree and
+    /// index untouched) - the "Undo" on the commit-success toast, distinct from the
+    /// session-timeline rewind (Hard rule 3).
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git reset` cannot be run or fails - including when the
+    /// last commit is the initial one (there is no `HEAD^` parent).
+    pub fn undo_commit(&self) -> Result<(), GitError> {
+        self.git_stdout(&["reset", "--soft", "HEAD^"])?;
         Ok(())
     }
 

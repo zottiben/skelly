@@ -124,14 +124,7 @@ fn build_dock(
     write(&mut rows[2], 0, "CHANGED - 3", theme.fg_muted);
     write_right(&mut rows[2], cols, "space stage  a all", theme.fg_muted);
     let files = [
-        (
-            'M',
-            "src/pane/tree.rs",
-            "+42",
-            "-11",
-            theme.diff_hunk,
-            false,
-        ),
+        ('M', "src/pane/tree.rs", "+42", "-11", theme.diff_hunk, true),
         (
             'A',
             "src/session/timeline.rs",
@@ -174,8 +167,14 @@ fn build_dock(
     );
     write_pair(&mut rows[diff_header], cols, "+42", "-11", theme);
 
+    // Reserve the bottom band for the commit box; the diff fills the rows above it.
+    let commit_rows = 3usize;
+    let content_rows = rows_n.saturating_sub(commit_rows);
     let mut kinds = DiffRows::default();
-    write_diff_rows(&mut rows, diff_header + 1, rows_n, theme, &mut kinds);
+    write_diff_rows(&mut rows, diff_header + 1, content_rows, theme, &mut kinds);
+
+    // The commit box: a divider, a message input with a caret, and a status line.
+    let caret = Some(write_commit_band(&mut rows, content_rows, cols, theme));
 
     CaptureGitDock {
         panel: PxRect {
@@ -190,7 +189,32 @@ fn build_dock(
         add_rows: kinds.add,
         del_rows: kinds.del,
         hunk_rows: kinds.hunk,
+        caret,
     }
+}
+
+/// A representative commit box at the foot (divider, `> message` input, status line),
+/// returning the caret cell. Mirrors the binary's `gitdock::write_commit_band`.
+fn write_commit_band(
+    rows: &mut [Vec<GridCell>],
+    top: usize,
+    cols: usize,
+    theme: &Theme,
+) -> (usize, usize) {
+    if let Some(row) = rows.get_mut(top) {
+        write(row, 0, &"-".repeat(cols), theme.border_strong);
+    }
+    let message = "feat: rewindable session timeline";
+    let input_row = top + 1;
+    if let Some(row) = rows.get_mut(input_row) {
+        write(row, 0, "> ", theme.accent);
+        write(row, 2, message, theme.fg_primary);
+    }
+    if let Some(row) = rows.get_mut(top + 2) {
+        write(row, 0, "2 staged", theme.fg_muted);
+        write_right(row, cols, "enter commit  esc back", theme.fg_muted);
+    }
+    (2 + message.chars().count(), input_row)
 }
 
 /// The add/del/hunk grid rows a diff render produced (for the background quads).

@@ -40,11 +40,13 @@ over the live terminal - a status bar, the changed-file list, and the selected f
 unified diff (`diff.*` tokens, separate from the ANSI palette per Hard rule 2), driven by
 the pure `gitdock` module over `skelly_session::Repo` (process cwd for now). Fixed at
 420px (vertical stack; the wide side-by-side view + resizable width are follow-ups - see
-`design/README.md`). **Per-file staging** landed too: `Repo::stage`/`unstage`/`stage_all`
-(`git add`/`git reset`), a `[x]`/`[ ]` checkbox per file row, `Space` toggles the selected
-file and `a` stages all (hunk-level staging + the commit box are the next slices).
-Renderer chrome layers (sidebar / git dock / palette / settings) now share a `ChromeLayer`
-(quads + text + active). The build target is native Rust, not the
+`design/README.md`). **Staging + commit** landed too: `Repo::stage`/`unstage`/`stage_all`/`commit`/
+`head_short`/`undo_commit`, a `[x]`/`[ ]` checkbox per file row (`Space` toggles the
+selected file, `a` stages all), and a commit box at the dock foot (a `Focus::{List,Commit}`
+model - `Tab` switches, typing edits the message, `Enter` commits when >=1 file is staged,
+then a "committed <sha>" line offers `u` to undo). Hunk-level staging (`⌘↵`) is the next
+slice. Renderer chrome layers (sidebar / git dock / palette / settings) now share a
+`ChromeLayer` (quads + text + active). The build target is native Rust, not the
 mockup HTML. See `ROADMAP.md`.
 
 **Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
