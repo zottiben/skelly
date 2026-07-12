@@ -47,6 +47,19 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-12 - **Git diff dock (read-only) layout.** The dock opens on the right edge
+  (`⇧⌘G`, `Esc` to close) as base chrome over the live terminal (Hard rule 4; the pane
+  viewport insets to its left, like the sidebar insets from the left). Fixed at the
+  guide's **420px** default; the resizable 360-560 range is a follow-up. At 420px the
+  guide's wide side-by-side file-list + diff mockup (§10.6) does not fit, so the dock
+  uses a **vertical stack**: a status bar (branch / ahead-behind / totals), the
+  changed-file list, then the selected file's unified diff. `↑/↓` move between files,
+  `PageUp/PageDown` scroll the diff. The wide side-by-side "full view" is deferred to a
+  later slice. Diff colors use the new `diff.add` / `diff.del` / `diff.hunk` tokens
+  (separate from the ANSI palette, Hard rule 2); add/del/hunk line backgrounds are drawn
+  as translucent quads. Scoped to the repo of the **process cwd** for now (real per-pane
+  cwd tracking is a follow-up, the same blocker as cwd-based tab titles). _(was: the
+  guide leaves the narrow-dock layout unspecified.)_
 - 2026-07-12 - **Settings view.** A full in-window view over `config.toml` (Hard rule
   4), opened with `⌘,` and dismissed with `Esc`, drawn over the still-running terminal
   (never a route; focus returns to the exact pane on close). Left category nav

@@ -32,8 +32,17 @@ resolved against the palette (`AnsiPalette::default_bg`); `skelly-term` exposes 
 `CellAttrs` bitflags set. M2e also fixed a latent alignment bug - full-width grid
 rows wrapped in the text buffer (doubling the line pitch and desyncing glyphs from
 the bg/cursor/underline/selection quads); the buffer now uses `Wrap::None` so a grid
-row is always one visual line. The build target is native Rust, not the mockup HTML.
-See `ROADMAP.md`.
+row is always one visual line. **M3 (Skelly shell UX) is essentially complete** (pane
+tree, sidebar + tabs, command palette, settings view, live theming) and **M4 (signature
+features) is under way**: the read-only git diff model (`skelly-session`, ADR-0006) and
+the **git diff dock** landed. The dock is a right-edge layer (`⇧⌘G`, `Esc`; Hard rule 4)
+over the live terminal - a status bar, the changed-file list, and the selected file's
+unified diff (`diff.*` tokens, separate from the ANSI palette per Hard rule 2), driven by
+the pure `gitdock` module over `skelly_session::Repo` (process cwd for now). Fixed at
+420px (vertical stack; the wide side-by-side view + resizable width are follow-ups - see
+`design/README.md`). Renderer chrome layers (sidebar / git dock / palette / settings) now
+share a `ChromeLayer` (quads + text + active). The build target is native Rust, not the
+mockup HTML. See `ROADMAP.md`.
 
 **Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
 workspace. Foundation crates are *proposed* in ADR-0001..0004 (terminal core

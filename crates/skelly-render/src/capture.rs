@@ -10,12 +10,12 @@
 use skelly_config::Appearance;
 
 use crate::cells::{
-    grid_quads, overlay_quads as build_overlay_quads, push_outline,
-    settings_quads as build_settings_quads, sidebar_quads, Quad, QuadLayer,
+    gitdock_quads as build_gitdock_quads, grid_quads, overlay_quads as build_overlay_quads,
+    push_outline, settings_quads as build_settings_quads, sidebar_quads, Quad, QuadLayer,
 };
 use crate::text::{measure_cell, PaneTextInput, TextLayer};
 use crate::theme::{Rgba, Theme};
-use crate::{GridCell, OverlayView, PxRect, SettingsView, SidebarView};
+use crate::{GitDockView, GridCell, OverlayView, PxRect, SettingsView, SidebarView};
 
 /// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
@@ -114,6 +114,25 @@ pub struct CaptureSidebar {
     pub active_row: Option<usize>,
 }
 
+/// The git diff dock for [`capture_panes_rgba`], mirroring
+/// [`GitDockView`](crate::GitDockView) but owning its rows.
+pub struct CaptureGitDock {
+    /// The dock rectangle (right edge, full height), physical px.
+    pub panel: PxRect,
+    /// Pixel position of the text grid's cell `(0, 0)` top-left.
+    pub text_origin: (f32, f32),
+    /// The dock text as a monospace grid (UI-token colored).
+    pub rows: Vec<Vec<GridCell>>,
+    /// Grid row of the selected file to highlight, if any.
+    pub selected_file_row: Option<usize>,
+    /// Grid rows that are diff additions.
+    pub add_rows: Vec<usize>,
+    /// Grid rows that are diff deletions.
+    pub del_rows: Vec<usize>,
+    /// Grid rows that are `@@` hunk headers.
+    pub hunk_rows: Vec<usize>,
+}
+
 /// A command-palette overlay for [`capture_panes_rgba`], mirroring
 /// [`OverlayView`](crate::OverlayView) but owning its rows.
 pub struct CaptureOverlay {
@@ -129,11 +148,23 @@ pub struct CaptureOverlay {
     pub caret: Option<(usize, usize)>,
 }
 
-/// Render a tiled set of `panes` (and an optional `overlay`) headlessly - the exact
-/// path the windowed [`Renderer`](crate::Renderer) uses (dividers, focus ring,
-/// per-pane cursor, and the palette overlay on top) - to an offscreen `width` x
-/// `height` sRGB target, returning tight RGBA8 bytes. The verification twin of the
-/// live workspace.
+/// The optional chrome layers to composite over the panes in [`capture_panes_rgba`],
+/// mirroring the windowed renderer's base-chrome + overlay passes.
+#[derive(Default)]
+pub struct Chrome<'a> {
+    /// The left sidebar (passes 3-4).
+    pub sidebar: Option<&'a CaptureSidebar>,
+    /// The git diff dock (passes 5-6).
+    pub git_dock: Option<&'a CaptureGitDock>,
+    /// The command-palette overlay (passes 7-8).
+    pub overlay: Option<&'a CaptureOverlay>,
+}
+
+/// Render a tiled set of `panes` plus any `chrome` (sidebar, git dock, palette overlay)
+/// headlessly - the exact path the windowed [`Renderer`](crate::Renderer) uses (dividers,
+/// focus ring, per-pane cursor, and the chrome layers on top) - to an offscreen `width` x
+/// `height` sRGB target, returning tight RGBA8 bytes. The verification twin of the live
+/// workspace.
 ///
 /// # Panics
 /// Panics if no GPU adapter/device is available or the readback fails.
@@ -148,12 +179,11 @@ pub fn capture_panes_rgba(
     height: u32,
     scale: f64,
     panes: &[CapturePane],
-    overlay: Option<&CaptureOverlay>,
-    sidebar: Option<&CaptureSidebar>,
+    chrome: &Chrome,
 ) -> Vec<u8> {
     let theme = Theme::resolve(&appearance.theme);
     let (cell_w, cell_h) = measure_cell(appearance, scale);
-    let sidebar_scene = sidebar.map(|sb| {
+    let sidebar_scene = chrome.sidebar.map(|sb| {
         let view = SidebarView {
             panel: sb.panel,
             text_origin: sb.text_origin,
@@ -168,7 +198,25 @@ pub fn capture_panes_rgba(
             clip: (sb.panel.x, sb.panel.y, sb.panel.w, sb.panel.h),
         }
     });
-    let overlay_scene = overlay.map(|ov| {
+    let gitdock_scene = chrome.git_dock.map(|gd| {
+        let view = GitDockView {
+            panel: gd.panel,
+            text_origin: gd.text_origin,
+            rows: &gd.rows,
+            selected_file_row: gd.selected_file_row,
+            add_rows: &gd.add_rows,
+            del_rows: &gd.del_rows,
+            hunk_rows: &gd.hunk_rows,
+        };
+        Scene {
+            quads: build_gitdock_quads(&view, &theme, cell_w, cell_h, scale as f32),
+            rows: &gd.rows,
+            left: gd.text_origin.0,
+            top: gd.text_origin.1,
+            clip: (gd.panel.x, gd.panel.y, gd.panel.w, gd.panel.h),
+        }
+    });
+    let overlay_scene = chrome.overlay.map(|ov| {
         let view = OverlayView {
             panel: ov.panel,
             text_origin: ov.text_origin,
@@ -190,63 +238,69 @@ pub fn capture_panes_rgba(
         height,
         scale,
         color(theme.bg_base),
-        |text| {
-            let (cell_w, cell_h, _) = text.cell_metrics();
-            let stroke = text.scale();
-            let mut quads = Vec::new();
-            let mut inputs = Vec::with_capacity(panes.len());
-            for pane in panes {
-                let cursor = pane.focused.then_some(pane.cursor);
-                quads.extend(grid_quads(
-                    cell_w,
-                    cell_h,
-                    pane.origin,
-                    &pane.rows,
-                    cursor,
-                    theme.accent,
-                    &[],
-                ));
-                inputs.push(PaneTextInput {
-                    rows: &pane.rows,
-                    left: pane.origin.0,
-                    top: pane.origin.1,
-                    clip: (pane.rect.x, pane.rect.y, pane.rect.w, pane.rect.h),
-                });
-            }
-            if panes.len() > 1 {
-                let divider = theme.border.to_linear();
-                for pane in panes {
-                    push_outline(
-                        &mut quads,
-                        pane.rect.x,
-                        pane.rect.y,
-                        pane.rect.w,
-                        pane.rect.h,
-                        stroke,
-                        divider,
-                    );
-                }
-                if let Some(pane) = panes.iter().find(|p| p.focused) {
-                    push_outline(
-                        &mut quads,
-                        pane.rect.x,
-                        pane.rect.y,
-                        pane.rect.w,
-                        pane.rect.h,
-                        2.0 * stroke,
-                        theme.border_strong.to_linear(),
-                    );
-                }
-            }
-            text.set_panes(&inputs);
-            quads
-        },
-        // Sidebar first (drawn beneath), then the overlay on top.
-        [sidebar_scene, overlay_scene]
+        |text| paint_panes(text, panes, &theme),
+        // In the windowed renderer's order: sidebar (3-4), then the git dock (5-6),
+        // then the palette overlay (7-8) on top.
+        [sidebar_scene, gitdock_scene, overlay_scene]
             .into_iter()
             .flatten()
             .collect(),
     ))
+}
+
+/// Paint every pane's cells into `text` and return its quads (backgrounds/cursor, plus
+/// the dividers + focused ring when tiled) - the pane half of [`capture_panes_rgba`]'s
+/// setup, matching the windowed [`Renderer`](crate::Renderer)'s pane pass.
+fn paint_panes(text: &mut TextLayer, panes: &[CapturePane], theme: &Theme) -> Vec<Quad> {
+    let (cell_w, cell_h, _) = text.cell_metrics();
+    let stroke = text.scale();
+    let mut quads = Vec::new();
+    let mut inputs = Vec::with_capacity(panes.len());
+    for pane in panes {
+        let cursor = pane.focused.then_some(pane.cursor);
+        quads.extend(grid_quads(
+            cell_w,
+            cell_h,
+            pane.origin,
+            &pane.rows,
+            cursor,
+            theme.accent,
+            &[],
+        ));
+        inputs.push(PaneTextInput {
+            rows: &pane.rows,
+            left: pane.origin.0,
+            top: pane.origin.1,
+            clip: (pane.rect.x, pane.rect.y, pane.rect.w, pane.rect.h),
+        });
+    }
+    if panes.len() > 1 {
+        let divider = theme.border.to_linear();
+        for pane in panes {
+            push_outline(
+                &mut quads,
+                pane.rect.x,
+                pane.rect.y,
+                pane.rect.w,
+                pane.rect.h,
+                stroke,
+                divider,
+            );
+        }
+        if let Some(pane) = panes.iter().find(|p| p.focused) {
+            push_outline(
+                &mut quads,
+                pane.rect.x,
+                pane.rect.y,
+                pane.rect.w,
+                pane.rect.h,
+                2.0 * stroke,
+                theme.border_strong.to_linear(),
+            );
+        }
+    }
+    text.set_panes(&inputs);
+    quads
 }
 
 /// The full-window settings view for [`capture_settings_rgba`], mirroring
@@ -340,7 +394,7 @@ struct Scene<'a> {
 
 /// The sidebar chrome scene (passes 3-4 in the windowed renderer).
 type SidebarScene<'a> = Scene<'a>;
-/// The command-palette overlay scene (passes 5-6).
+/// The command-palette overlay scene (passes 7-8, after the git dock's 5-6).
 type OverlayScene<'a> = Scene<'a>;
 
 async fn capture_async<F>(

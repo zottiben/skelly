@@ -288,6 +288,94 @@ pub(crate) fn settings_quads(
     quads
 }
 
+/// Alpha for a diff line's translucent background: additions and deletions use the
+/// heavier `.14`, hunk headers the lighter `.08` (the guide's `diff.*.bg` tokens).
+const DIFF_LINE_ALPHA: f32 = 0.14;
+/// Alpha for a hunk header's translucent background.
+const HUNK_LINE_ALPHA: f32 = 0.08;
+/// Alpha applied to `accent` for the selected file's row fill (same as the sidebar/
+/// settings highlight).
+const SELECTED_ROW_ALPHA: f32 = 0.16;
+
+/// Build the decorative quads for the git diff dock: a full-width translucent background
+/// behind every add / del / hunk-header row (from the `diff.*` tokens), the selected
+/// file's `accent.subtle` row fill, and a `border` divider down the dock's *left* edge
+/// (separating it from the pane area). The dock shares `bg.base` (already the clear
+/// color), so there is no panel fill; the text colors come baked into `view.rows`. Shared
+/// by the windowed [`Renderer`](crate::Renderer) and the headless capture.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "row indices into a short dock grid are exact as f32"
+)]
+pub(crate) fn gitdock_quads(
+    view: &crate::GitDockView,
+    theme: &crate::theme::Theme,
+    _cell_w: f32,
+    cell_h: f32,
+    scale: f32,
+) -> Vec<Quad> {
+    let panel = view.panel;
+    let stroke = scale.max(1.0);
+    let row_y = |row: usize| view.text_origin.1 + row as f32 * cell_h;
+    let tint = |color: crate::theme::Srgb, alpha: f32| {
+        let mut c = color.to_linear();
+        c[3] = alpha;
+        c
+    };
+    let mut quads = Vec::new();
+
+    // Diff-line backgrounds first (beneath the glyphs, which load over this pass).
+    for &row in view.hunk_rows {
+        quads.push(Quad::new(
+            panel.x,
+            row_y(row),
+            panel.w,
+            cell_h,
+            tint(theme.diff_hunk, HUNK_LINE_ALPHA),
+        ));
+    }
+    for &row in view.add_rows {
+        quads.push(Quad::new(
+            panel.x,
+            row_y(row),
+            panel.w,
+            cell_h,
+            tint(theme.diff_add, DIFF_LINE_ALPHA),
+        ));
+    }
+    for &row in view.del_rows {
+        quads.push(Quad::new(
+            panel.x,
+            row_y(row),
+            panel.w,
+            cell_h,
+            tint(theme.diff_del, DIFF_LINE_ALPHA),
+        ));
+    }
+
+    // The selected file's row fill (a subtle accent tint, like the focused settings
+    // control - no accent bar, so it never fights the left-edge divider).
+    if let Some(row) = view.selected_file_row {
+        quads.push(Quad::new(
+            panel.x,
+            row_y(row),
+            panel.w,
+            cell_h,
+            tint(theme.accent, SELECTED_ROW_ALPHA),
+        ));
+    }
+
+    // The divider on the dock's left edge, drawn last so it sits over the row fills.
+    quads.push(Quad::new(
+        panel.x,
+        panel.y,
+        stroke,
+        panel.h,
+        theme.border.to_linear(),
+    ));
+    quads
+}
+
 /// Append a rectangular outline (four `thickness`-px bars) around the pixel rect
 /// `(x, y, w, h)` in linear `color`, drawn *inside* the rect's edges so it never
 /// escapes the pane. Used for the per-pane divider and the focused pane's ring.

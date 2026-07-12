@@ -86,6 +86,15 @@ pub struct Theme {
     /// `border.strong` - the stronger border on the focused pane and on elevated
     /// surfaces (sRGB).
     pub border_strong: Srgb,
+    /// `diff.add` - added-line text/gutter in the git diff dock; its background is the
+    /// same hue drawn translucent (sRGB). Separate from the ANSI palette (Hard rule 2).
+    pub diff_add: Srgb,
+    /// `diff.del` - removed-line text/gutter in the git diff dock; its background is the
+    /// same hue drawn translucent (sRGB).
+    pub diff_del: Srgb,
+    /// `diff.hunk` - the `@@` hunk-header color (and the diff dock's branch label);
+    /// its background is the same hue drawn translucent (sRGB).
+    pub diff_hunk: Srgb,
 }
 
 impl Theme {
@@ -105,6 +114,9 @@ impl Theme {
                 bg_elevated: srgb(0xFF, 0xFF, 0xFF),
                 border: srgb(0xBC, 0xC0, 0xCC),
                 border_strong: srgb(0xAC, 0xB0, 0xBE),
+                diff_add: srgb(0x40, 0xA0, 0x2B),
+                diff_del: srgb(0xD2, 0x0F, 0x39),
+                diff_hunk: srgb(0x1E, 0x66, 0xF5),
             },
             // Ossein Dark (default) - the guide's token table.
             _ => Self {
@@ -116,6 +128,9 @@ impl Theme {
                 bg_elevated: srgb(0x38, 0x3A, 0x54),
                 border: srgb(0x31, 0x32, 0x44),
                 border_strong: srgb(0x6C, 0x6F, 0x93),
+                diff_add: srgb(0xA6, 0xE3, 0xA1),
+                diff_del: srgb(0xF3, 0x8B, 0xA8),
+                diff_hunk: srgb(0x89, 0xB4, 0xFA),
             },
         }
     }
@@ -174,6 +189,18 @@ mod tests {
                 b: 0xF4
             }
         );
+    }
+
+    #[test]
+    fn diff_tokens_match_the_spec_and_differ_by_theme() {
+        // The guide's token table: diff.add / diff.del / diff.hunk, dark vs light.
+        let dark = Theme::resolve("ossein-dark");
+        assert_eq!(dark.diff_add, srgb(0xA6, 0xE3, 0xA1));
+        assert_eq!(dark.diff_del, srgb(0xF3, 0x8B, 0xA8));
+        assert_eq!(dark.diff_hunk, srgb(0x89, 0xB4, 0xFA));
+        let light = Theme::resolve("ossein-light");
+        assert_eq!(light.diff_add, srgb(0x40, 0xA0, 0x2B));
+        assert_ne!(dark.diff_add, light.diff_add);
     }
 
     #[test]

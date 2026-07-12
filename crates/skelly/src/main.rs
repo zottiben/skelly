@@ -10,6 +10,7 @@
 //! output. Errors are contextualized here with `anyhow`; `wgpu`/`alacritty` types
 //! never leak up.
 
+mod gitdock;
 mod palette;
 mod settings;
 mod sidebar;
@@ -21,11 +22,13 @@ use anyhow::Context as _;
 use skelly_config::{Config, SidebarMode};
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
 use skelly_render::{
-    AnsiPalette, GridCell, OverlayView, PaneView, PxRect, Renderer, SettingsView, SidebarView,
-    Srgb, Theme,
+    AnsiPalette, GitDockView, GridCell, OverlayView, PaneView, PxRect, Renderer, SettingsView,
+    SidebarView, Srgb, Theme,
 };
+use skelly_session::Repo;
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 
+use gitdock::GitDock;
 use palette::Palette;
 use settings::Settings;
 use sidebar::Sidebar;
@@ -48,6 +51,13 @@ const PALETTE_PAD: f32 = 12.0;
 const SIDEBAR_PAD: f32 = 12.0;
 /// Logical inset (px) of the full-window settings view's text from the window edge.
 const SETTINGS_PAD: f32 = 20.0;
+/// Logical width (px) of the git diff dock - the guide's default (resizable 360-560 is a
+/// later slice, so it is fixed for now).
+const GIT_DOCK_WIDTH: f32 = 420.0;
+/// Logical inset (px) of the git dock's text from its top-left corner.
+const GIT_DOCK_PAD: f32 = 14.0;
+/// Diff lines scrolled per `PageUp`/`PageDown` in the git dock.
+const DIFF_SCROLL_LINES: i32 = 10;
 
 /// Event the reader thread sends to wake the UI when a shell produces output.
 #[derive(Debug, Clone, Copy)]
@@ -158,6 +168,11 @@ struct App {
     settings: Settings,
     /// The persistent left sidebar (the tab list) state.
     sidebar: Sidebar,
+    /// The per-repo git diff dock (right dock) state.
+    git_dock: GitDock,
+    /// The repository backing the dock (from the process cwd), cached while it is open so
+    /// moving the file selection re-diffs without re-discovering.
+    git_repo: Option<Repo>,
     clipboard: Option<arboard::Clipboard>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -187,6 +202,8 @@ impl App {
             palette: Palette::new(),
             settings: Settings::new(),
             sidebar,
+            git_dock: GitDock::new(),
+            git_repo: None,
             clipboard: arboard::Clipboard::new().ok(),
             window: None,
             renderer: None,
@@ -210,17 +227,19 @@ impl App {
         &mut self.tabs[self.active]
     }
 
-    /// The pane area within the window: the surface inset by the window margin, and by
-    /// the sidebar's width on the left when it is shown.
+    /// The pane area within the window: the surface inset by the window margin, by the
+    /// sidebar's width on the left when it is shown, and by the git dock's width on the
+    /// right when it is open.
     fn viewport_rect(&self) -> Rect {
         let pad = WINDOW_PAD * scale32(self.scale);
         let sidebar = self.sidebar_width_px();
+        let dock = self.git_dock_width_px();
         let w = dim_f32(self.size.0);
         let h = dim_f32(self.size.1);
         Rect::new(
             sidebar + pad,
             pad,
-            (w - sidebar - 2.0 * pad).max(1.0),
+            (w - sidebar - dock - 2.0 * pad).max(1.0),
             (h - 2.0 * pad).max(1.0),
         )
     }
@@ -230,6 +249,16 @@ impl App {
     fn sidebar_width_px(&self) -> f32 {
         if self.sidebar.visible {
             f32::from(self.config.sidebar.width) * scale32(self.scale)
+        } else {
+            0.0
+        }
+    }
+
+    /// The git dock's width in physical px, or `0.0` when it is closed. The dock occupies
+    /// the right strip `[surface_w - width, surface_w)`; the pane viewport ends before it.
+    fn git_dock_width_px(&self) -> f32 {
+        if self.git_dock.open {
+            GIT_DOCK_WIDTH * scale32(self.scale)
         } else {
             0.0
         }
@@ -316,16 +345,15 @@ impl App {
         }
     }
 
-    /// Repaint every visible pane from its terminal grid, resolving cell colors and
-    /// overlaying the selection and the focused-pane ring.
-    fn redraw(&mut self) {
+    /// Build the owned per-pane frame data for the active tab: each visible pane's
+    /// resolved cell grid, cursor, selection, rectangle, and focus flag.
+    fn pane_frames(&self) -> Vec<PaneFrame> {
         let inset = self.pane_inset();
         let viewport = self.viewport_rect();
         let ws = self.active_tab();
-        let layout = ws.tree.layout(viewport);
         let focused = ws.tree.focused();
-
-        let frames: Vec<PaneFrame> = layout
+        ws.tree
+            .layout(viewport)
             .into_iter()
             .filter_map(|(id, rect)| {
                 let term = ws.panes.get(&id)?;
@@ -357,7 +385,13 @@ impl App {
                     focused: id == focused,
                 })
             })
-            .collect();
+            .collect()
+    }
+
+    /// Repaint every visible pane from its terminal grid, resolving cell colors and
+    /// overlaying the selection and the focused-pane ring.
+    fn redraw(&mut self) {
+        let frames = self.pane_frames();
 
         let views: Vec<PaneView> = frames
             .iter()
@@ -373,8 +407,13 @@ impl App {
 
         // Build the chrome frames before the mutable renderer borrow.
         let sidebar = self.sidebar.visible.then(|| self.build_sidebar_frame());
+        let git_dock = self.git_dock.open.then(|| self.build_git_dock_frame());
         let overlay = self.palette.open.then(|| self.build_palette_frame());
         let settings = self.settings.open.then(|| self.build_settings_frame());
+        // Write the clamped diff scroll back so repeated paging past the end settles.
+        if let Some(frame) = &git_dock {
+            self.git_dock.set_scroll(frame.diff_scroll);
+        }
 
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_panes(&views);
@@ -386,6 +425,18 @@ impl App {
                     active_row: frame.active_row,
                 })),
                 None => renderer.set_sidebar(None),
+            }
+            match &git_dock {
+                Some(frame) => renderer.set_git_dock(Some(&GitDockView {
+                    panel: frame.panel,
+                    text_origin: frame.origin,
+                    rows: &frame.rows,
+                    selected_file_row: frame.selected_file_row,
+                    add_rows: &frame.add_rows,
+                    del_rows: &frame.del_rows,
+                    hunk_rows: &frame.hunk_rows,
+                })),
+                None => renderer.set_git_dock(None),
             }
             match &overlay {
                 Some(frame) => renderer.set_overlay(Some(&OverlayView {
@@ -513,6 +564,42 @@ impl App {
         }
     }
 
+    /// Lay out the git dock: a fixed-width panel on the right edge, its status bar +
+    /// file list + selected-file diff rendered in UI tokens and clipped to the panel.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the dock cell dimensions are small, non-negative values"
+    )]
+    fn build_git_dock_frame(&self) -> GitDockFrame {
+        let (cell_w, cell_h) = self.cell_size();
+        let pad = GIT_DOCK_PAD * scale32(self.scale);
+        let dock_w = self.git_dock_width_px();
+        let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
+        let panel_x = (surface_w - dock_w).max(0.0);
+
+        let cols = ((dock_w - 2.0 * pad) / cell_w).floor().max(1.0) as usize;
+        let rows = ((surface_h - 2.0 * pad) / cell_h).floor().max(1.0) as usize;
+        let view = self.git_dock.view(cols, rows, &self.theme);
+
+        GitDockFrame {
+            panel: PxRect {
+                x: panel_x,
+                y: 0.0,
+                w: dock_w,
+                h: surface_h,
+            },
+            origin: (panel_x + pad, pad),
+            rows: view.rows,
+            selected_file_row: view.selected_file_row,
+            add_rows: view.add_rows,
+            del_rows: view.del_rows,
+            hunk_rows: view.hunk_rows,
+            diff_scroll: view.diff_scroll,
+        }
+    }
+
     /// Open the settings view (`⌘,` or the palette command).
     fn open_settings(&mut self) {
         self.settings.open();
@@ -551,6 +638,72 @@ impl App {
         self.sidebar.toggle();
         self.sync_layout();
         self.request_redraw();
+    }
+
+    /// Toggle the git diff dock (`⇧⌘G`). Opening refreshes the repo status and the
+    /// selected file's diff; either way the pane viewport changes width, so re-fit the
+    /// shells and repaint.
+    fn toggle_git_dock(&mut self) {
+        if self.git_dock.open {
+            self.git_dock.close();
+            self.git_repo = None;
+        } else {
+            self.git_dock.open();
+            self.refresh_git();
+        }
+        self.sync_layout();
+        self.request_redraw();
+    }
+
+    /// Refresh the dock from the repository of the process working directory (a v1
+    /// limitation: real per-pane cwd tracking is a follow-up, the same blocker as
+    /// cwd-based tab titles). Caches the repo, loads the working status, then the selected
+    /// file's diff.
+    fn refresh_git(&mut self) {
+        let start = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match Repo::discover(&start) {
+            Ok(Some(repo)) => match repo.status() {
+                Ok(status) => {
+                    self.git_dock.load(status);
+                    self.git_repo = Some(repo);
+                    self.load_selected_diff();
+                }
+                Err(err) => {
+                    self.git_dock.set_error(err.to_string());
+                    self.git_repo = None;
+                }
+            },
+            Ok(None) => {
+                self.git_dock.set_no_repo();
+                self.git_repo = None;
+            }
+            Err(err) => {
+                self.git_dock.set_error(err.to_string());
+                self.git_repo = None;
+            }
+        }
+    }
+
+    /// Load the selected file's unified diff into the dock from the cached repo. Shows the
+    /// unstaged change when there is one, else the staged change; untracked files have no
+    /// diff (the dock shows a placeholder for them).
+    fn load_selected_diff(&mut self) {
+        let Some(repo) = self.git_repo.clone() else {
+            return;
+        };
+        let Some(file) = self.git_dock.selected_file() else {
+            return;
+        };
+        if matches!(file.status, skelly_session::FileStatus::Untracked) {
+            self.git_dock.set_diff(skelly_session::FileDiff::default());
+            return;
+        }
+        let path = file.path.clone();
+        let staged = file.staged && !file.unstaged;
+        match repo.diff(&path, staged) {
+            Ok(diff) => self.git_dock.set_diff(diff),
+            Err(err) => self.git_dock.set_error(err.to_string()),
+        }
     }
 
     /// Map the pointer to a sidebar row action, or `None` if it isn't over the sidebar.
@@ -787,6 +940,7 @@ impl App {
             Action::NextTab => self.cycle_tab(true),
             Action::PrevTab => self.cycle_tab(false),
             Action::ToggleSidebar => self.toggle_sidebar(),
+            Action::ShowGitDiff => self.toggle_git_dock(),
             Action::OpenSettings => self.open_settings(),
             Action::ThemeDark => self.apply_theme("ossein-dark"),
             Action::ThemeLight => self.apply_theme("ossein-light"),
@@ -847,19 +1001,67 @@ impl App {
         }
     }
 
+    /// Handle a key while the git dock is open: it captures navigation input (arrows move
+    /// between files and re-diff, `PageUp/PageDown` scroll the diff, `Esc` or `⇧⌘G` close,
+    /// `⌘Q` quits). The terminal stays live underneath but receives no keys until close.
+    fn on_gitdock_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
+        if self.modifiers.super_key() {
+            if let Key::Character(ch) = key_event.logical_key.as_ref() {
+                if ch.eq_ignore_ascii_case("g") && self.modifiers.shift_key() {
+                    self.toggle_git_dock();
+                    return;
+                }
+                if ch.eq_ignore_ascii_case("q") {
+                    event_loop.exit();
+                    return;
+                }
+            }
+        }
+        match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape) => {
+                self.toggle_git_dock();
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if self.git_dock.move_selection(-1) {
+                    self.load_selected_diff();
+                }
+                self.request_redraw();
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                if self.git_dock.move_selection(1) {
+                    self.load_selected_diff();
+                }
+                self.request_redraw();
+            }
+            Key::Named(NamedKey::PageUp) => {
+                self.git_dock.scroll_diff(-DIFF_SCROLL_LINES);
+                self.request_redraw();
+            }
+            Key::Named(NamedKey::PageDown) => {
+                self.git_dock.scroll_diff(DIFF_SCROLL_LINES);
+                self.request_redraw();
+            }
+            _ => {}
+        }
+    }
+
     /// Handle a key press: the palette (when open), platform combos (quit/copy/paste/
     /// palette), pane chords, scrollback keys, then terminal input to the focused pane.
     fn on_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
         if key_event.state != ElementState::Pressed {
             return;
         }
-        // The settings view and command palette each capture all input while open.
+        // The settings view, command palette, and git dock each capture input while open.
         if self.settings.open {
             self.on_settings_key(event_loop, key_event);
             return;
         }
         if self.palette.open {
             self.on_palette_key(event_loop, key_event);
+            return;
+        }
+        if self.git_dock.open {
+            self.on_gitdock_key(event_loop, key_event);
             return;
         }
         // Tab management (⌘T new, ⌘W close, ⌘1..9 go-to, ⌥⇧[ ] cycle). Matched on the
@@ -893,6 +1095,10 @@ impl App {
                 }
                 if ch.eq_ignore_ascii_case("b") {
                     self.toggle_sidebar();
+                    return;
+                }
+                if ch.eq_ignore_ascii_case("g") && self.modifiers.shift_key() {
+                    self.toggle_git_dock();
                     return;
                 }
                 if ch == "," {
@@ -1047,6 +1253,19 @@ struct SettingsFrame {
     nav_cols: usize,
     nav_active_row: Option<usize>,
     selected_row: Option<usize>,
+}
+
+/// Owned git-dock frame data the borrowed [`GitDockView`] points at.
+struct GitDockFrame {
+    panel: PxRect,
+    origin: (f32, f32),
+    rows: Vec<Vec<GridCell>>,
+    selected_file_row: Option<usize>,
+    add_rows: Vec<usize>,
+    del_rows: Vec<usize>,
+    hunk_rows: Vec<usize>,
+    /// The clamped diff scroll the view actually used, written back to the dock.
+    diff_scroll: usize,
 }
 
 /// Resolve a terminal cell into a render cell against the active ANSI palette,

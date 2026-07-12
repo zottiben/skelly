@@ -132,20 +132,28 @@ fn main() {
         height,
         scale,
         &panes,
-        Some(&overlay),
-        Some(&sidebar),
+        &skelly_render::Chrome {
+            sidebar: Some(&sidebar),
+            overlay: Some(&overlay),
+            ..Default::default()
+        },
     );
 
-    let file = std::fs::File::create(&path).expect("create png");
+    write_png(&path, width, height, &rgba);
+    println!("wrote {path} ({} panes)", panes.len());
+}
+
+/// Encode tight RGBA8 bytes to a PNG at `path`.
+fn write_png(path: &str, width: u32, height: u32, rgba: &[u8]) {
+    let file = std::fs::File::create(path).expect("create png");
     let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, height);
     encoder.set_color(png::ColorType::Rgba);
     encoder.set_depth(png::BitDepth::Eight);
     encoder
         .write_header()
         .expect("png header")
-        .write_image_data(&rgba)
+        .write_image_data(rgba)
         .expect("png data");
-    println!("wrote {path} ({} panes)", panes.len());
 }
 
 /// Build a representative command-palette overlay (a prompt line, a few command

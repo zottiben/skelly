@@ -26,8 +26,8 @@ mod theme;
 
 pub use ansi::AnsiPalette;
 pub use capture::{
-    capture_cells_rgba, capture_panes_rgba, capture_rgba, capture_settings_rgba, CaptureOverlay,
-    CapturePane, CaptureSettings, CaptureSidebar,
+    capture_cells_rgba, capture_panes_rgba, capture_rgba, capture_settings_rgba, CaptureGitDock,
+    CaptureOverlay, CapturePane, CaptureSettings, CaptureSidebar, Chrome,
 };
 pub use error::RenderError;
 pub use renderer::Renderer;
@@ -107,6 +107,33 @@ pub struct SidebarView<'a> {
     pub rows: &'a [Vec<GridCell>],
     /// Grid row of the active tab to highlight (`accent` bar + `accent.subtle` fill).
     pub active_row: Option<usize>,
+}
+
+/// The per-repo git diff dock to draw as base-layer chrome on the right edge.
+///
+/// Like [`SidebarView`] it sits over the surface (the pane viewport insets to its left)
+/// and never over the panes; the palette overlay and settings view still draw on top of
+/// it (AGENTS Hard rule 4 - a layer, the terminal never unmounts). The renderer draws a
+/// `border` divider on its left edge, the selected file's `accent.subtle` highlight, and
+/// the translucent add/del/hunk line backgrounds (from the `diff.*` tokens), then paints
+/// `rows` as a monospace grid at `text_origin` (clipped to `panel`). The caller bakes the
+/// UI-token text colors into `rows` and reports which grid rows are additions, deletions,
+/// and hunk headers; the renderer owns only the decorative quads.
+pub struct GitDockView<'a> {
+    /// The dock rectangle on the surface (right edge, full height), physical px.
+    pub panel: PxRect,
+    /// Pixel position of the text grid's cell `(0, 0)` top-left, physical px.
+    pub text_origin: (f32, f32),
+    /// The dock's text as a monospace grid (rows top to bottom), UI-token colored.
+    pub rows: &'a [Vec<GridCell>],
+    /// Grid row of the selected file in the file list (`accent` bar + subtle fill).
+    pub selected_file_row: Option<usize>,
+    /// Grid rows that are diff additions (translucent `diff.add` background).
+    pub add_rows: &'a [usize],
+    /// Grid rows that are diff deletions (translucent `diff.del` background).
+    pub del_rows: &'a [usize],
+    /// Grid rows that are `@@` hunk headers (translucent `diff.hunk` background).
+    pub hunk_rows: &'a [usize],
 }
 
 /// The full-window settings view to draw over the live terminal (AGENTS Hard rule

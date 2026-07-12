@@ -11,8 +11,9 @@ pane tree, command palette, settings view, live theming) are in place and run
 end-to-end. M2 has a handful of tracked carry-overs - the unchecked boxes below
 (bespoke cell renderer, cargo-fuzz, reflow/theme polish, SGR fidelity follow-ups) -
 plus a few M3 follow-ups, which we finish opportunistically rather than block M4 on.
-M4 (signature features) has begun: the git diff **model** landed; the diff dock UI,
-hunk staging, and the session timeline / non-destructive rewind are next.
+M4 (signature features) is under way: the git diff **model** and the read-only diff
+**dock UI** (`⇧⌘G`) have landed; hunk staging + the commit box and the session
+timeline / non-destructive rewind are next.
 
 - [x] **M0 - Foundation.** Workspace, quality gates, CI, docs, ADR log, and the
   `skelly-config` slice (schema + load + validate + tests), with a runnable binary
@@ -166,10 +167,21 @@ hunk staging, and the session timeline / non-destructive rewind are next.
       porcelain-v2 / numstat / unified-diff parsers are unit-tested from sample
       strings (10 tests), plus an integration test driving a real `git` against a
       throwaway repo (2 tests).
-    - [ ] The right-dock render surface + `⇧⌘G` wiring (a layer, Hard rule 4; 420px,
-      resizable 360-560), showing the changed-file list and the selected file's diff
-      with the `diff.add` / `diff.del` / `diff.hunk` tokens; scoped to the active
-      tab's repo.
+    - [x] The right-dock render surface + `⇧⌘G` wiring (a layer, Hard rule 4; fixed at
+      the guide's 420px default - the resizable 360-560 range is a follow-up), showing
+      the status bar (branch, ahead/behind, totals), the changed-file list, and the
+      selected file's unified diff with the `diff.add` / `diff.del` / `diff.hunk`
+      tokens. Opened with `⇧⌘G` (and the palette "Show git diff"), dismissed with
+      `Esc`; `↑/↓` move between files (re-diffing), `PageUp/PageDown` scroll the diff.
+      Base chrome on the right edge (its own quad+text load pass, like the sidebar);
+      the pane viewport insets to its left. The dock's data comes from
+      `skelly_session::Repo` on the process cwd (real per-pane cwd is a follow-up, the
+      same blocker as cwd tab titles); the pure `gitdock` module (state + view, unit
+      tested) turns a `Status` + `FileDiff` into the grid + row metadata; verified by
+      the `git_dock_capture` headless PNG in both themes. A `bespoke-cell`-safe
+      vertical stack replaces the guide's wide side-by-side layout at 420px (design
+      decision, recorded in `design/README.md`). Deferred: the resizable width, the
+      wide split view, click-to-select / mouse, and moving git calls off the UI thread.
     - [ ] Per-file + hunk-level staging (`git apply --cached`), stage-all, and the
       commit box.
   - [ ] Session timeline + non-destructive rewind (shadow worktree via
