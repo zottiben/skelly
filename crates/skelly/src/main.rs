@@ -76,7 +76,10 @@ const DIFF_SCROLL_LINES: i32 = 10;
 struct Wakeup;
 
 fn main() -> anyhow::Result<()> {
-    init_tracing();
+    // Hold the log-file guard for the whole run so buffered logs flush on exit; install the
+    // panic hook right after so any panic during startup is logged too.
+    let _log_guard = init_tracing();
+    install_panic_hook();
 
     let config = Config::load_default().context("loading configuration")?;
     tracing::info!(
@@ -2503,20 +2506,117 @@ fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> 
     }
 }
 
-/// Initialize `tracing` with an env filter (`SKELLY_LOG`, default `info`), writing
-/// structured logs to stderr.
-fn init_tracing() {
-    use tracing_subscriber::{fmt, EnvFilter};
+/// Initialize `tracing` with an env filter (`SKELLY_LOG`, default `info`). Logs go to
+/// stderr and, when a state directory is resolvable, are also appended (non-blocking) to a
+/// daily-rotating log file for bug reports. Returns the `tracing-appender` worker guard,
+/// which the caller must keep alive so buffered logs - including a panic backtrace - are
+/// flushed even on an abrupt exit; `None` when only stderr logging is active.
+#[must_use]
+fn init_tracing() -> Option<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+
     let filter = EnvFilter::try_from_env("SKELLY_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    fmt().with_env_filter(filter).with_target(false).init();
+    let stderr_layer = fmt::layer().with_target(false).with_writer(std::io::stderr);
+
+    // A file layer, only when we can resolve + create the state directory. The file gets no
+    // ANSI colors (it is not a terminal); any failure degrades to stderr-only logging.
+    let (file_layer, guard) = match log_writer() {
+        Some((writer, guard)) => {
+            let layer = fmt::layer()
+                .with_target(false)
+                .with_ansi(false)
+                .with_writer(writer);
+            (Some(layer), Some(guard))
+        }
+        None => (None, None),
+    };
+
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(stderr_layer)
+        .with(file_layer)
+        .init();
+
+    if guard.is_none() {
+        tracing::warn!("no writable state directory; logging to stderr only");
+    }
+    guard
+}
+
+/// Open a non-blocking, daily-rotating log appender in Skelly's state directory. `None` if
+/// no state directory is resolvable or it cannot be created (so logging falls back to
+/// stderr only).
+fn log_writer() -> Option<(
+    tracing_appender::non_blocking::NonBlocking,
+    tracing_appender::non_blocking::WorkerGuard,
+)> {
+    let dir = log_dir()?;
+    std::fs::create_dir_all(&dir).ok()?;
+    let appender = tracing_appender::rolling::daily(&dir, "skelly.log");
+    Some(tracing_appender::non_blocking(appender))
+}
+
+/// Skelly's log directory: `$XDG_STATE_HOME/skelly`, falling back to
+/// `$HOME/.local/state/skelly` (the XDG base-dir spec's place for logs / state). `None` if
+/// neither var is set - mirroring how `skelly-config` resolves its directory.
+fn log_dir() -> Option<std::path::PathBuf> {
+    use std::path::PathBuf;
+    if let Some(xdg) = std::env::var_os("XDG_STATE_HOME") {
+        if !xdg.is_empty() {
+            return Some(PathBuf::from(xdg).join("skelly"));
+        }
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("skelly"),
+    )
+}
+
+/// Install a panic hook that logs the panic (message, location, thread, and a captured
+/// backtrace) at `ERROR` before chaining to the default hook, so a crash is persisted to
+/// the log file for a bug report instead of vanishing (playbook §7). Recovering a single
+/// panicking pane in-window without tearing down the window is a tracked follow-up.
+fn install_panic_hook() {
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let location = info
+            .location()
+            .map_or_else(|| "unknown".to_owned(), ToString::to_string);
+        let thread = std::thread::current();
+        let thread = thread.name().unwrap_or("unnamed");
+        tracing::error!(
+            location = %location,
+            thread = %thread,
+            "panic: {}\n{backtrace}",
+            panic_message(info.payload()),
+        );
+        // Chain to the default hook so the familiar stderr message + process handling stay.
+        default_hook(info);
+    }));
+}
+
+/// Extract a human-readable message from a panic payload, which is a `&str` (a literal
+/// `panic!`), a `String` (a formatted one), or - rarely - some other boxed value.
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        (*s).to_owned()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "non-string panic payload".to_owned()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        cycle_index, dim, index_after_close, order, pane_action, pane_dims, pointer_cell_in,
-        process_name, resolve_cell, selection_cells, selection_text, tab_action, PaneAction,
-        Selection, TabAction,
+        cycle_index, dim, index_after_close, order, pane_action, pane_dims, panic_message,
+        pointer_cell_in, process_name, resolve_cell, selection_cells, selection_text, tab_action,
+        PaneAction, Selection, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -2546,6 +2646,67 @@ mod tests {
         let name = process_name(std::process::id()).expect("own process has a name");
         assert!(!name.is_empty());
         assert!(!name.contains('/'), "name is the basename, not a full path");
+    }
+
+    #[test]
+    fn panic_message_reads_str_and_string_payloads() {
+        // `panic!("literal")` yields a `&str` payload; `panic!("{x}")` yields a `String`.
+        let literal: &str = "boom";
+        assert_eq!(panic_message(&literal), "boom");
+        let formatted: String = "formatted boom".to_owned();
+        assert_eq!(panic_message(&formatted), "formatted boom");
+        // Anything else is summarized, not lost.
+        assert_eq!(panic_message(&42_i32), "non-string panic payload");
+    }
+
+    #[test]
+    fn panic_hook_logs_the_panic_through_tracing() {
+        use std::io::Write;
+        use std::sync::{Arc, Mutex};
+
+        // A `MakeWriter` that appends into a shared buffer, so we can read back what the
+        // hook emitted through `tracing` (mirroring what reaches the log file at runtime).
+        #[derive(Clone)]
+        struct BufWriter(Arc<Mutex<Vec<u8>>>);
+        impl Write for BufWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl tracing_subscriber::fmt::MakeWriter<'_> for BufWriter {
+            type Writer = BufWriter;
+            fn make_writer(&self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(BufWriter(buf.clone()))
+            .with_ansi(false)
+            .finish();
+
+        super::install_panic_hook();
+        // The global hook fires during the unwind, on this thread, where the scoped
+        // subscriber is active - so its `tracing::error!` lands in our buffer.
+        let outcome = tracing::subscriber::with_default(subscriber, || {
+            std::panic::catch_unwind(|| panic!("boom from the hook test"))
+        });
+        assert!(outcome.is_err(), "the closure panicked and was caught");
+
+        let logged = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            logged.contains("ERROR"),
+            "logged at error level: {logged:?}"
+        );
+        assert!(
+            logged.contains("boom from the hook test"),
+            "panic message reached the log: {logged:?}"
+        );
     }
 
     #[test]

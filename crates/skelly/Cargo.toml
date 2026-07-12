@@ -23,6 +23,7 @@ skelly-config = { path = "../skelly-config" }
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-appender.workspace = true
 winit = "0.30.13"
 skelly-render = { version = "0.1.0", path = "../skelly-render" }
 skelly-term = { version = "0.1.0", path = "../skelly-term" }

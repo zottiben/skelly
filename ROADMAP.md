@@ -279,6 +279,15 @@ follow-ups, finished opportunistically.
     hit-through-offset); verified by the `pane_capture` `overflow` arg PNG in both themes.
   - [ ] Remaining edge/empty states: detached/rewound "warns before forking",
     theme-with-no-light-variant fallback.
+  - [x] **Panic hook + file logging** (playbook §7). Logs now also stream (non-blocking) to
+    a daily-rotating `skelly.log` in the XDG state dir (`$XDG_STATE_HOME/skelly`, else
+    `$HOME/.local/state/skelly`), teed with stderr under the same `SKELLY_LOG` filter, and a
+    panic hook logs the message + location + thread + a captured backtrace at `ERROR` before
+    chaining to the default hook - so a crash is persisted for a bug report instead of
+    vanishing (the appender's worker guard is held for the whole run so it flushes even on an
+    abrupt exit). Tests: `panic_message` payload extraction + a hook-fires-and-logs test;
+    verified the log file is created + populated on a real boot. (Follow-up: recover a single
+    panicking pane in-window - a dead-pane state - without tearing down the window.)
   - [ ] Perf budgets (`criterion` on the parser/renderer hot paths).
   - [ ] Packaging (`cargo-dist` + `cargo-release`) and the first tagged release.
 
