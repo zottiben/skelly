@@ -174,6 +174,12 @@ impl GitDock {
         self.last_commit = None;
     }
 
+    /// Whether the current context is not inside a git repository (the empty state, where
+    /// `Enter` runs `Init repo`). True only after a refresh found no repo.
+    pub(crate) fn no_repo(&self) -> bool {
+        !self.repo_present
+    }
+
     /// Record that the current context is not inside a git repository (the empty state).
     pub(crate) fn set_no_repo(&mut self) {
         self.repo_present = false;
@@ -297,6 +303,21 @@ impl GitDock {
         // Empty / error states.
         if !self.repo_present {
             center(&mut grid, "No repository here", theme.fg_muted);
+            // The "Init repo" button (design §12 "Not a git repo"): an accent affordance
+            // one row below, activated with `Enter`. Highlighted via the selected-row
+            // accent quad (reused - the empty state has no file list to select).
+            if rows > 1 {
+                let init_row = (rows / 2 + 1).min(rows - 1);
+                write_centered(
+                    &mut grid[init_row],
+                    cols,
+                    "Init repo  \u{21a9}",
+                    theme.accent,
+                );
+                let mut view = View::empty(grid);
+                view.selected_file_row = Some(init_row);
+                return view;
+            }
             return View::empty(grid);
         }
         if let Some(error) = &self.error {
@@ -630,7 +651,8 @@ impl Default for GitDock {
 pub(crate) struct View {
     /// The dock's lines as a grid of UI-colored cells.
     pub(crate) rows: Vec<Vec<GridCell>>,
-    /// Grid row of the selected file (for the `accent.subtle` highlight quad).
+    /// Grid row to draw the `accent.subtle` highlight quad on: the selected file, or the
+    /// `Init repo` button in the no-repo empty state.
     pub(crate) selected_file_row: Option<usize>,
     /// Grid rows that are diff additions (for the `diff.add` background quads).
     pub(crate) add_rows: Vec<usize>,
@@ -967,9 +989,10 @@ mod tests {
     }
 
     #[test]
-    fn no_repo_shows_the_empty_state() {
+    fn no_repo_shows_the_empty_state_with_an_init_button() {
         let theme = Theme::resolve("ossein-dark");
         let dock = GitDock::new(); // repo_present is false until loaded
+        assert!(dock.no_repo());
         let view = dock.view(46, 20, &theme);
         let joined = view
             .rows
@@ -978,7 +1001,11 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("No repository here"));
-        assert!(view.selected_file_row.is_none());
+        // The Init button is shown one row below the message and carries the accent
+        // highlight (so Enter has a visible target).
+        assert!(joined.contains("Init repo"));
+        let init_row = view.selected_file_row.expect("init button is highlighted");
+        assert!(row_text(&view.rows[init_row]).contains("Init repo"));
     }
 
     #[test]

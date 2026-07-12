@@ -268,3 +268,19 @@ fn discover_outside_a_repo_is_none() {
     let found = Repo::discover(dir.path()).expect("discover runs");
     assert!(found.is_none());
 }
+
+#[test]
+fn init_creates_a_repository_that_discovers() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+
+    // A bare temp dir is not a repo; the "Init repo" empty-state action creates one.
+    assert!(Repo::discover(root).expect("discover runs").is_none());
+    let repo = Repo::init(root).expect("git init");
+
+    // The freshly-initialized repo now discovers, and its status is a clean, file-less
+    // tree (no commits yet, so line counts fall back to zero without erroring).
+    assert!(Repo::discover(root).expect("discover runs").is_some());
+    let status = repo.status().expect("status runs on a fresh repo");
+    assert!(status.files.is_empty(), "a fresh repo has no changes");
+}

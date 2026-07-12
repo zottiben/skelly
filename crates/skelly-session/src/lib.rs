@@ -87,6 +87,21 @@ impl Repo {
         }))
     }
 
+    /// Initialize a new git repository at `path` and return the discovered [`Repo`] - the
+    /// design's "Init repo" empty-state action (§12 "Not a git repo"). Runs `git init` in
+    /// `path`, then rediscovers so the returned root is the canonical working-tree root.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git init` cannot be run or fails, or if the freshly
+    /// initialized repository cannot then be discovered.
+    pub fn init(path: &Path) -> Result<Self, GitError> {
+        run_git(path, &["init"])?;
+        Self::discover(path)?.ok_or_else(|| GitError::Command {
+            args: "init".to_owned(),
+            stderr: "git init did not produce a repository".to_owned(),
+        })
+    }
+
     /// The repository's working-tree root.
     #[must_use]
     pub fn root(&self) -> &Path {

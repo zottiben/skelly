@@ -991,6 +991,18 @@ impl App {
         }
     }
 
+    /// Initialize a git repository in the process cwd (the git dock's "Init repo"
+    /// empty-state action, design §12 "Not a git repo") and refresh the dock to show the
+    /// new, empty repo. A failure surfaces in the dock's error line.
+    fn init_repo(&mut self) {
+        let start = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        match Repo::init(&start) {
+            Ok(_) => self.refresh_git(),
+            Err(err) => self.git_dock.set_error(err.to_string()),
+        }
+        self.request_redraw();
+    }
+
     /// Load the selected file's unified diff into the dock from the cached repo. Shows the
     /// unstaged change when there is one, else the staged change; untracked files have no
     /// diff (the dock shows a placeholder for them).
@@ -1365,6 +1377,8 @@ impl App {
         }
         match key_event.logical_key.as_ref() {
             Key::Named(NamedKey::Escape) => self.toggle_git_dock(),
+            // In the no-repo empty state, `Enter` runs the "Init repo" action.
+            Key::Named(NamedKey::Enter) if self.git_dock.no_repo() => self.init_repo(),
             Key::Named(NamedKey::Tab) => {
                 self.git_dock.focus_commit();
                 self.request_redraw();

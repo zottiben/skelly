@@ -66,7 +66,10 @@ fn main() {
         focused: true,
     };
 
-    let dock = build_dock(width, height, cell_w, cell_h, sc, &theme);
+    // An optional third arg `norepo` renders the "Not a git repo" empty state (the Init
+    // button) instead of the populated diff dock.
+    let norepo = std::env::args().nth(3).as_deref() == Some("norepo");
+    let dock = build_dock(width, height, cell_w, cell_h, sc, norepo, &theme);
     let rgba = skelly_render::capture_panes_rgba(
         &appearance,
         width,
@@ -100,6 +103,7 @@ fn build_dock(
     cell_w: f32,
     cell_h: f32,
     scale: f32,
+    norepo: bool,
     theme: &Theme,
 ) -> CaptureGitDock {
     let pad = DOCK_PAD * scale;
@@ -111,6 +115,19 @@ fn build_dock(
     let mut rows: Vec<Vec<GridCell>> = (0..rows_n)
         .map(|_| blank_row(cols, theme.fg_muted))
         .collect();
+
+    let panel = PxRect {
+        x: panel_x,
+        y: 0.0,
+        w: dock_w,
+        h: height as f32,
+    };
+    let text_origin = (panel_x + pad, pad);
+
+    // The "Not a git repo" empty state (design §12): "No repository here" + the Init button.
+    if norepo {
+        return norepo_dock(panel, text_origin, cols, &mut rows, theme);
+    }
 
     // Status bar: branch (diff.hunk), ahead/behind (muted), totals (diff.add/del), esc.
     write(&mut rows[0], 0, "main", theme.diff_hunk);
@@ -183,13 +200,8 @@ fn build_dock(
     let caret = Some(write_commit_band(&mut rows, content_rows, cols, theme));
 
     CaptureGitDock {
-        panel: PxRect {
-            x: panel_x,
-            y: 0.0,
-            w: dock_w,
-            h: height as f32,
-        },
-        text_origin: (panel_x + pad, pad),
+        panel,
+        text_origin,
         rows,
         selected_file_row: Some(file_start + selected),
         add_rows: kinds.add,
@@ -197,6 +209,37 @@ fn build_dock(
         hunk_rows: kinds.hunk,
         focused_hunk_row,
         caret,
+    }
+}
+
+/// The "Not a git repo" empty state (design §12): "No repository here" centered with the
+/// accent "Init repo" button one row below. Mirrors the binary's `gitdock` no-repo view.
+fn norepo_dock(
+    panel: PxRect,
+    text_origin: (f32, f32),
+    cols: usize,
+    rows: &mut [Vec<GridCell>],
+    theme: &Theme,
+) -> CaptureGitDock {
+    let mid = rows.len() / 2;
+    write_centered(&mut rows[mid], cols, "No repository here", theme.fg_muted);
+    let init_row = (mid + 1).min(rows.len() - 1);
+    write_centered(
+        &mut rows[init_row],
+        cols,
+        "Init repo  \u{21a9}",
+        theme.accent,
+    );
+    CaptureGitDock {
+        panel,
+        text_origin,
+        rows: rows.to_vec(),
+        selected_file_row: Some(init_row),
+        add_rows: Vec::new(),
+        del_rows: Vec::new(),
+        hunk_rows: Vec::new(),
+        focused_hunk_row: None,
+        caret: None,
     }
 }
 
@@ -324,6 +367,11 @@ fn write(row: &mut [GridCell], col: usize, text: &str, fg: Srgb) {
 
 fn write_right(row: &mut [GridCell], cols: usize, text: &str, fg: Srgb) {
     let start = cols.saturating_sub(text.chars().count() + 1);
+    write(row, start, text, fg);
+}
+
+fn write_centered(row: &mut [GridCell], cols: usize, text: &str, fg: Srgb) {
+    let start = cols.saturating_sub(text.chars().count()) / 2;
     write(row, start, text, fg);
 }
 

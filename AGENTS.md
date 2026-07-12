@@ -83,8 +83,15 @@ diverged from the file). The `sidebar` module now holds a `mode` (`Fixed`=full /
 rail share the same grid row layout, so `hit()`/`active_row` work unchanged for both. Surfaced in
 the palette ("Cycle sidebar mode"); the `pane_capture` example takes a `rail` arg for the PNG.
 Verified both themes + clean boot. (Follow-up: hover-to-expand the rail - the design's "hover to
-expand" - which needs a transient-expand state and mouse-region tracking.) The build target is
-native Rust, not the mockup HTML. See `ROADMAP.md`.
+expand" - which needs a transient-expand state and mouse-region tracking.) Also landed: the
+**not-a-git-repo Init button** (design §12 "Not a git repo"). The git dock's empty state now shows
+"No repository here" **+ an accent `Init repo ↩` button**; `Enter` in the no-repo state runs it.
+`skelly_session::Repo::init` shells `git init` in the process cwd then rediscovers (integration-
+tested); `init_repo` then calls `refresh_git` so the dock flips to the new empty repo. The button
+reuses the file-list `selected_file_row` accent-highlight quad (the empty state has no file list)
+and is keyboard-driven (dock mouse hit-testing is the same tracked follow-up as click-to-select-
+file). Verified by the `git_dock_capture` `norepo` arg PNG in both themes + a `gitdock` unit test.
+The build target is native Rust, not the mockup HTML. See `ROADMAP.md`.
 
 **Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
 workspace. Foundation crates are *proposed* in ADR-0001..0004 (terminal core
