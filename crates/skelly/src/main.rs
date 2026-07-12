@@ -228,10 +228,26 @@ struct App {
     pointer: (f64, f64),
     /// Whether a mouse-drag selection is in progress (in the active tab).
     selecting: bool,
-    /// The command palette's open animation (design §03 motion), live only while it plays.
-    /// While any animation is set the event loop polls + redraws each frame; it clears
-    /// itself when done, returning the loop to its idle `Wait`.
-    palette_anim: Option<motion::Anim>,
+    /// The command palette's open / close animation (design §03 motion), live only while it
+    /// plays. While any animation is set the event loop polls + redraws each frame; it clears
+    /// itself when done (finalizing the close), returning the loop to its idle `Wait`.
+    palette_anim: Option<PaletteAnim>,
+}
+
+/// The command palette's in-flight open or close animation. The panel tweens its vertical
+/// offset (logical px below its resting spot) from `from` to `to` along `curve` - the open
+/// *decelerates* up into place (rise -> 0), the close *accelerates* back down (0 -> fall).
+/// `from` is captured from the panel's *current* offset when the animation starts, so an
+/// open interrupted by a dismiss (or vice-versa) continues smoothly instead of jumping.
+/// `closing` marks the dismiss so [`animating`](App::animating) finalizes the close when it
+/// settles; the palette keeps rendering (but a keypress settles it shut at once) meanwhile.
+#[derive(Clone, Copy)]
+struct PaletteAnim {
+    anim: motion::Anim,
+    from: f32,
+    to: f32,
+    curve: motion::Bezier,
+    closing: bool,
 }
 
 impl App {
@@ -1382,8 +1398,7 @@ impl App {
         if self.modifiers.super_key() {
             if let Key::Character(ch) = key_event.logical_key.as_ref() {
                 if ch.eq_ignore_ascii_case("k") {
-                    self.palette.close();
-                    self.request_redraw();
+                    self.close_palette();
                     return;
                 }
                 if ch.eq_ignore_ascii_case("q") {
@@ -1393,10 +1408,13 @@ impl App {
             }
         }
         match key_event.logical_key.as_ref() {
-            Key::Named(NamedKey::Escape) => self.palette.close(),
+            // Dismiss (Esc / ⌘K) eases the palette out; running a command closes it instantly
+            // so the command's result (which may itself be an overlay) takes over at once.
+            Key::Named(NamedKey::Escape) => self.close_palette(),
             Key::Named(NamedKey::Enter) => {
                 let action = self.palette.selected_action();
                 self.palette.close();
+                self.palette_anim = None;
                 if let Some(action) = action {
                     self.run_palette_action(event_loop, action);
                 }
@@ -1814,6 +1832,13 @@ impl App {
             self.on_confirm_key(key_event);
             return;
         }
+        // A key during the palette's fade-out settles it shut at once, so this key is then
+        // routed as if the palette were already closed (no leak into it, no surface over it).
+        // A repeat dismiss (Esc / ⌘K) that only spent the fade is swallowed so it does not
+        // reach the shell; any other key (e.g. typing) routes on through to the pane.
+        if self.settle_palette_close() && is_palette_dismiss(key_event, self.modifiers) {
+            return;
+        }
         // The settings view, command palette, and git dock each capture input while open.
         if self.settings.open {
             self.on_settings_key(event_loop, key_event);
@@ -1844,10 +1869,7 @@ impl App {
         if self.modifiers.super_key() {
             if let Key::Character(ch) = key_event.logical_key.as_ref() {
                 if ch.eq_ignore_ascii_case("k") {
-                    self.palette.open();
-                    // Play the "enter" rise (design §03 motion); the loop polls until it settles.
-                    self.palette_anim = Some(motion::Anim::start(Instant::now(), motion::BASE));
-                    self.request_redraw();
+                    self.open_palette();
                     return;
                 }
                 if ch.eq_ignore_ascii_case("q") {
@@ -1970,6 +1992,11 @@ impl App {
     /// sidebar) or focuses a pane and starts a selection; a release ends the drag and
     /// clears a zero-width (click-only) selection.
     fn on_left_click(&mut self, state: ElementState) {
+        // A click during the palette's fade-out dismisses it (and is consumed) instead of
+        // falling through to the panes behind the still-visible palette.
+        if self.settle_palette_close() {
+            return;
+        }
         match state {
             ElementState::Pressed => {
                 if let Some(hit) = self.sidebar_hit() {
@@ -2009,6 +2036,11 @@ impl App {
 
     /// Scroll the scrollback of the pane under the pointer by a wheel `delta`.
     fn on_mouse_wheel(&mut self, delta: MouseScrollDelta) {
+        // A scroll during the palette's fade-out dismisses it rather than scrolling the pane
+        // behind the still-visible palette.
+        if self.settle_palette_close() {
+            return;
+        }
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => wheel_lines(f64::from(y)),
             MouseScrollDelta::PixelDelta(pos) => wheel_lines(pos.y / 20.0),
@@ -2304,16 +2336,78 @@ impl App {
         })
     }
 
-    /// Advance the animation clock: drop any animation that has finished (or whose surface
-    /// closed before it settled), then report whether one is still live - the signal the
-    /// event loop uses to keep polling + repainting versus falling back to idle `Wait`.
+    /// The palette panel's current vertical offset in *logical* px (below its resting spot),
+    /// or `None` when nothing is animating - used to start a new tween from where the panel
+    /// currently sits so open<->close interruptions are continuous.
+    fn palette_offset_logical(&self) -> Option<f32> {
+        self.palette_anim
+            .map(|_| palette_rise_offset(self.palette_anim, Instant::now(), 1.0))
+    }
+
+    /// Open the command palette with the "enter" rise (design §03 motion) - decelerating up
+    /// from `PALETTE_RISE` below rest (or wherever the panel currently sits) to `0`. The loop
+    /// polls until it settles.
+    fn open_palette(&mut self) {
+        let from = self.palette_offset_logical().unwrap_or(PALETTE_RISE);
+        self.palette.open();
+        self.palette_anim = Some(PaletteAnim {
+            anim: motion::Anim::start(Instant::now(), motion::BASE),
+            from,
+            to: 0.0,
+            curve: motion::DECELERATE,
+            closing: false,
+        });
+        self.request_redraw();
+    }
+
+    /// Begin dismissing the palette: the "exit" fall accelerates the panel from its current
+    /// offset down to `PALETTE_RISE`, keeping it rendered until [`animating`](Self::animating)
+    /// finalizes the actual close when it settles (or a keypress settles it shut first). A
+    /// no-op if the palette is closed or already animating out.
+    fn close_palette(&mut self) {
+        if self.palette.open && !self.palette_anim.is_some_and(|pa| pa.closing) {
+            let from = self.palette_offset_logical().unwrap_or(0.0);
+            self.palette_anim = Some(PaletteAnim {
+                anim: motion::Anim::start(Instant::now(), motion::BASE),
+                from,
+                to: PALETTE_RISE,
+                curve: motion::ACCELERATE,
+                closing: true,
+            });
+            self.request_redraw();
+        }
+    }
+
+    /// If the palette is mid-dismissal, settle it shut immediately and report `true` (so the
+    /// caller can consume the interrupting event). A key/click during the fade-out is then
+    /// handled as if the palette were already closed - nothing leaks into the still-visible
+    /// palette and no second surface layers over it. Requests a repaint so the dismissed
+    /// palette leaves the screen even when the interrupting event itself paints nothing.
+    fn settle_palette_close(&mut self) -> bool {
+        if self.palette_anim.is_some_and(|pa| pa.closing) {
+            self.palette.close();
+            self.palette_anim = None;
+            self.request_redraw();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Advance the animation clock: when the current animation finishes, drop it (finalizing
+    /// a close dismissal), then report whether one is still live - the signal the event loop
+    /// uses to keep polling + repainting versus falling back to idle `Wait`.
     fn animating(&mut self, now: Instant) -> bool {
-        if let Some(anim) = self.palette_anim {
-            if anim.done(now) || !self.palette.open {
+        if let Some(pa) = self.palette_anim {
+            if pa.anim.done(now) {
                 self.palette_anim = None;
-                // Paint one final frame at the settled position (offset 0), in case this
-                // last tick landed a hair before the resting frame was drawn. The queued
-                // redraw is delivered even under `Wait`, so no extra poll is needed.
+                if pa.closing {
+                    // The exit finished: actually dismiss the palette now.
+                    self.palette.close();
+                }
+                // Paint one final frame at the settled position, in case this last tick
+                // landed a hair before the resting frame was drawn. The queued redraw is
+                // delivered even under `Wait`, so no extra poll is needed.
                 self.request_redraw();
             }
         }
@@ -2437,18 +2531,28 @@ fn dim_f32(value: u32) -> f32 {
     value as f32
 }
 
-/// Logical px the command palette rises through as it opens (the design §03 "enter" motion).
+/// Logical px the command palette travels through as it opens or closes (design §03 motion).
 const PALETTE_RISE: f32 = 10.0;
 
-/// The command palette's current vertical offset (physical px) for its open animation: it
-/// starts `PALETTE_RISE` logical px below its resting position and decelerates up to `0`.
+/// The command palette's current vertical offset (physical px) for its open / close
+/// animation: the panel's `from`->`to` tween eased along its curve, in logical px, scaled.
 /// Returns `0.0` when no animation is playing (the resting palette). Pure, so the eased
-/// curve is unit-testable without an `App`.
-fn palette_rise_offset(anim: Option<motion::Anim>, now: Instant, scale: f32) -> f32 {
-    anim.map_or(0.0, |a| {
-        let eased = motion::DECELERATE.ease(a.progress(now));
-        (1.0 - eased) * PALETTE_RISE * scale
+/// curves are unit-testable without an `App`.
+fn palette_rise_offset(anim: Option<PaletteAnim>, now: Instant, scale: f32) -> f32 {
+    anim.map_or(0.0, |pa| {
+        let eased = pa.curve.ease(pa.anim.progress(now));
+        (pa.from + (pa.to - pa.from) * eased) * scale
     })
+}
+
+/// Whether `key_event` (with `mods`) is a palette-dismiss gesture - `Esc` or `⌘K`. A repeat
+/// of one that only settled the fading palette is swallowed rather than routed to the shell.
+fn is_palette_dismiss(key_event: &KeyEvent, mods: ModifiersState) -> bool {
+    match key_event.logical_key.as_ref() {
+        Key::Named(NamedKey::Escape) => true,
+        Key::Character(c) => mods.super_key() && c.eq_ignore_ascii_case("k"),
+        _ => false,
+    }
 }
 
 /// The empty-state brand watermark's square bounding box for a pristine pane: a
@@ -2763,24 +2867,47 @@ mod tests {
     }
 
     #[test]
-    fn palette_rise_offset_decelerates_from_the_rise_to_zero() {
-        use crate::motion;
-        use std::time::Instant;
-        // No animation playing: the palette rests, no offset.
-        assert!(palette_rise_offset(None, Instant::now(), 2.0).abs() < 1e-3);
-        // A fresh open starts a full PALETTE_RISE (logical) below rest; at scale 2 => 20px.
+    fn palette_rise_offset_tweens_from_to_along_the_curve() {
+        use crate::{motion, PaletteAnim};
+        use std::time::{Duration, Instant};
         let t0 = Instant::now();
-        let anim = motion::Anim::start(t0, motion::BASE);
-        let start = palette_rise_offset(Some(anim), t0, 2.0);
+        let tween = |from: f32, to: f32, curve, dt| {
+            palette_rise_offset(
+                Some(PaletteAnim {
+                    anim: motion::Anim::start(t0, motion::BASE),
+                    from,
+                    to,
+                    curve,
+                    closing: false,
+                }),
+                t0 + dt,
+                2.0,
+            )
+        };
+        let full = super::PALETTE_RISE * 2.0; // the rise at scale 2 (20px).
+                                              // No animation playing: the palette rests, no offset.
+        assert!(palette_rise_offset(None, Instant::now(), 2.0).abs() < 1e-3);
+        // Open: decelerate from a full rise down to rest.
+        let open = |dt| tween(super::PALETTE_RISE, 0.0, motion::DECELERATE, dt);
         assert!(
-            (start - super::PALETTE_RISE * 2.0).abs() < 1e-3,
-            "starts lifted by the rise"
+            (open(Duration::ZERO) - full).abs() < 1e-3,
+            "open starts lifted"
         );
-        // It only shrinks toward 0 and reaches rest by the end (decelerate is monotonic).
-        let mid = palette_rise_offset(Some(anim), t0 + motion::BASE / 2, 2.0);
-        let end = palette_rise_offset(Some(anim), t0 + motion::BASE, 2.0);
-        assert!(mid < start, "offset shrinks as it opens");
-        assert!(end.abs() < 1e-3, "settles to rest");
+        assert!(
+            open(motion::BASE / 2) < open(Duration::ZERO),
+            "open eases down"
+        );
+        assert!(open(motion::BASE).abs() < 1e-3, "open reaches rest");
+        // Close: accelerate from rest down to the full fall offset.
+        let close = |dt| tween(0.0, super::PALETTE_RISE, motion::ACCELERATE, dt);
+        assert!(close(Duration::ZERO).abs() < 1e-3, "close starts at rest");
+        assert!(
+            (close(motion::BASE) - full).abs() < 1e-3,
+            "close falls away"
+        );
+        // An interrupt tween starts from the panel's current offset (no jump): from 5 logical
+        // px (10px at scale 2) it begins exactly there.
+        assert!((tween(5.0, 0.0, motion::DECELERATE, Duration::ZERO) - 10.0).abs() < 1e-3);
     }
 
     #[test]
