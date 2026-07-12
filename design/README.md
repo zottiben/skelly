@@ -55,6 +55,24 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-12 - **Empty state + never-quit close cascade (M5 edge states "Close last
+  pane" + guide §10.2).** Two settled behaviors. **(1) Close cascade:** closing the only
+  pane in a tab (`⌥w`) closes the whole tab; closing the only tab does **not** quit the app
+  - it resets that tab to a fresh, pristine one (the old tab drops, so its shells are
+  killed) and shows the empty state. So the window always holds >=1 tab. **(2) Empty
+  state:** a fresh tab (no command run yet, single pane) paints a faint `skelly` wordmark +
+  three hint chips (`⌘K palette`, `⌘T new tab`, `⌥| split`, each a subtle `bg.elevated`
+  pill) centered over its blank terminal, in UI tokens (Hard rule 2). It shows on launch
+  and on every new/reset tab, and clears the first time the user runs a command (submits
+  with Enter) or splits - a per-tab `activated` flag. Decided here (the guide's §10.2 is a
+  static mockup): the mark is a **wordmark** (the bespoke big-logo waits on the fixed-metric
+  cell renderer, like the other Nerd-glyph placeholders); the content is **baked into the
+  pane grid** rather than a separate render layer (a fresh grid is blank, so it rides the
+  existing pane text + background passes with no new render path); and the clear is an
+  **instant hide, not an animated fade** (no animation loop yet - a follow-up). The chips'
+  keys use this app's real chords (`⌥|` split, not the guide's leader). _(was: the guide
+  specifies the empty state + close-last-pane/tab edge cases but not the mechanism, the
+  freshness trigger, or how they map onto this app's tab/pane model.)_
 - 2026-07-12 - **Shell-exit overlay (M5 edge state "Shell exits / crashes").** When a
   pane's shell ends (`exit`, Ctrl-D, a kill, or a crash), the pane does **not** silently
   die: `skelly-term` reports the exit (its reader thread reaps the child and records an

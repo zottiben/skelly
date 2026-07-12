@@ -11,6 +11,7 @@
 //! never leak up.
 
 mod deadpane;
+mod emptystate;
 mod gitdock;
 mod palette;
 mod settings;
@@ -144,17 +145,29 @@ struct Tab {
     dims: HashMap<PaneId, (u16, u16)>,
     /// The active selection and the pane it belongs to.
     selection: Option<(PaneId, Selection)>,
+    /// Whether the user has started using this tab yet. A fresh tab is pristine
+    /// (`false`) and shows the empty-state overlay (a faint mark + hint chips); the first
+    /// command run (or a split) activates it and the overlay clears (guide §10.2).
+    activated: bool,
 }
 
 impl Tab {
-    /// A fresh tab: a single-pane tree with no shells yet (`sync_layout` spawns them).
+    /// A fresh tab: a single-pane tree with no shells yet (`sync_layout` spawns them),
+    /// pristine so it shows the empty state until the first command runs.
     fn new() -> Self {
         Self {
             tree: PaneTree::new(),
             panes: HashMap::new(),
             dims: HashMap::new(),
             selection: None,
+            activated: false,
         }
+    }
+
+    /// Whether this tab should show the empty-state overlay: pristine (no command run yet)
+    /// and still a single pane (a split means the user is working, so it clears).
+    fn is_empty_state(&self) -> bool {
+        !self.activated && self.tree.count() == 1
     }
 }
 
@@ -393,12 +406,15 @@ impl App {
         let viewport = self.viewport_rect();
         let ws = self.active_tab();
         let focused = ws.tree.focused();
+        // A pristine single-pane tab paints the empty-state mark + hint chips over its
+        // (blank) grid, until the first command runs.
+        let empty_state = ws.is_empty_state();
         ws.tree
             .layout(viewport)
             .into_iter()
             .filter_map(|(id, rect)| {
                 let term = ws.panes.get(&id)?;
-                let rows: Vec<Vec<GridCell>> = term
+                let mut rows: Vec<Vec<GridCell>> = term
                     .cells()
                     .iter()
                     .map(|row| {
@@ -407,6 +423,9 @@ impl App {
                             .collect()
                     })
                     .collect();
+                if empty_state && term.exit_status().is_none() {
+                    emptystate::overlay_onto(&mut rows, &self.theme);
+                }
                 let cols = rows.first().map_or(0, Vec::len);
                 let selection = match ws.selection {
                     Some((sid, sel)) if sid == id => selection_cells(sel, rows.len(), cols),
@@ -1017,6 +1036,12 @@ impl App {
 
     /// Apply a pane-tree operation, then reconcile terminals and request a repaint.
     fn apply_pane_action(&mut self, action: PaneAction) {
+        // Closing the only pane closes the whole tab (design edge state "Close last pane":
+        // the only pane closing closes the tab; the only tab closing shows the empty state).
+        if matches!(action, PaneAction::Close) && self.active_tab().tree.count() == 1 {
+            self.close_tab();
+            return;
+        }
         let cap = usize::from(self.config.panes.max).min(skelly_pane::MAX_PANES);
         let ws = self.active_tab_mut();
         let changed = match action {
@@ -1039,7 +1064,9 @@ impl App {
             }
         };
         if changed {
-            self.active_tab_mut().selection = None;
+            let ws = self.active_tab_mut();
+            ws.selection = None;
+            ws.activated = true; // operating on panes means the tab is in use; clear its empty state
             self.sync_layout();
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
@@ -1087,18 +1114,22 @@ impl App {
         self.request_redraw();
     }
 
-    /// Close the active tab, dropping its shells (each dropped `Terminal` SIGHUPs its
-    /// shell). Keeps at least one tab open - the guide's "closing the last tab shows the
-    /// empty state" is a later slice, so for now the final tab stays put.
+    /// Close the active tab, dropping its shells (each dropped `Terminal` kills its shell).
+    /// Closing the **last** tab does not quit (design edge state): it resets to a fresh
+    /// empty tab that shows the empty state, so the window always holds at least one tab.
     fn close_tab(&mut self) {
         let count = self.tabs.len();
         if count <= 1 {
-            return;
+            // Never quit: replace the only tab with a pristine one (the old tab drops, so
+            // its shells are killed) and show the empty state.
+            self.tabs[self.active] = Tab::new();
+        } else {
+            self.tabs.remove(self.active);
+            self.active = index_after_close(self.active, count);
         }
-        self.tabs.remove(self.active);
-        self.active = index_after_close(self.active, count);
         self.selecting = false;
-        // The now-visible tab may have been sized for an earlier window; re-fit it.
+        // Re-fit the now-visible tab (it may have been sized for an earlier window) and
+        // spawn the fresh tab's shell.
         self.sync_layout();
         self.request_redraw();
     }
@@ -1657,11 +1688,19 @@ impl App {
                 _ => {}
             }
         }
+        self.forward_key_to_focused(key_event);
+    }
+
+    /// Route a plain key to the focused pane's shell (the fall-through after every chord).
+    /// A dead pane instead restarts on Enter and swallows the rest; a live pane forwards
+    /// the bytes, and submitting a command (Enter) retires the tab's empty state.
+    fn forward_key_to_focused(&mut self, key_event: &KeyEvent) {
+        let is_enter = matches!(key_event.logical_key.as_ref(), Key::Named(NamedKey::Enter));
         // A focused pane whose shell has exited shows the "shell exited" overlay: Enter
         // restarts the shell, and every other key is swallowed (there is no shell to send
         // it to). Pane/tab/app chords were already handled above, so they still work.
         if self.focused_pane_dead() {
-            if matches!(key_event.logical_key.as_ref(), Key::Named(NamedKey::Enter)) {
+            if is_enter {
                 self.restart_focused_pane();
             }
             return;
@@ -1672,7 +1711,13 @@ impl App {
                 term.scroll_to_bottom();
                 term.write(&bytes);
             }
-            self.active_tab_mut().selection = None; // typing clears the selection
+            let ws = self.active_tab_mut();
+            ws.selection = None; // typing clears the selection
+                                 // Running a command (submitting with Enter) retires the empty state (§10.2:
+                                 // "chips fade the first time the user runs a command").
+            if is_enter {
+                ws.activated = true;
+            }
         }
     }
 

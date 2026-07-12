@@ -66,8 +66,14 @@ preserved scrollback + a centered `shell exited` / exit-code-or-signal / `↵ re
 message (a 6th `ChromeLayer`, `set_pane_overlays`, above the terminal text but beneath the
 docks/overlays). `↵` respawns the shell in place (drop the exited `Terminal`, `sync_layout`
 respawns); a focused dead pane swallows other input. Pure `deadpane` module (unit-tested), an e2e
-exit-detection test, and a `dead_pane_capture` PNG (both themes). The build target is native Rust,
-not the mockup HTML. See `ROADMAP.md`.
+exit-detection test, and a `dead_pane_capture` PNG (both themes). Also landed: the **empty state +
+never-quit close cascade** (design §10.2 + edge "Close last pane"): closing the only pane closes
+the tab, and closing the only tab RESETS it to a fresh tab instead of quitting (`close_tab`; the
+old tab drops so its shells are killed). A pristine single-pane tab (`Tab::activated` false) paints
+a faint `skelly` wordmark + hint chips (`⌘K`/`⌘T`/`⌥|`, `bg.elevated` pills) centered over its
+blank grid via the pure `emptystate` module (baked into the pane grid, no new render layer),
+cleared on the first command (Enter) or split. Unit-tested + `empty_state_capture` PNG (both
+themes). The build target is native Rust, not the mockup HTML. See `ROADMAP.md`.
 
 **Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
 workspace. Foundation crates are *proposed* in ADR-0001..0004 (terminal core
