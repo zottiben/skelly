@@ -177,6 +177,18 @@ impl Tab {
     }
 }
 
+/// A workspace: a named, isolated tab set (design §08 #2 - "Each isolates tabs, cwd & theme").
+/// The *active* workspace's tabs live in `App.tabs`/`active`; the others are stashed here (their
+/// shells keep running in the background), swapped in on switch. Theme/cwd isolation are
+/// follow-ups; today a workspace isolates its tabs.
+struct Workspace {
+    /// The display name; its first letter is the sidebar chip glyph.
+    name: String,
+    /// The stashed `(tabs, active)` for an *inactive* workspace; `None` while it is active
+    /// (its tabs are live in `App.tabs`/`active`).
+    stash: Option<(Vec<Tab>, usize)>,
+}
+
 /// Application state driven by the winit event loop. The window and renderer are
 /// `None` until the platform signals `resumed`; the tab list exists from the start.
 struct App {
@@ -222,10 +234,16 @@ struct App {
     clipboard: Option<arboard::Clipboard>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
-    /// The open tabs; `active` indexes the visible one. Always at least one.
+    /// The open tabs of the *active workspace*; `active` indexes the visible one. Always at
+    /// least one.
     tabs: Vec<Tab>,
     /// Index of the visible tab in `tabs`.
     active: usize,
+    /// The workspaces (design §08 #2). The active one's tabs live in `tabs`/`active` above; the
+    /// others are stashed in their `Workspace`. Always at least one.
+    workspaces: Vec<Workspace>,
+    /// Index of the active workspace in `workspaces`.
+    active_workspace: usize,
     /// Current surface size in physical px.
     size: (u32, u32),
     scale: f64,
@@ -289,6 +307,11 @@ impl App {
             renderer: None,
             tabs: vec![Tab::new()],
             active: 0,
+            workspaces: vec![Workspace {
+                name: "Personal".to_owned(),
+                stash: None,
+            }],
+            active_workspace: 0,
             size: (0, 0),
             scale: 1.0,
             modifiers: ModifiersState::empty(),
@@ -742,28 +765,33 @@ impl App {
     /// Lay out the left sidebar (design §08): a full-height panel of `sidebar.width` (or
     /// the 56px rail), its tab list built as a proportional display list in the guide's
     /// fonts + UI tokens and clipped to the panel.
+    /// The workspace chip glyphs (each workspace's name's first letter, uppercased).
+    fn workspace_chips(&self) -> Vec<char> {
+        self.workspaces
+            .iter()
+            .map(|w| w.name.chars().next().unwrap_or('?').to_ascii_uppercase())
+            .collect()
+    }
+
     fn build_sidebar_frame(&mut self) -> sidebar::Paint {
-        let rail = self.sidebar.is_rail();
         let scale = scale32(self.scale);
         // The sidebar bg fills the whole column (traffic lights sit on it); its content clears
         // the control strip via `top_inset` (logical px, macOS only).
-        let top_inset = self.content_top() / scale;
+        let view = sidebar::View {
+            tab_count: self.tabs.len(),
+            active_tab: self.active,
+            chips: &self.workspace_chips(),
+            active_chip: self.active_workspace,
+            rail: self.sidebar.is_rail(),
+            top_inset: self.content_top() / scale,
+        };
         let panel = PxRect {
             x: 0.0,
             y: 0.0,
             w: self.sidebar_width_px(),
             h: dim_f32(self.size.1),
         };
-        sidebar::build(
-            self.tabs.len(),
-            self.active,
-            panel,
-            rail,
-            top_inset,
-            scale,
-            &self.theme,
-            &mut self.measure,
-        )
+        sidebar::build(&view, panel, scale, &self.theme, &mut self.measure)
     }
 
     /// Lay out the settings view: a full-window panel, its nav + control grid rendered
@@ -1104,23 +1132,21 @@ impl App {
             return None;
         }
         let scale = scale32(self.scale);
-        let top_inset = self.content_top() / scale;
+        let view = sidebar::View {
+            tab_count: self.tabs.len(),
+            active_tab: self.active,
+            chips: &self.workspace_chips(),
+            active_chip: self.active_workspace,
+            rail: self.sidebar.is_rail(),
+            top_inset: self.content_top() / scale,
+        };
         let panel = PxRect {
             x: 0.0,
             y: 0.0,
             w: self.sidebar_width_px(),
             h: dim_f32(self.size.1),
         };
-        sidebar::hit(
-            self.tabs.len(),
-            self.active,
-            panel,
-            self.sidebar.is_rail(),
-            top_inset,
-            scale,
-            px,
-            py,
-        )
+        sidebar::hit(&view, panel, scale, px, py)
     }
 
     /// Run a sidebar utility-bar toggle (design §08 #7). Each is a second entry point to an
@@ -1392,6 +1418,49 @@ impl App {
             self.sync_layout();
             self.request_redraw();
         }
+    }
+
+    /// Stash the active workspace's tab set (its shells keep running) so another can swap in.
+    fn stash_active_workspace(&mut self) {
+        let tabs = std::mem::take(&mut self.tabs);
+        self.workspaces[self.active_workspace].stash = Some((tabs, self.active));
+    }
+
+    /// Switch to workspace `index` (design §08 #2): stash the active workspace's tabs, swap in
+    /// the target's, and re-fit its shells to the current viewport. A no-op for the active one.
+    fn switch_workspace(&mut self, index: usize) {
+        if index == self.active_workspace || index >= self.workspaces.len() {
+            return;
+        }
+        self.stash_active_workspace();
+        let (tabs, active) = self.workspaces[index]
+            .stash
+            .take()
+            .unwrap_or_else(|| (vec![Tab::new()], 0));
+        self.tabs = tabs;
+        self.active = active;
+        self.active_workspace = index;
+        self.selecting = false;
+        self.sync_layout(); // re-fit the swapped-in shells to the viewport
+        self.request_redraw();
+    }
+
+    /// Add a new workspace (the `+` chip) with a fresh single tab, and switch to it.
+    fn add_workspace(&mut self) {
+        self.stash_active_workspace();
+        // The first two get the guide's "Personal"/"Work" names (chips P / W); the rest are
+        // numbered.
+        let name = match self.workspaces.len() {
+            1 => "Work".to_owned(),
+            n => format!("Space {}", n + 1),
+        };
+        self.workspaces.push(Workspace { name, stash: None });
+        self.tabs = vec![Tab::new()];
+        self.active = 0;
+        self.active_workspace = self.workspaces.len() - 1;
+        self.selecting = false;
+        self.sync_layout();
+        self.request_redraw();
     }
 
     /// Dispatch a decoded tab chord to its handler.
@@ -2032,6 +2101,8 @@ impl App {
             ElementState::Pressed => {
                 if let Some(hit) = self.sidebar_hit() {
                     match hit {
+                        sidebar::Hit::Workspace(index) => self.switch_workspace(index),
+                        sidebar::Hit::AddWorkspace => self.add_workspace(),
                         sidebar::Hit::CommandInput => self.open_palette(),
                         sidebar::Hit::Tab(index) => self.goto_tab(index),
                         sidebar::Hit::NewTab => self.new_tab(),

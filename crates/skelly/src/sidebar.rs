@@ -9,11 +9,11 @@
 //! Two display modes (design §08 "Sidebar modes"): the full-width panel listing tabs
 //! (active highlighted) with a "+ New tab" action, and the slim 56px icon rail with
 //! compact centered tab numbers. `⌘B` shows/hides; `⇧⌘B` cycles full <-> rail. The
-//! chosen mode persists to `config.sidebar.mode` (Hard rule 1). The command-input well (§08 #3,
-//! which opens the palette) at the top and the bottom-anchored utility bar (§08 #7 - the ⚙
-//! settings / ◐ theme / ⟲ timeline / ⑂ git toggles) are built here too. Deferred to later
-//! slices: the workspace switcher, pinned grid, and collapsible groups; per-tab cwd/branch
-//! titling (tabs are numbered today).
+//! chosen mode persists to `config.sidebar.mode` (Hard rule 1). Also built here: the workspace
+//! switcher chips (§08 #2) at the top, the command-input well (§08 #3, opens the palette), and
+//! the bottom-anchored utility bar (§08 #7 - the ⚙ settings / ◐ theme / ⟲ timeline / ⑂ git
+//! toggles). Deferred to later slices: the pinned grid and collapsible groups; per-tab
+//! cwd/branch titling (tabs are numbered today).
 
 use skelly_config::SidebarMode;
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
@@ -22,6 +22,13 @@ use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure,
 /// the guide's §08 sidebar: a compact group header, comfortable 13px `label` tab rows, and
 /// a matching "+ New tab" action.
 const PAD_TOP: f32 = 10.0;
+/// Workspace-switcher chips (design §08 #2): 26px rounded tiles, `gap:7px`, inset `13px`.
+const CHIP_SIZE: f32 = 26.0;
+const CHIP_GAP: f32 = 7.0;
+const CHIP_RADIUS: f32 = 7.0;
+const CHIP_INSET: f32 = 13.0;
+/// Gap below the workspace-chip row before the command well (the guide's `padding: … 10px`).
+const CHIP_BLOCK_GAP: f32 = 10.0;
 /// Height of the command-input well (design §08 #3), matching the guide's 30px search field.
 const CMD_H: f32 = 30.0;
 /// Gap below the command well before the tab list (the guide's `padding: … 12px`).
@@ -64,6 +71,10 @@ const PILL_RADIUS: f32 = 6.0;
 /// What a click on a sidebar row targets.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Hit {
+    /// Switch to the workspace at this 0-based index (a chip, design §08 #2).
+    Workspace(usize),
+    /// Add a new workspace (the `+` chip).
+    AddWorkspace,
     /// Open the command palette (the command-input well, design §08 #3).
     CommandInput,
     /// Switch to the tab at this 0-based index.
@@ -72,6 +83,24 @@ pub(crate) enum Hit {
     NewTab,
     /// Trigger a utility-bar toggle (design §08 #7).
     Util(UtilAction),
+}
+
+/// The inputs the sidebar lays out from: the tab list, the workspace chips, the display mode,
+/// and the control-strip inset. Bundled so [`build`] + [`hit`] share one shape as the sidebar
+/// grows (chips now; pinned grid + groups later).
+pub(crate) struct View<'a> {
+    /// Number of tabs in the active workspace.
+    pub(crate) tab_count: usize,
+    /// Index of the active tab.
+    pub(crate) active_tab: usize,
+    /// One chip glyph per workspace (its name's first letter); a trailing `+` is always added.
+    pub(crate) chips: &'a [char],
+    /// Index of the active workspace (highlighted chip).
+    pub(crate) active_chip: usize,
+    /// Whether the sidebar is the slim icon rail.
+    pub(crate) rail: bool,
+    /// The macOS control-strip inset in **logical** px (0 elsewhere); content clears it.
+    pub(crate) top_inset: f32,
 }
 
 /// A utility-bar icon's action (design §08 #7: "Settings, theme, session timeline, git diff
@@ -267,37 +296,35 @@ fn rows_layout(count: usize, active: usize, panel_h: f32, top_inset: f32) -> Vec
     rows
 }
 
-/// Map a click at physical `(px, py)` (relative to the surface top-left) to a sidebar
-/// action, for `count` tabs with `active` selected filling `panel` (physical px) at DPI
-/// `scale`. The bottom-anchored utility bar is tested first (its icon under `px`), then the
-/// tab rows + new-tab action; the header, spacers, and overflow indicators map to nothing.
-/// Shares [`rows_layout`] + [`utility_slots`] with [`build`] so a click lands on exactly the
-/// row/icon drawn there, scroll offset included.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the pure sidebar hit-test geometry"
-)]
-pub(crate) fn hit(
-    count: usize,
-    active: usize,
-    panel: PxRect,
-    rail: bool,
-    top_inset: f32,
-    scale: f32,
-    px: f32,
-    py: f32,
-) -> Option<Hit> {
-    // The utility bar occupies the bottom `UTIL_H` band (full panel only); find the icon whose
-    // slot holds `px`.
+/// Map a click at physical `(px, py)` (relative to the surface top-left) to a sidebar action
+/// for `view`, filling `panel` (physical px) at DPI `scale`. The workspace chips are tested
+/// first, then the bottom utility bar (full panel), then the tab rows + new-tab action; the
+/// command well; the spacers/overflow indicators map to nothing. Shares [`rows_layout`] +
+/// [`utility_slots`] + [`chip_slots`] with [`build`] so a click lands on exactly what is drawn.
+pub(crate) fn hit(view: &View, panel: PxRect, scale: f32, px: f32, py: f32) -> Option<Hit> {
+    // Workspace chips (full panel only).
+    if !view.rail {
+        for (i, slot) in chip_slots(view, panel, scale).into_iter().enumerate() {
+            if px >= slot.x && px < slot.x + slot.w && py >= slot.y && py < slot.y + slot.h {
+                return Some(if i < view.chips.len() {
+                    Hit::Workspace(i)
+                } else {
+                    Hit::AddWorkspace
+                });
+            }
+        }
+    }
+    // The utility bar occupies the bottom `UTIL_H` band (full panel only).
     let util_top = panel.y + panel.h - UTIL_H * scale;
-    if !rail && py >= util_top {
+    if !view.rail && py >= util_top {
         return utility_slots(panel, scale)
             .into_iter()
             .find(|(_, slot)| px >= slot.x && px < slot.x + slot.w)
             .map(|(action, _)| Hit::Util(action));
     }
+    let top_inset = view.top_inset + chips_block_h(view);
     let y_logical = (py - panel.y) / scale;
-    for row in rows_layout(count, active, panel.h / scale, top_inset) {
+    for row in rows_layout(view.tab_count, view.active_tab, panel.h / scale, top_inset) {
         if y_logical >= row.top && y_logical < row.top + row.height {
             return match row.kind {
                 RowKind::Command => Some(Hit::CommandInput),
@@ -348,21 +375,13 @@ pub(crate) struct Paint {
     pub(crate) labels: Vec<ProseLabel>,
 }
 
-/// Build the sidebar's display list for `count` tabs with `active` selected, filling
-/// `panel` (physical px) at DPI `scale`, in the guide's fonts + `theme` tokens. `rail`
-/// picks the slim 56px icon rail (a brand mark, centered tab numbers, a centered `+`) over
-/// the full panel; both share [`rows_layout`] so [`hit`] stays valid. `measure` is used for
-/// horizontal placement (centering rail glyphs).
-#[allow(
-    clippy::too_many_arguments,
-    reason = "the pure sidebar display-list builder"
-)]
+/// Build the sidebar's display list for `view`, filling `panel` (physical px) at DPI `scale`,
+/// in the guide's fonts + `theme` tokens. The full panel shows workspace chips, the command
+/// well, the tab list, and the utility bar; the slim rail shows compact tab numbers. Shares
+/// [`rows_layout`] with [`hit`] so clicks land on exactly what is drawn.
 pub(crate) fn build(
-    count: usize,
-    active: usize,
+    view: &View,
     panel: PxRect,
-    rail: bool,
-    top_inset: f32,
     scale: f32,
     theme: &Theme,
     measure: &mut TextMeasure,
@@ -370,20 +389,31 @@ pub(crate) fn build(
     let mut quads = vec![ChromeQuad::fill(panel, theme.bg_sidebar)];
     let mut labels = Vec::new();
 
+    // The workspace chips sit below the control strip; the tab flow starts below them.
+    let chips_block = chips_block_h(view);
+    if !view.rail {
+        push_chips(&mut quads, &mut labels, view, panel, scale, theme, measure);
+    }
+
     let ctx = RowCtx {
         panel,
-        active,
-        rail,
+        active: view.active_tab,
+        rail: view.rail,
         scale,
         theme,
     };
-    for row in rows_layout(count, active, panel.h / scale, top_inset) {
+    for row in rows_layout(
+        view.tab_count,
+        view.active_tab,
+        panel.h / scale,
+        view.top_inset + chips_block,
+    ) {
         push_row(&mut quads, &mut labels, row, &ctx, measure);
     }
 
     // The bottom-anchored utility bar (design §08 #7) - full panel only; the slim rail has no
     // room for it (its actions stay reachable via keys / the palette).
-    if !rail {
+    if !view.rail {
         push_utility_bar(&mut quads, &mut labels, panel, scale, theme, measure);
     }
 
@@ -567,6 +597,93 @@ fn push_command_well(
     }
 }
 
+/// The logical height the workspace-chip block occupies above the command well (its 26px row
+/// plus the gap), or 0 when there are no chips or in the rail.
+fn chips_block_h(view: &View) -> f32 {
+    if view.rail || view.chips.is_empty() {
+        0.0
+    } else {
+        CHIP_SIZE + CHIP_BLOCK_GAP
+    }
+}
+
+/// The workspace chips' hit/draw rectangles (physical px): one 26px tile per workspace plus a
+/// trailing `+` tile, left-clustered from `CHIP_INSET` with a `CHIP_GAP` between them, just
+/// below the control strip. Shared by [`hit`] and [`push_chips`].
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the chip index is a tiny count (workspaces are few)"
+)]
+fn chip_slots(view: &View, panel: PxRect, scale: f32) -> Vec<PxRect> {
+    if view.chips.is_empty() {
+        return Vec::new();
+    }
+    let y = panel.y + (view.top_inset + PAD_TOP) * scale;
+    let size = CHIP_SIZE * scale;
+    let step = (CHIP_SIZE + CHIP_GAP) * scale;
+    let x0 = panel.x + CHIP_INSET * scale;
+    (0..=view.chips.len())
+        .map(|i| PxRect {
+            x: x0 + i as f32 * step,
+            y,
+            w: size,
+            h: size,
+        })
+        .collect()
+}
+
+/// The workspace-switcher chips (design §08 #2): a rounded tile per workspace (the active one
+/// `accent`@0.16 filled + `accent`@0.4 bordered, its glyph in `accent`; the rest `bg.surface`
+/// with a `fg.muted` glyph) plus a trailing `+` tile. Full panel only.
+fn push_chips(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    view: &View,
+    panel: PxRect,
+    scale: f32,
+    theme: &Theme,
+    measure: &mut TextMeasure,
+) {
+    let slots = chip_slots(view, panel, scale);
+    let radius = CHIP_RADIUS * scale;
+    let stroke = scale.max(1.0);
+    let line = measure.line_height(FontRole::Mono);
+    for (i, slot) in slots.iter().enumerate() {
+        let is_add = i >= view.chips.len();
+        let active = !is_add && i == view.active_chip;
+        if active {
+            // accent@0.4 border ring, interior reset to the sidebar bg, then accent@0.16 fill.
+            quads.push(ChromeQuad::tint(*slot, theme.accent, 0.4, radius));
+            let inner = PxRect {
+                x: slot.x + stroke,
+                y: slot.y + stroke,
+                w: (slot.w - 2.0 * stroke).max(0.0),
+                h: (slot.h - 2.0 * stroke).max(0.0),
+            };
+            let inner_r = (radius - stroke).max(0.0);
+            quads.push(ChromeQuad::rounded(inner, theme.bg_sidebar, inner_r));
+            quads.push(ChromeQuad::tint(inner, theme.accent, 0.16, inner_r));
+        } else {
+            quads.push(ChromeQuad::rounded(*slot, theme.bg_surface, radius));
+        }
+        let glyph = if is_add {
+            "+".to_owned()
+        } else {
+            view.chips[i].to_string()
+        };
+        let gw = measure.width(&glyph, FontRole::Mono, None);
+        labels.push(ProseLabel {
+            text: glyph,
+            x: slot.x + (slot.w - gw) * 0.5,
+            y: slot.y + (slot.h - line) * 0.5,
+            role: FontRole::Mono,
+            color: if active { theme.accent } else { theme.fg_muted },
+            weight: None,
+            max_w: f32::MAX,
+        });
+    }
+}
+
 /// The active tab's marks, per the §09 "Sidebar tab item": a rounded pill inset from the
 /// sidebar edges with an `accent`@0.14 fill and a 1px `accent`@0.28 border, plus a short 3x14
 /// rounded `accent` indicator bar seated inside the pill's left padding (not a full-height rule
@@ -692,7 +809,7 @@ fn push_label(
 
 #[cfg(test)]
 mod tests {
-    use super::{build, hit, Hit, Sidebar, UtilAction, UTIL_ICONS};
+    use super::{build, hit, Hit, Sidebar, UtilAction, View, UTIL_ICONS};
     use skelly_config::SidebarMode;
     use skelly_render::{PxRect, TextMeasure, Theme};
 
@@ -703,6 +820,19 @@ mod tests {
             y: 0.0,
             w: 240.0 * 2.0,
             h: 800.0 * 2.0,
+        }
+    }
+
+    /// A view with the given tab count / active tab / rail flag, no workspace chips (so the
+    /// existing tab-geometry tests are unaffected) and no control-strip inset.
+    fn view(count: usize, active: usize, rail: bool) -> View<'static> {
+        View {
+            tab_count: count,
+            active_tab: active,
+            chips: &[],
+            active_chip: 0,
+            rail,
+            top_inset: 0.0,
         }
     }
 
@@ -757,19 +887,19 @@ mod tests {
         let x = 20.0 * 2.0;
         // A y inside the command well (PAD_TOP 10 .. 40) opens the palette.
         assert_eq!(
-            hit(3, 0, p, false, 0.0, 2.0, x, 20.0 * 2.0),
+            hit(&view(3, 0, false), p, 2.0, x, 20.0 * 2.0),
             Some(Hit::CommandInput)
         );
         // The gap below the well (40 .. 52) maps to nothing.
-        assert_eq!(hit(3, 0, p, false, 0.0, 2.0, x, 46.0 * 2.0), None);
+        assert_eq!(hit(&view(3, 0, false), p, 2.0, x, 46.0 * 2.0), None);
         // The first tab band sits below the well + gap + overflow slot: PAD_TOP(10) + CMD_H(30)
         // + CMD_GAP(12) + IND_H(16) = 68 logical, first tab (TAB_H 30) spans 68..98; 82 is inside.
         assert_eq!(
-            hit(3, 0, p, false, 0.0, 2.0, x, 82.0 * 2.0),
+            hit(&view(3, 0, false), p, 2.0, x, 82.0 * 2.0),
             Some(Hit::Tab(0))
         );
         assert_eq!(
-            hit(3, 0, p, false, 0.0, 2.0, x, (82.0 + 28.0) * 2.0),
+            hit(&view(3, 0, false), p, 2.0, x, (82.0 + 28.0) * 2.0),
             Some(Hit::Tab(1))
         );
     }
@@ -783,19 +913,19 @@ mod tests {
         let y = p.h - 20.0 * 2.0; // 20 logical up from the bottom
         let center = |i: f32| (15.0 + i * 34.0 + 17.0) * 2.0;
         assert_eq!(
-            hit(3, 0, p, false, 0.0, 2.0, center(0.0), y),
+            hit(&view(3, 0, false), p, 2.0, center(0.0), y),
             Some(Hit::Util(UtilAction::Settings))
         );
         assert_eq!(
-            hit(3, 0, p, false, 0.0, 2.0, center(1.0), y),
+            hit(&view(3, 0, false), p, 2.0, center(1.0), y),
             Some(Hit::Util(UtilAction::Theme))
         );
         assert_eq!(
-            hit(3, 0, p, false, 0.0, 2.0, center(2.0), y),
+            hit(&view(3, 0, false), p, 2.0, center(2.0), y),
             Some(Hit::Util(UtilAction::Timeline))
         );
         assert_eq!(
-            hit(3, 0, p, false, 0.0, 2.0, center(3.0), y),
+            hit(&view(3, 0, false), p, 2.0, center(3.0), y),
             Some(Hit::Util(UtilAction::Git))
         );
     }
@@ -804,7 +934,7 @@ mod tests {
     fn build_lists_every_tab_and_marks_the_active_one() {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
-        let paint = build(3, 1, panel(), false, 0.0, 2.0, &theme, &mut m);
+        let paint = build(&view(3, 1, false), panel(), 2.0, &theme, &mut m);
         // A label for the header, three tabs, and the new-tab action (overflow indicators
         // are hidden with no overflow) = 5 labels.
         let tab_labels: Vec<_> = paint
@@ -825,15 +955,50 @@ mod tests {
     }
 
     #[test]
+    fn workspace_chips_render_and_map_clicks() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
+        let chips = ['P', 'W'];
+        let v = View {
+            tab_count: 2,
+            active_tab: 0,
+            chips: &chips,
+            active_chip: 0,
+            rail: false,
+            top_inset: 0.0,
+        };
+        let paint = build(&v, panel(), 2.0, &theme, &mut m);
+        // The two workspace glyphs + the trailing "+" tile are drawn.
+        assert!(paint.labels.iter().any(|l| l.text == "P"));
+        assert!(paint.labels.iter().any(|l| l.text == "W"));
+        assert!(paint.labels.iter().any(|l| l.text == "+"));
+        // Chips sit at y in [10, 36] (logical) from CHIP_INSET(13) with a 33px step; probe each
+        // tile's center. Chip 0 -> Workspace(0), chip 1 -> Workspace(1), the "+" -> AddWorkspace.
+        let cy = 23.0 * 2.0;
+        assert_eq!(
+            hit(&v, panel(), 2.0, 26.0 * 2.0, cy),
+            Some(Hit::Workspace(0))
+        );
+        assert_eq!(
+            hit(&v, panel(), 2.0, 59.0 * 2.0, cy),
+            Some(Hit::Workspace(1))
+        );
+        assert_eq!(
+            hit(&v, panel(), 2.0, 92.0 * 2.0, cy),
+            Some(Hit::AddWorkspace)
+        );
+    }
+
+    #[test]
     fn build_draws_the_command_well() {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
         // Full panel: the search glyph + the placeholder text.
-        let full = build(2, 0, panel(), false, 0.0, 2.0, &theme, &mut m);
+        let full = build(&view(2, 0, false), panel(), 2.0, &theme, &mut m);
         assert!(full.labels.iter().any(|l| l.text == "\u{2315}"));
         assert!(full.labels.iter().any(|l| l.text.contains("Search or run")));
         // Rail: just the centered glyph, no placeholder text.
-        let rail = build(2, 0, panel(), true, 0.0, 2.0, &theme, &mut m);
+        let rail = build(&view(2, 0, true), panel(), 2.0, &theme, &mut m);
         assert!(rail.labels.iter().any(|l| l.text == "\u{2315}"));
         assert!(rail.labels.iter().all(|l| !l.text.contains("Search")));
     }
@@ -842,7 +1007,7 @@ mod tests {
     fn build_draws_the_utility_bar_glyphs() {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
-        let paint = build(2, 0, panel(), false, 0.0, 2.0, &theme, &mut m);
+        let paint = build(&view(2, 0, false), panel(), 2.0, &theme, &mut m);
         // Each utility glyph is drawn once, in the footer (below the tab list).
         for (_, glyph) in UTIL_ICONS {
             assert!(
@@ -851,7 +1016,7 @@ mod tests {
             );
         }
         // The slim rail has no room for the footer, so it omits the glyphs entirely.
-        let rail = build(2, 0, panel(), true, 0.0, 2.0, &theme, &mut m);
+        let rail = build(&view(2, 0, true), panel(), 2.0, &theme, &mut m);
         for (_, glyph) in UTIL_ICONS {
             assert!(
                 rail.labels.iter().all(|l| l.text != glyph),
@@ -870,7 +1035,7 @@ mod tests {
             w: 56.0 * 2.0,
             h: 800.0 * 2.0,
         };
-        let paint = build(3, 1, p, true, 0.0, 2.0, &theme, &mut m);
+        let paint = build(&view(3, 1, true), p, 2.0, &theme, &mut m);
         // Rail tab labels are the bare numbers, centered (x offset from the left edge > 0).
         let two = paint.labels.iter().find(|l| l.text == "2").unwrap();
         assert!(two.x > 0.0 && two.x < p.w);

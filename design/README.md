@@ -55,6 +55,18 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Workspace switcher (§08 #2), built as a real feature.** The sidebar now shows
+  the `P W +` chips - not fabricated UI, a genuine workspaces feature (Hard rule 5). A `Workspace`
+  is a named, isolated tab set; the active one's tabs live in `App.tabs`/`active`, the others are
+  stashed (their shells keep running) and swapped in on switch, so the whole existing tab code is
+  unchanged (low-churn). Clicking a chip switches; the `+` adds one (first two named
+  Personal/Work -> chips P/W, then "Space N"). The chip is the name's first letter (accent-filled +
+  bordered when active, else `bg.surface`). `sidebar::View` now bundles the sidebar inputs
+  (tab list + chips + rail + control-strip inset) so `build`/`hit` share one shape as the sidebar
+  grows (pinned grid + groups next). **Deferred (real follow-ups, not fabrication):** per-workspace
+  cwd + theme isolation (today a workspace isolates its *tabs* only); Mod+1…9 switching (chip
+  clicks work now); renaming; persistence across restarts.
+
 - 2026-07-13 - **Command palette: mode prefixes + surfaced tabs (§10.8).** The palette's query
   now takes a leading mode prefix: `>` = commands only, `?` = the keybinding help (the command
   list as a reference), `/` = file search (deferred - shows a "coming soon" hint), and **no

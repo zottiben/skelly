@@ -629,6 +629,26 @@ fn push_pl(
     });
 }
 
+/// Push a label at an explicit `(x, y)` (no row centering).
+fn push_pl_at(
+    labels: &mut Vec<ProseLabel>,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    x: f32,
+    y: f32,
+) {
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x,
+        y,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
+}
+
 /// Push a horizontally-centered proportional label centered vertically in a `row_h` row.
 #[allow(clippy::too_many_arguments, reason = "one focused example helper")]
 fn push_centered_pl(
@@ -670,6 +690,12 @@ const SB_BAR_RADIUS: f32 = 2.0;
 const SB_TAB_PAD_X: f32 = 10.0;
 const SB_TAB_GAP: f32 = 8.0;
 const SB_PILL_RADIUS: f32 = 6.0;
+/// Workspace-switcher chips (§08 #2) - mirror the binary's `sidebar` module.
+const SB_CHIP_SIZE: f32 = 26.0;
+const SB_CHIP_GAP: f32 = 7.0;
+const SB_CHIP_RADIUS: f32 = 7.0;
+const SB_CHIP_INSET: f32 = 13.0;
+const SB_CHIP_BLOCK_GAP: f32 = 10.0;
 /// Command-input well (§08 #3) - mirror the binary's `sidebar` module.
 const SB_CMD_H: f32 = 30.0;
 const SB_CMD_GAP: f32 = 12.0;
@@ -711,9 +737,88 @@ fn sidebar_panel(
     let mut quads = vec![ChromeQuad::fill(panel, theme.bg_sidebar)];
     let mut labels = Vec::new();
 
-    // Command-input well (§08 #3), below the control strip - a bg.surface field with ⌕ +
-    // placeholder (full panel) or a centered ⌕ (rail). Mirrors the binary's `push_command_well`.
-    let cmd_top = panel.y + strip + SB_PAD_TOP * scale;
+    // Workspace-switcher chips (§08 #2), just below the control strip - two workspaces (P / W)
+    // + a "+" tile, full panel only. Mirrors the binary's `push_chips`.
+    let chip_block = if rail {
+        0.0
+    } else {
+        SB_CHIP_SIZE + SB_CHIP_BLOCK_GAP
+    };
+    if !rail {
+        let cy = panel.y + strip + SB_PAD_TOP * scale;
+        let size = SB_CHIP_SIZE * scale;
+        let step = (SB_CHIP_SIZE + SB_CHIP_GAP) * scale;
+        let x0 = panel.x + SB_CHIP_INSET * scale;
+        let radius = SB_CHIP_RADIUS * scale;
+        let stroke = scale.max(1.0);
+        let line = measure.line_height(FontRole::Mono);
+        for (i, glyph) in ["P", "W", "+"].iter().enumerate() {
+            let x = x0 + i as f32 * step;
+            let active_ws = i == 0;
+            if active_ws {
+                quads.push(ChromeQuad::tint(
+                    PxRect {
+                        x,
+                        y: cy,
+                        w: size,
+                        h: size,
+                    },
+                    theme.accent,
+                    0.4,
+                    radius,
+                ));
+                quads.push(ChromeQuad::rounded(
+                    PxRect {
+                        x: x + stroke,
+                        y: cy + stroke,
+                        w: size - 2.0 * stroke,
+                        h: size - 2.0 * stroke,
+                    },
+                    theme.bg_sidebar,
+                    radius - stroke,
+                ));
+                quads.push(ChromeQuad::tint(
+                    PxRect {
+                        x: x + stroke,
+                        y: cy + stroke,
+                        w: size - 2.0 * stroke,
+                        h: size - 2.0 * stroke,
+                    },
+                    theme.accent,
+                    0.16,
+                    radius - stroke,
+                ));
+            } else {
+                quads.push(ChromeQuad::rounded(
+                    PxRect {
+                        x,
+                        y: cy,
+                        w: size,
+                        h: size,
+                    },
+                    theme.bg_surface,
+                    radius,
+                ));
+            }
+            let gw = measure.width(glyph, FontRole::Mono, None);
+            push_pl_at(
+                &mut labels,
+                glyph,
+                FontRole::Mono,
+                if active_ws {
+                    theme.accent
+                } else {
+                    theme.fg_muted
+                },
+                x + (size - gw) * 0.5,
+                cy + (size - line) * 0.5,
+            );
+        }
+    }
+
+    // Command-input well (§08 #3), below the chips - a bg.surface field with ⌕ + placeholder
+    // (full panel) or a centered ⌕ (rail). Mirrors the binary's `push_command_well`.
+    let cmd_top = panel.y + strip + (SB_PAD_TOP + chip_block) * scale;
     if rail {
         let w = measure.width(SB_CMD_ICON, FontRole::Caption, None);
         push_pl(
@@ -851,8 +956,14 @@ fn push_sb_body(
     theme: &Theme,
 ) {
     let (count, active) = tabs;
-    // The content clears the control strip (logical) - mirrors the binary's top_inset.
-    let top = strip / scale + SB_PAD_TOP;
+    // The content clears the control strip + the workspace-chip block (logical), mirroring the
+    // binary's top_inset + chips_block.
+    let chip_block = if rail {
+        0.0
+    } else {
+        SB_CHIP_SIZE + SB_CHIP_BLOCK_GAP
+    };
+    let top = strip / scale + SB_PAD_TOP + chip_block;
     let reserved_below = SB_IND_H + SB_TAB_H + SB_PAD_BOTTOM;
     let cmd_block = SB_CMD_H + SB_CMD_GAP;
     let avail = panel.h / scale - SB_UTIL_H - top - cmd_block - SB_IND_H - reserved_below;
