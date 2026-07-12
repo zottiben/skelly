@@ -231,18 +231,23 @@ struct App {
     /// The command palette's open / close animation (design §03 motion), live only while it
     /// plays. While any animation is set the event loop polls + redraws each frame; it clears
     /// itself when done (finalizing the close), returning the loop to its idle `Wait`.
-    palette_anim: Option<PaletteAnim>,
+    palette_anim: Option<OverlayAnim>,
+    /// The "running job" confirm modal's open / close animation - the same overlay tween as
+    /// the palette (rise in, fall out); live only while it plays, cleared when it settles.
+    confirm_anim: Option<OverlayAnim>,
 }
 
-/// The command palette's in-flight open or close animation. The panel tweens its vertical
-/// offset (logical px below its resting spot) from `from` to `to` along `curve` - the open
-/// *decelerates* up into place (rise -> 0), the close *accelerates* back down (0 -> fall).
-/// `from` is captured from the panel's *current* offset when the animation starts, so an
-/// open interrupted by a dismiss (or vice-versa) continues smoothly instead of jumping.
-/// `closing` marks the dismiss so [`animating`](App::animating) finalizes the close when it
-/// settles; the palette keeps rendering (but a keypress settles it shut at once) meanwhile.
+/// A floating overlay's in-flight open or close animation - shared by the command palette and
+/// the "running job" confirm modal (both centered cards drawn through the overlay pass). The
+/// panel tweens its vertical offset (logical px below its resting spot) from `from` to `to`
+/// along `curve` - the open *decelerates* up into place (rise -> 0), the close *accelerates*
+/// back down (0 -> fall). `from` is captured from the panel's *current* offset when the
+/// animation starts, so an open interrupted by a dismiss (or vice-versa) continues smoothly
+/// instead of jumping. `closing` marks the dismiss so [`animating`](App::animating) finalizes
+/// the close when it settles; the panel keeps rendering (but a key/click settles it shut at
+/// once) meanwhile.
 #[derive(Clone, Copy)]
-struct PaletteAnim {
+struct OverlayAnim {
     anim: motion::Anim,
     from: f32,
     to: f32,
@@ -281,6 +286,7 @@ impl App {
             pointer: (0.0, 0.0),
             selecting: false,
             palette_anim: None,
+            confirm_anim: None,
         }
     }
 
@@ -658,13 +664,12 @@ impl App {
         let panel_w = grid_cols as f32 * cell_w + 2.0 * pad;
         let panel_h = rows as f32 * cell_h + 2.0 * pad;
         let x = ((surface_w - panel_w) / 2.0).max(0.0);
-        // The resting top, plus the open animation's rise offset (0 once settled), both kept
-        // within the on-screen range so the rise never pushes the panel's bottom off a short
-        // window (it just shrinks the rise there).
+        // The resting top, plus the open animation's rise offset (0 once settled), kept within
+        // the on-screen range so the rise never pushes the panel's bottom off a short window.
         let max_y = (surface_h - panel_h).max(0.0);
         let rest_y = (surface_h * 0.16).min(max_y);
-        let offset = palette_rise_offset(self.palette_anim, Instant::now(), scale32(self.scale));
-        let y = (rest_y + offset).min(max_y);
+        let offset = overlay_rise_offset(self.palette_anim, Instant::now(), scale32(self.scale));
+        let y = overlay_panel_top(rest_y, offset, max_y);
 
         PaletteFrame {
             panel: PxRect {
@@ -700,7 +705,12 @@ impl App {
         let panel_w = grid_cols as f32 * cell_w + 2.0 * pad;
         let panel_h = rows as f32 * cell_h + 2.0 * pad;
         let x = ((surface_w - panel_w) / 2.0).max(0.0);
-        let y = (surface_h * 0.16).min((surface_h - panel_h).max(0.0));
+        // The modal rises in / falls out like the palette (design §03 motion), clamped so the
+        // travel never pushes it off a short window.
+        let max_y = (surface_h - panel_h).max(0.0);
+        let rest_y = (surface_h * 0.16).min(max_y);
+        let offset = overlay_rise_offset(self.confirm_anim, Instant::now(), scale32(self.scale));
+        let y = overlay_panel_top(rest_y, offset, max_y);
 
         ConfirmFrame {
             panel: PxRect {
@@ -1298,11 +1308,20 @@ impl App {
         self.request_close(CloseTarget::Tab);
     }
 
-    /// Shared close gate: close immediately when nothing is running, else arm the confirm.
+    /// Shared close gate: close immediately when nothing is running, else arm the confirm
+    /// modal (with the same rise-in entrance as the palette).
     fn request_close(&mut self, target: CloseTarget) {
         match self.foreground_job_name(target) {
             Some(process) => {
                 self.confirm = Some(Confirm::new(target, process));
+                let from = overlay_offset_logical(self.confirm_anim).unwrap_or(OVERLAY_RISE);
+                self.confirm_anim = Some(OverlayAnim {
+                    anim: motion::Anim::start(Instant::now(), motion::BASE),
+                    from,
+                    to: 0.0,
+                    curve: motion::DECELERATE,
+                    closing: false,
+                });
                 self.request_redraw();
             }
             None => self.perform_close(target),
@@ -1310,19 +1329,56 @@ impl App {
     }
 
     /// Perform the actual close for `target` (after a confirm, or when nothing is running),
-    /// clearing any pending confirm first.
+    /// clearing any pending confirm instantly - the close's result takes over at once (like
+    /// running a palette command), so there is nothing to animate out.
     fn perform_close(&mut self, target: CloseTarget) {
         self.confirm = None;
+        self.confirm_anim = None;
         match target {
             CloseTarget::Pane => self.apply_pane_action(PaneAction::Close),
             CloseTarget::Tab => self.close_tab(),
         }
     }
 
-    /// Dismiss the confirm modal without closing.
+    /// Dismiss the confirm modal without closing: ease it out (accelerate fall), keeping it
+    /// rendered until [`animating`](Self::animating) finalizes the dismissal (or a key/click
+    /// settles it shut first). A no-op if it is closed or already animating out.
     fn cancel_confirm(&mut self) {
-        self.confirm = None;
-        self.request_redraw();
+        if self.confirm.is_some() && !self.confirm_anim.is_some_and(|a| a.closing) {
+            let from = overlay_offset_logical(self.confirm_anim).unwrap_or(0.0);
+            self.confirm_anim = Some(OverlayAnim {
+                anim: motion::Anim::start(Instant::now(), motion::BASE),
+                from,
+                to: OVERLAY_RISE,
+                curve: motion::ACCELERATE,
+                closing: true,
+            });
+            self.request_redraw();
+        }
+    }
+
+    /// If the confirm modal is mid-dismissal, settle it shut immediately and report `true` (so
+    /// the caller can consume the interrupting event) - mirrors
+    /// [`settle_palette_close`](Self::settle_palette_close). A key/click during the fade is then
+    /// handled as if the modal were already gone; nothing leaks into the still-visible modal.
+    fn settle_confirm_close(&mut self) -> bool {
+        if self.confirm_anim.is_some_and(|a| a.closing) {
+            self.confirm = None;
+            self.confirm_anim = None;
+            self.request_redraw();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A key interrupting either overlay's fade-out (palette or confirm modal): settle whichever
+    /// is fading and report whether the key should be *swallowed* rather than routed on to the
+    /// pane - `true` for a repeat dismiss gesture (Esc / ⌘K) that only spent the fade. The two
+    /// never fade at once, so `||` settles whichever is live.
+    fn key_settles_fading_overlay(&mut self, key_event: &KeyEvent) -> bool {
+        (self.settle_confirm_close() || self.settle_palette_close())
+            && is_palette_dismiss(key_event, self.modifiers)
     }
 
     /// The name of a foreground job that closing `target` would kill, if any: the focused
@@ -1827,16 +1883,14 @@ impl App {
         if key_event.state != ElementState::Pressed {
             return;
         }
-        // The "running job" confirm modal captures input first (design §12).
-        if self.confirm.is_some() {
-            self.on_confirm_key(key_event);
+        // A key during either overlay's fade-out settles it shut, then routes as if it were
+        // already closed (a repeat dismiss is swallowed, anything else reaches the pane).
+        if self.key_settles_fading_overlay(key_event) {
             return;
         }
-        // A key during the palette's fade-out settles it shut at once, so this key is then
-        // routed as if the palette were already closed (no leak into it, no surface over it).
-        // A repeat dismiss (Esc / ⌘K) that only spent the fade is swallowed so it does not
-        // reach the shell; any other key (e.g. typing) routes on through to the pane.
-        if self.settle_palette_close() && is_palette_dismiss(key_event, self.modifiers) {
+        // The "running job" confirm modal captures input while fully up (design §12).
+        if self.confirm.is_some() {
+            self.on_confirm_key(key_event);
             return;
         }
         // The settings view, command palette, and git dock each capture input while open.
@@ -1992,9 +2046,9 @@ impl App {
     /// sidebar) or focuses a pane and starts a selection; a release ends the drag and
     /// clears a zero-width (click-only) selection.
     fn on_left_click(&mut self, state: ElementState) {
-        // A click during the palette's fade-out dismisses it (and is consumed) instead of
-        // falling through to the panes behind the still-visible palette.
-        if self.settle_palette_close() {
+        // A click during an overlay's fade-out dismisses it (and is consumed) instead of
+        // falling through to the panes behind the still-visible palette / confirm modal.
+        if self.settle_confirm_close() || self.settle_palette_close() {
             return;
         }
         match state {
@@ -2036,9 +2090,9 @@ impl App {
 
     /// Scroll the scrollback of the pane under the pointer by a wheel `delta`.
     fn on_mouse_wheel(&mut self, delta: MouseScrollDelta) {
-        // A scroll during the palette's fade-out dismisses it rather than scrolling the pane
-        // behind the still-visible palette.
-        if self.settle_palette_close() {
+        // A scroll during an overlay's fade-out dismisses it rather than scrolling the pane
+        // behind the still-visible palette / confirm modal.
+        if self.settle_confirm_close() || self.settle_palette_close() {
             return;
         }
         let lines = match delta {
@@ -2336,21 +2390,13 @@ impl App {
         })
     }
 
-    /// The palette panel's current vertical offset in *logical* px (below its resting spot),
-    /// or `None` when nothing is animating - used to start a new tween from where the panel
-    /// currently sits so open<->close interruptions are continuous.
-    fn palette_offset_logical(&self) -> Option<f32> {
-        self.palette_anim
-            .map(|_| palette_rise_offset(self.palette_anim, Instant::now(), 1.0))
-    }
-
     /// Open the command palette with the "enter" rise (design §03 motion) - decelerating up
-    /// from `PALETTE_RISE` below rest (or wherever the panel currently sits) to `0`. The loop
+    /// from `OVERLAY_RISE` below rest (or wherever the panel currently sits) to `0`. The loop
     /// polls until it settles.
     fn open_palette(&mut self) {
-        let from = self.palette_offset_logical().unwrap_or(PALETTE_RISE);
+        let from = overlay_offset_logical(self.palette_anim).unwrap_or(OVERLAY_RISE);
         self.palette.open();
-        self.palette_anim = Some(PaletteAnim {
+        self.palette_anim = Some(OverlayAnim {
             anim: motion::Anim::start(Instant::now(), motion::BASE),
             from,
             to: 0.0,
@@ -2361,16 +2407,16 @@ impl App {
     }
 
     /// Begin dismissing the palette: the "exit" fall accelerates the panel from its current
-    /// offset down to `PALETTE_RISE`, keeping it rendered until [`animating`](Self::animating)
+    /// offset down to `OVERLAY_RISE`, keeping it rendered until [`animating`](Self::animating)
     /// finalizes the actual close when it settles (or a keypress settles it shut first). A
     /// no-op if the palette is closed or already animating out.
     fn close_palette(&mut self) {
         if self.palette.open && !self.palette_anim.is_some_and(|pa| pa.closing) {
-            let from = self.palette_offset_logical().unwrap_or(0.0);
-            self.palette_anim = Some(PaletteAnim {
+            let from = overlay_offset_logical(self.palette_anim).unwrap_or(0.0);
+            self.palette_anim = Some(OverlayAnim {
                 anim: motion::Anim::start(Instant::now(), motion::BASE),
                 from,
-                to: PALETTE_RISE,
+                to: OVERLAY_RISE,
                 curve: motion::ACCELERATE,
                 closing: true,
             });
@@ -2394,9 +2440,9 @@ impl App {
         }
     }
 
-    /// Advance the animation clock: when the current animation finishes, drop it (finalizing
-    /// a close dismissal), then report whether one is still live - the signal the event loop
-    /// uses to keep polling + repainting versus falling back to idle `Wait`.
+    /// Advance the animation clocks: when an animation finishes, drop it (finalizing a close
+    /// dismissal), then report whether any is still live - the signal the event loop uses to
+    /// keep polling + repainting versus falling back to idle `Wait`.
     fn animating(&mut self, now: Instant) -> bool {
         if let Some(pa) = self.palette_anim {
             if pa.anim.done(now) {
@@ -2411,7 +2457,17 @@ impl App {
                 self.request_redraw();
             }
         }
-        self.palette_anim.is_some()
+        if let Some(ca) = self.confirm_anim {
+            if ca.anim.done(now) {
+                self.confirm_anim = None;
+                if ca.closing {
+                    // The cancel fall finished: drop the modal now.
+                    self.confirm = None;
+                }
+                self.request_redraw();
+            }
+        }
+        self.palette_anim.is_some() || self.confirm_anim.is_some()
     }
 }
 
@@ -2531,18 +2587,33 @@ fn dim_f32(value: u32) -> f32 {
     value as f32
 }
 
-/// Logical px the command palette travels through as it opens or closes (design §03 motion).
-const PALETTE_RISE: f32 = 10.0;
+/// Logical px a floating overlay (palette / confirm modal) travels through as it opens or
+/// closes (design §03 motion).
+const OVERLAY_RISE: f32 = 10.0;
 
-/// The command palette's current vertical offset (physical px) for its open / close
-/// animation: the panel's `from`->`to` tween eased along its curve, in logical px, scaled.
-/// Returns `0.0` when no animation is playing (the resting palette). Pure, so the eased
-/// curves are unit-testable without an `App`.
-fn palette_rise_offset(anim: Option<PaletteAnim>, now: Instant, scale: f32) -> f32 {
+/// A floating overlay's current vertical offset (physical px) for its open / close animation:
+/// the panel's `from`->`to` tween eased along its curve, in logical px, scaled. Returns `0.0`
+/// when no animation is playing (the resting panel). Pure, so the eased curves are
+/// unit-testable without an `App`.
+fn overlay_rise_offset(anim: Option<OverlayAnim>, now: Instant, scale: f32) -> f32 {
     anim.map_or(0.0, |pa| {
         let eased = pa.curve.ease(pa.anim.progress(now));
         (pa.from + (pa.to - pa.from) * eased) * scale
     })
+}
+
+/// An overlay panel's current vertical offset in *logical* px (below its resting spot), or
+/// `None` when it is not animating - used to start a new tween from where the panel currently
+/// sits so open<->close interruptions are continuous.
+fn overlay_offset_logical(anim: Option<OverlayAnim>) -> Option<f32> {
+    anim.map(|_| overlay_rise_offset(anim, Instant::now(), 1.0))
+}
+
+/// The animated top (physical px) of a centered overlay panel: its resting top plus the
+/// current rise / fall `offset`, clamped to the on-screen max so the travel never pushes the
+/// panel's bottom off a short window (it just shrinks the travel there).
+fn overlay_panel_top(rest_y: f32, offset: f32, max_y: f32) -> f32 {
+    (rest_y + offset).min(max_y)
 }
 
 /// Whether `key_event` (with `mods`) is a palette-dismiss gesture - `Esc` or `⌘K`. A repeat
@@ -2822,9 +2893,10 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cycle_index, dim, empty_state_logo, index_after_close, order, palette_rise_offset,
-        pane_action, pane_dims, panic_message, pointer_cell_in, process_name, resolve_cell,
-        selection_cells, selection_text, tab_action, PaneAction, Selection, TabAction,
+        cycle_index, dim, empty_state_logo, index_after_close, order, overlay_panel_top,
+        overlay_rise_offset, pane_action, pane_dims, panic_message, pointer_cell_in, process_name,
+        resolve_cell, selection_cells, selection_text, tab_action, PaneAction, Selection,
+        TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -2867,13 +2939,15 @@ mod tests {
     }
 
     #[test]
-    fn palette_rise_offset_tweens_from_to_along_the_curve() {
-        use crate::{motion, PaletteAnim};
+    fn overlay_rise_offset_tweens_from_to_along_the_curve() {
+        // The shared overlay tween that both the command palette and the confirm modal use to
+        // rise in / fall out (design §03 motion).
+        use crate::{motion, OverlayAnim};
         use std::time::{Duration, Instant};
         let t0 = Instant::now();
         let tween = |from: f32, to: f32, curve, dt| {
-            palette_rise_offset(
-                Some(PaletteAnim {
+            overlay_rise_offset(
+                Some(OverlayAnim {
                     anim: motion::Anim::start(t0, motion::BASE),
                     from,
                     to,
@@ -2884,11 +2958,11 @@ mod tests {
                 2.0,
             )
         };
-        let full = super::PALETTE_RISE * 2.0; // the rise at scale 2 (20px).
-                                              // No animation playing: the palette rests, no offset.
-        assert!(palette_rise_offset(None, Instant::now(), 2.0).abs() < 1e-3);
+        let full = super::OVERLAY_RISE * 2.0; // the rise at scale 2 (20px).
+                                              // No animation playing: the panel rests, no offset.
+        assert!(overlay_rise_offset(None, Instant::now(), 2.0).abs() < 1e-3);
         // Open: decelerate from a full rise down to rest.
-        let open = |dt| tween(super::PALETTE_RISE, 0.0, motion::DECELERATE, dt);
+        let open = |dt| tween(super::OVERLAY_RISE, 0.0, motion::DECELERATE, dt);
         assert!(
             (open(Duration::ZERO) - full).abs() < 1e-3,
             "open starts lifted"
@@ -2898,8 +2972,8 @@ mod tests {
             "open eases down"
         );
         assert!(open(motion::BASE).abs() < 1e-3, "open reaches rest");
-        // Close: accelerate from rest down to the full fall offset.
-        let close = |dt| tween(0.0, super::PALETTE_RISE, motion::ACCELERATE, dt);
+        // Close (dismiss / cancel): accelerate from rest down to the full fall offset.
+        let close = |dt| tween(0.0, super::OVERLAY_RISE, motion::ACCELERATE, dt);
         assert!(close(Duration::ZERO).abs() < 1e-3, "close starts at rest");
         assert!(
             (close(motion::BASE) - full).abs() < 1e-3,
@@ -2908,6 +2982,16 @@ mod tests {
         // An interrupt tween starts from the panel's current offset (no jump): from 5 logical
         // px (10px at scale 2) it begins exactly there.
         assert!((tween(5.0, 0.0, motion::DECELERATE, Duration::ZERO) - 10.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn overlay_panel_top_shifts_down_and_clamps_to_a_short_window() {
+        // At rest (no offset) the panel sits at its resting top.
+        assert!((overlay_panel_top(100.0, 0.0, 500.0) - 100.0).abs() < 1e-3);
+        // A rise / fall offset shifts the panel down by exactly that many px.
+        assert!((overlay_panel_top(100.0, 20.0, 500.0) - 120.0).abs() < 1e-3);
+        // On a short window the offset is clamped so the panel's bottom never runs off-screen.
+        assert!((overlay_panel_top(100.0, 20.0, 110.0) - 110.0).abs() < 1e-3);
     }
 
     #[test]
