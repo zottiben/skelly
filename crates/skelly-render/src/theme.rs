@@ -75,6 +75,31 @@ impl Rgba {
     pub(crate) fn to_array(self) -> [f32; 4] {
         [self.r as f32, self.g as f32, self.b as f32, self.a as f32]
     }
+
+    /// The opaque 8-bit sRGB view of this (linear) color, for compositing chrome tints over
+    /// `bg.base` in sRGB space via [`Srgb::over`] (alpha is dropped). The inverse of the
+    /// sRGB->linear conversion [`Theme::resolve`] applies, so it recovers the source hex.
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "each channel maps to a rounded value in 0.0..=255.0"
+    )]
+    pub fn to_srgb(self) -> Srgb {
+        let enc = |c: f64| {
+            let s = if c <= 0.003_130_8 {
+                c * 12.92
+            } else {
+                1.055 * c.powf(1.0 / 2.4) - 0.055
+            };
+            (s * 255.0).round().clamp(0.0, 255.0) as u8
+        };
+        Srgb {
+            r: enc(self.r),
+            g: enc(self.g),
+            b: enc(self.b),
+        }
+    }
 }
 
 /// Convert one 8-bit sRGB channel to a linear `f32` (0.0..=1.0).
@@ -270,6 +295,12 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::float_cmp,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "test: exact token alphas + a reference mix mirroring `over`"
+    )]
     fn over_composites_in_srgb_space_like_the_guide_css() {
         // `Srgb::over` reproduces the guide's CSS `rgba()` compositing (gamma-space per-channel
         // mix), NOT the brighter linear-space GPU blend. accent #BD93F9 at 0.14 over the sidebar
@@ -290,6 +321,8 @@ mod tests {
         assert_eq!(dark.accent_subtle_alpha, 0.14);
         assert_eq!(dark.accent_subtle_on(dark.bg_sidebar), got);
         assert_eq!(Theme::resolve("ossein-light").accent_subtle_alpha, 0.12);
+        // `Rgba::to_srgb` recovers bg.base's source hex (#181825) so it can be a composite base.
+        assert_eq!(dark.bg_base.to_srgb(), srgb(0x18, 0x18, 0x25));
     }
 
     #[test]

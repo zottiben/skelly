@@ -156,16 +156,15 @@ fn build_settings(theme: &Theme, width: u32, height: u32, scale: f32) -> Capture
     let mut ny = hy + S_HEADER_H * scale;
     for (i, (icon, label)) in categories.iter().enumerate() {
         if i == active {
-            quads.push(ChromeQuad::tint(
+            // accent.subtle active-row fill, sRGB-composited over the nav column (bg.base).
+            quads.push(ChromeQuad::fill(
                 PxRect {
                     x: panel.x,
                     y: ny,
                     w: nav_divider_x - panel.x,
                     h: S_NAV_ROW_H * scale,
                 },
-                theme.accent,
-                0.14,
-                0.0,
+                theme.accent_subtle_on(theme.bg_base.to_srgb()),
             ));
             quads.push(ChromeQuad::fill(
                 PxRect {
@@ -201,16 +200,15 @@ fn build_settings(theme: &Theme, width: u32, height: u32, scale: f32) -> Capture
     for (i, (label, widget)) in controls.iter().enumerate() {
         let focused = i == selected;
         if focused {
-            quads.push(ChromeQuad::tint(
+            // accent.subtle selected-row band, sRGB-composited over the content (bg.elevated).
+            quads.push(ChromeQuad::fill(
                 PxRect {
                     x: nav_divider_x,
                     y: cy,
                     w: content_right + S_PAD * scale - nav_divider_x,
                     h: S_CTRL_ROW_H * scale,
                 },
-                theme.accent,
-                0.14,
-                0.0,
+                theme.accent_subtle_on(theme.bg_elevated),
             ));
         }
         s_row(

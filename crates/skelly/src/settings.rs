@@ -665,16 +665,16 @@ impl Settings {
             let active = index == self.category;
             if active {
                 let h = NAV_ROW_H * scale;
-                quads.push(ChromeQuad::tint(
+                // accent.subtle active-row fill, composited in sRGB over the nav column
+                // (bg.base) so it reads at the guide's weight.
+                quads.push(ChromeQuad::fill(
                     PxRect {
                         x: panel.x,
                         y,
                         w: nav_divider_x - panel.x,
                         h,
                     },
-                    theme.accent,
-                    0.14,
-                    0.0,
+                    theme.accent_subtle_on(theme.bg_base.to_srgb()),
                 ));
                 quads.push(ChromeQuad::fill(
                     PxRect {
@@ -729,16 +729,16 @@ impl Settings {
         for (index, control) in self.controls().iter().enumerate() {
             let focused = index == self.selected;
             if focused {
-                quads.push(ChromeQuad::tint(
+                // accent.subtle selected-row band, composited in sRGB over the content surface
+                // (bg.elevated) to match the guide's weight.
+                quads.push(ChromeQuad::fill(
                     PxRect {
                         x: nav_divider_x,
                         y,
                         w: content_right + PAD * scale - nav_divider_x,
                         h: CTRL_ROW_H * scale,
                     },
-                    theme.accent,
-                    0.14,
-                    0.0,
+                    theme.accent_subtle_on(theme.bg_elevated),
                 ));
             }
             push_control(
