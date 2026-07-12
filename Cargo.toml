@@ -41,8 +41,13 @@ pedantic = { level = "warn", priority = -1 }
 # Allowed back with a reason - these fight idiomatic, well-organized code.
 module_name_repetitions = { level = "allow", priority = 1 }
 
-# A slightly optimized dev profile keeps the terminal responsive when run unoptimized;
-# dependencies are built with opt so hot paths (parser, renderer) are not molasses.
+# A slightly optimized dev profile keeps the terminal responsive when run unoptimized.
+# opt-level 1 on the workspace crates (the render/input hot paths) plus opt-level 2 on
+# dependencies (cosmic-text shaping, wgpu) means a plain `cargo run` is smooth without
+# needing `--release`, while dev compiles stay fast enough for iteration.
+[profile.dev]
+opt-level = 1
+
 [profile.dev.package."*"]
 opt-level = 2
 
