@@ -55,8 +55,6 @@ const PANE_INSET: f32 = 6.0;
 const RESIZE_STEP: f32 = 0.04;
 /// Logical width (px) of the slim icon rail (`⇧⌘B`), per design §08 ("Icon rail 56px").
 const RAIL_WIDTH: f32 = 56.0;
-/// Logical inset (px) of the full-window settings view's text from the window edge.
-const SETTINGS_PAD: f32 = 20.0;
 /// Logical width (px) of the git diff dock - the guide's default (resizable 360-560 is a
 /// later slice, so it is fixed for now).
 const GIT_DOCK_WIDTH: f32 = 420.0;
@@ -619,11 +617,9 @@ impl App {
             match &settings {
                 Some(frame) => renderer.set_settings(Some(&SettingsView {
                     panel: frame.panel,
-                    text_origin: frame.origin,
-                    rows: &frame.rows,
-                    nav_cols: frame.nav_cols,
-                    nav_active_row: frame.nav_active_row,
-                    selected_row: frame.selected_row,
+                    nav_divider_x: frame.nav_divider_x,
+                    quads: &frame.quads,
+                    labels: &frame.labels,
                 })),
                 None => renderer.set_settings(None),
             }
@@ -714,32 +710,22 @@ impl App {
 
     /// Lay out the settings view: a full-window panel, its nav + control grid rendered
     /// in UI tokens and clipped to the window.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the settings cell width is a small, non-negative value"
-    )]
-    fn build_settings_frame(&self) -> SettingsFrame {
-        let (cell_w, _) = self.cell_size();
-        let pad = SETTINGS_PAD * scale32(self.scale);
-        let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
-
-        let cols = ((surface_w - 2.0 * pad) / cell_w).floor().max(1.0) as usize;
-        let view = self.settings.view(cols, &self.config, &self.theme);
-
+    fn build_settings_frame(&mut self) -> SettingsFrame {
+        let scale = scale32(self.scale);
+        let panel = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: dim_f32(self.size.0),
+            h: dim_f32(self.size.1),
+        };
+        let paint = self
+            .settings
+            .build(panel, scale, &self.config, &self.theme, &mut self.measure);
         SettingsFrame {
-            panel: PxRect {
-                x: 0.0,
-                y: 0.0,
-                w: surface_w,
-                h: surface_h,
-            },
-            origin: (pad, pad),
-            rows: view.rows,
-            nav_cols: view.nav_cols,
-            nav_active_row: view.nav_active_row,
-            selected_row: view.selected_row,
+            panel,
+            nav_divider_x: paint.nav_divider_x,
+            quads: paint.quads,
+            labels: paint.labels,
         }
     }
 
@@ -2080,11 +2066,9 @@ struct ConfirmFrame {
 /// Owned settings-view frame data the borrowed [`SettingsView`] points at.
 struct SettingsFrame {
     panel: PxRect,
-    origin: (f32, f32),
-    rows: Vec<Vec<GridCell>>,
-    nav_cols: usize,
-    nav_active_row: Option<usize>,
-    selected_row: Option<usize>,
+    nav_divider_x: f32,
+    quads: Vec<skelly_render::ChromeQuad>,
+    labels: Vec<skelly_render::ProseLabel>,
 }
 
 /// Owned git-dock frame data the borrowed [`GitDockView`] points at.

@@ -16,20 +16,24 @@
 )]
 
 use skelly_config::Appearance;
-use skelly_render::{measure_cell, CaptureSettings, GridCell, PxRect, Srgb, Theme};
+use skelly_render::{
+    CaptureSettings, ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme,
+};
 
-/// Nav column width in cells - mirrors the binary's `settings::NAV_COLS`.
-const NAV_COLS: usize = 20;
-/// Column where content begins - mirrors the binary's `settings::CONTENT_INDENT`.
-const CONTENT_INDENT: usize = NAV_COLS + 2;
-/// Logical inset of the settings text - mirrors the binary's `SETTINGS_PAD`.
-const SETTINGS_PAD: f32 = 20.0;
+// Settings layout constants (logical px) - mirror the binary's `settings` module.
+const S_NAV_WIDTH: f32 = 210.0;
+const S_PAD: f32 = 20.0;
+const S_NAV_PAD: f32 = 16.0;
+const S_CONTENT_PAD: f32 = 24.0;
+const S_HEADER_H: f32 = 44.0;
+const S_NAV_ROW_H: f32 = 32.0;
+const S_CTRL_ROW_H: f32 = 34.0;
 
 fn main() {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "skelly-settings.png".to_owned());
-    let (width, height, scale) = (1200_u32, 720_u32, 2.0_f64);
+    let (width, height, scale) = (1200_u32, 920_u32, 2.0_f64);
 
     let theme_name = std::env::args()
         .nth(2)
@@ -40,11 +44,7 @@ fn main() {
         ..Appearance::default()
     };
     let theme = Theme::resolve(&appearance.theme);
-    let (cell_w, _) = measure_cell(&appearance, scale);
-    let pad = SETTINGS_PAD * scale as f32;
-    let cols = ((width as f32 - 2.0 * pad) / cell_w).floor().max(1.0) as usize;
-
-    let settings = build_settings(cols, &theme, width, height, pad);
+    let settings = build_settings(&theme, width, height, scale as f32);
 
     let rgba = skelly_render::capture_settings_rgba(&appearance, width, height, scale, &settings);
     let file = std::fs::File::create(&path).expect("create png");
@@ -59,15 +59,26 @@ fn main() {
     println!("wrote {path}");
 }
 
-/// A representative Appearance settings panel, mirroring the binary's `settings` module
-/// layout so the capture verifies the render path.
-fn build_settings(
-    cols: usize,
-    theme: &Theme,
-    width: u32,
-    height: u32,
-    pad: f32,
-) -> CaptureSettings {
+/// A representative Appearance settings panel as a proportional display list, mirroring the
+/// binary's `settings` module so the capture verifies the render path.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one straight-line representative settings builder mirroring the binary"
+)]
+fn build_settings(theme: &Theme, width: u32, height: u32, scale: f32) -> CaptureSettings {
+    let mut m = TextMeasure::new(scale);
+    let panel = PxRect {
+        x: 0.0,
+        y: 0.0,
+        w: width as f32,
+        h: height as f32,
+    };
+    let nav_divider_x = panel.x + S_NAV_WIDTH * scale;
+    let content_x = nav_divider_x + S_CONTENT_PAD * scale;
+    let content_right = panel.x + panel.w - S_PAD * scale;
+    let mut quads = Vec::new();
+    let mut labels = Vec::new();
+
     let categories = [
         ('#', "Appearance"),
         ('=', "Sidebar"),
@@ -86,103 +97,227 @@ fn build_settings(
         ("Background blur", "18"),
         ("Window opacity", "0.98"),
     ];
-    let active_category = 0usize;
-    let selected_control = 3usize; // "Cursor style"
+    let active = 0usize;
+    let selected = 3usize; // "Cursor style"
 
-    let nav_start = 2usize;
-    let content_start = 4usize;
-    let footer_row = (nav_start + categories.len()).max(content_start + controls.len()) + 1;
-    let total = footer_row + 1;
+    // Header.
+    let hy = panel.y + S_PAD * scale;
+    s_row(
+        &mut labels,
+        &mut m,
+        "Appearance",
+        FontRole::H2,
+        theme.fg_primary,
+        content_x,
+        hy,
+        S_HEADER_H,
+        scale,
+    );
+    s_right(
+        &mut labels,
+        &mut m,
+        "esc to close",
+        FontRole::Caption,
+        theme.fg_muted,
+        content_right,
+        hy,
+        S_HEADER_H,
+        scale,
+    );
 
-    let mut rows: Vec<Vec<GridCell>> = (0..total)
-        .map(|_| blank_row(cols, theme.fg_muted))
-        .collect();
-
-    write(&mut rows[0], 2, "skelly", theme.fg_secondary);
-    write(&mut rows[0], CONTENT_INDENT, "Appearance", theme.fg_primary);
-    write_right(&mut rows[0], cols, "esc to close", theme.fg_muted);
-
+    // Nav.
+    let mut ny = hy + S_HEADER_H * scale;
     for (i, (icon, label)) in categories.iter().enumerate() {
-        let fg = if i == active_category {
+        if i == active {
+            quads.push(ChromeQuad::tint(
+                PxRect {
+                    x: panel.x,
+                    y: ny,
+                    w: nav_divider_x - panel.x,
+                    h: S_NAV_ROW_H * scale,
+                },
+                theme.accent,
+                0.14,
+                0.0,
+            ));
+            quads.push(ChromeQuad::fill(
+                PxRect {
+                    x: panel.x,
+                    y: ny,
+                    w: (2.0 * scale).max(1.0),
+                    h: S_NAV_ROW_H * scale,
+                },
+                theme.accent,
+            ));
+        }
+        let color = if i == active {
             theme.fg_primary
         } else {
             theme.fg_secondary
         };
-        write(&mut rows[nav_start + i], 2, &format!("{icon} {label}"), fg);
+        s_row(
+            &mut labels,
+            &mut m,
+            &format!("{icon} {label}"),
+            FontRole::Label,
+            color,
+            panel.x + S_NAV_PAD * scale,
+            ny,
+            S_NAV_ROW_H,
+            scale,
+        );
+        ny += S_NAV_ROW_H * scale;
     }
 
+    // Controls.
+    let mut cy = hy + S_HEADER_H * scale;
     for (i, (label, value)) in controls.iter().enumerate() {
-        let row = content_start + i;
-        let selected = i == selected_control;
-        let label_fg = if selected {
+        let focused = i == selected;
+        if focused {
+            quads.push(ChromeQuad::tint(
+                PxRect {
+                    x: nav_divider_x,
+                    y: cy,
+                    w: content_right + S_PAD * scale - nav_divider_x,
+                    h: S_CTRL_ROW_H * scale,
+                },
+                theme.accent,
+                0.14,
+                0.0,
+            ));
+        }
+        let label_fg = if focused {
             theme.fg_primary
         } else {
             theme.fg_secondary
         };
-        write(&mut rows[row], CONTENT_INDENT, label, label_fg);
-        if selected {
-            let width_cells = value.chars().count() + 4;
-            let start = cols.saturating_sub(2 + width_cells);
-            write(&mut rows[row], start, "\u{2039} ", theme.fg_muted);
-            write(&mut rows[row], start + 2, value, theme.accent);
-            write(
-                &mut rows[row],
-                start + 2 + value.chars().count(),
-                " \u{203a}",
+        s_row(
+            &mut labels,
+            &mut m,
+            label,
+            FontRole::Label,
+            label_fg,
+            content_x,
+            cy,
+            S_CTRL_ROW_H,
+            scale,
+        );
+        if focused {
+            let close = " \u{203a}";
+            let open = "\u{2039} ";
+            let mut x = content_right - m.width(close, FontRole::Label, None);
+            s_row(
+                &mut labels,
+                &mut m,
+                close,
+                FontRole::Label,
                 theme.fg_muted,
+                x,
+                cy,
+                S_CTRL_ROW_H,
+                scale,
+            );
+            x -= m.width(value, FontRole::Label, None);
+            s_row(
+                &mut labels,
+                &mut m,
+                value,
+                FontRole::Label,
+                theme.accent,
+                x,
+                cy,
+                S_CTRL_ROW_H,
+                scale,
+            );
+            x -= m.width(open, FontRole::Label, None);
+            s_row(
+                &mut labels,
+                &mut m,
+                open,
+                FontRole::Label,
+                theme.fg_muted,
+                x,
+                cy,
+                S_CTRL_ROW_H,
+                scale,
             );
         } else {
-            let start = cols.saturating_sub(2 + value.chars().count());
-            write(&mut rows[row], start, value, theme.fg_secondary);
+            let x = content_right - m.width(value, FontRole::Label, None);
+            s_row(
+                &mut labels,
+                &mut m,
+                value,
+                FontRole::Label,
+                theme.fg_secondary,
+                x,
+                cy,
+                S_CTRL_ROW_H,
+                scale,
+            );
         }
+        cy += S_CTRL_ROW_H * scale;
     }
 
-    write(
-        &mut rows[footer_row],
-        2,
+    // Footer.
+    let fy = panel.y + panel.h - S_PAD * scale - FontRole::Caption.line_height_px(scale);
+    s_row(
+        &mut labels,
+        &mut m,
         "up/down move   left/right change   tab category   esc close",
+        FontRole::Caption,
         theme.fg_muted,
+        content_x,
+        fy,
+        0.0,
+        scale,
     );
 
     CaptureSettings {
-        panel: PxRect {
-            x: 0.0,
-            y: 0.0,
-            w: width as f32,
-            h: height as f32,
-        },
-        text_origin: (pad, pad),
-        rows,
-        nav_cols: NAV_COLS,
-        nav_active_row: Some(nav_start + active_category),
-        selected_row: Some(content_start + selected_control),
+        panel,
+        nav_divider_x,
+        quads,
+        labels,
     }
 }
 
-fn ui_cell(c: char, fg: Srgb) -> GridCell {
-    GridCell {
-        c,
-        fg,
-        bg: None,
-        bold: false,
-        italic: false,
-        underline: false,
-    }
+/// Push a left-anchored label vertically centered in a `row_h` row (`row_h = 0` = top at `top`).
+#[allow(clippy::too_many_arguments, reason = "one focused example helper")]
+fn s_row(
+    labels: &mut Vec<ProseLabel>,
+    m: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    x: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) {
+    let line_h = m.line_height(role);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x,
+        y: top + (row_h * scale - line_h) * 0.5,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
 }
 
-fn blank_row(cols: usize, fg: Srgb) -> Vec<GridCell> {
-    vec![ui_cell(' ', fg); cols]
-}
-
-fn write(row: &mut [GridCell], col: usize, text: &str, fg: Srgb) {
-    for (i, ch) in text.chars().enumerate() {
-        if let Some(slot) = row.get_mut(col + i) {
-            *slot = ui_cell(ch, fg);
-        }
-    }
-}
-
-fn write_right(row: &mut [GridCell], cols: usize, text: &str, fg: Srgb) {
-    let start = cols.saturating_sub(text.chars().count() + 1);
-    write(row, start, text, fg);
+/// Push a right-anchored label ending at `right`.
+#[allow(clippy::too_many_arguments, reason = "one focused example helper")]
+fn s_right(
+    labels: &mut Vec<ProseLabel>,
+    m: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    right: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) {
+    let x = right - m.width(text, role, None);
+    s_row(labels, m, text, role, color, x, top, row_h, scale);
 }

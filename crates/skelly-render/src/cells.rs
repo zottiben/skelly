@@ -304,30 +304,19 @@ pub(crate) fn logo_quads(
     ]
 }
 
-/// Build the decorative quads for the full-window settings view: the `bg.elevated`
-/// panel fill, a `bg.base` fill over the left category-nav strip, the active
-/// category's `accent.subtle` fill + `accent` bar, the focused control's translucent
-/// `accent` highlight (over the content strip only), and the `border` divider between
-/// nav and content. Shared by the windowed [`Renderer`](crate::Renderer) and the
-/// headless capture so both draw identically.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "row/column indices into a small settings grid are exact as f32"
-)]
-pub(crate) fn settings_quads(
-    view: &crate::SettingsView,
+/// Build the full-window settings frame: the `bg.elevated` content panel fill, a `bg.base`
+/// fill over the left category-nav strip up to `nav_divider_x`, and the `border` divider
+/// between nav and content. The active-category highlight, the focused-control highlight, and
+/// all text are supplied by the binary as a proportional display list drawn on top. Shared by
+/// the windowed [`Renderer`](crate::Renderer) and the headless capture.
+pub(crate) fn settings_frame_quads(
+    panel: crate::PxRect,
+    nav_divider_x: f32,
     theme: &crate::theme::Theme,
-    cell_w: f32,
-    cell_h: f32,
     scale: f32,
 ) -> Vec<Quad> {
-    let panel = view.panel;
     let stroke = scale.max(1.0);
-    let divider_x = view.text_origin.0 + view.nav_cols as f32 * cell_w;
-    let row_y = |row: usize| view.text_origin.1 + row as f32 * cell_h;
-
-    // The content panel, then the nav strip painted over its left portion.
-    let mut quads = vec![
+    vec![
         Quad::new(
             panel.x,
             panel.y,
@@ -338,54 +327,18 @@ pub(crate) fn settings_quads(
         Quad::new(
             panel.x,
             panel.y,
-            (divider_x - panel.x).max(0.0),
+            (nav_divider_x - panel.x).max(0.0),
             panel.h,
             theme.bg_base.to_array(),
         ),
-    ];
-
-    // The active category: a subtle fill across the nav strip + an accent bar.
-    if let Some(row) = view.nav_active_row {
-        let y = row_y(row);
-        quads.push(Quad::new(
-            panel.x,
-            y,
-            (divider_x - panel.x).max(0.0),
-            cell_h,
-            theme.accent_subtle(),
-        ));
-        quads.push(Quad::new(
-            panel.x,
-            y,
-            (2.0 * scale).max(1.0),
-            cell_h,
-            theme.accent.to_linear(),
-        ));
-    }
-
-    // The focused control: a translucent highlight over the content strip only.
-    if let Some(row) = view.selected_row {
-        let y = row_y(row);
-        let highlight = theme.accent_subtle();
-        let content_x = divider_x + stroke;
-        quads.push(Quad::new(
-            content_x,
-            y,
-            (panel.x + panel.w - content_x).max(0.0),
-            cell_h,
-            highlight,
-        ));
-    }
-
-    // The nav/content divider, drawn last so it sits over both fills.
-    quads.push(Quad::new(
-        divider_x,
-        panel.y,
-        stroke,
-        panel.h,
-        theme.border.to_linear(),
-    ));
-    quads
+        Quad::new(
+            nav_divider_x,
+            panel.y,
+            stroke,
+            panel.h,
+            theme.border.to_linear(),
+        ),
+    ]
 }
 
 /// Alpha for a diff line's translucent background: additions and deletions use the

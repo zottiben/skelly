@@ -11,13 +11,13 @@ use skelly_config::Appearance;
 
 use crate::cells::{
     card_quads, chrome_quad, dock_frame_quads, gitdock_quads as build_gitdock_quads, grid_quads,
-    logo_quads, push_outline, scrim_quad, settings_quads as build_settings_quads, Quad, QuadLayer,
+    logo_quads, push_outline, scrim_quad, settings_frame_quads, Quad, QuadLayer,
     LOGO_WATERMARK_OPACITY,
 };
 use crate::prose::{ProseLabel, ProseLayer};
 use crate::text::{measure_cell, PaneTextInput, TextLayer};
 use crate::theme::{Rgba, Theme};
-use crate::{ChromeQuad, GitDockView, GridCell, PxRect, SettingsView};
+use crate::{ChromeQuad, GitDockView, GridCell, PxRect};
 
 /// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
@@ -358,20 +358,16 @@ fn paint_panes(text: &mut TextLayer, panes: &[CapturePane], theme: &Theme) -> Ve
 }
 
 /// The full-window settings view for [`capture_settings_rgba`], mirroring
-/// [`SettingsView`](crate::SettingsView) but owning its rows.
+/// [`SettingsView`](crate::SettingsView) but owning its display list (proportional chrome).
 pub struct CaptureSettings {
     /// The settings panel rectangle (usually the whole surface), physical px.
     pub panel: PxRect,
-    /// Pixel position of the text grid's cell `(0, 0)` top-left.
-    pub text_origin: (f32, f32),
-    /// The settings text as a monospace grid (UI-token colored).
-    pub rows: Vec<Vec<GridCell>>,
-    /// Width of the left category-nav column, in cells.
-    pub nav_cols: usize,
-    /// Grid row of the active category to mark, if any.
-    pub nav_active_row: Option<usize>,
-    /// Grid row of the focused control to highlight, if any.
-    pub selected_row: Option<usize>,
+    /// The x of the nav/content divider (physical px).
+    pub nav_divider_x: f32,
+    /// The content quads over the frame (active-category + focused-control highlights).
+    pub quads: Vec<ChromeQuad>,
+    /// The positioned proportional text labels.
+    pub labels: Vec<ProseLabel>,
 }
 
 /// Render the full-window `settings` view over the theme background headlessly - the
@@ -385,7 +381,7 @@ pub struct CaptureSettings {
 #[must_use]
 #[allow(
     clippy::cast_possible_truncation,
-    reason = "DPI scale precision loss is irrelevant for the divider stroke width"
+    reason = "DPI scale precision loss is irrelevant for the frame stroke width"
 )]
 pub fn capture_settings_rgba(
     appearance: &Appearance,
@@ -395,27 +391,21 @@ pub fn capture_settings_rgba(
     settings: &CaptureSettings,
 ) -> Vec<u8> {
     let theme = Theme::resolve(&appearance.theme);
-    let (cell_w, cell_h) = measure_cell(appearance, scale);
-    let view = SettingsView {
-        panel: settings.panel,
-        text_origin: settings.text_origin,
-        rows: &settings.rows,
-        nav_cols: settings.nav_cols,
-        nav_active_row: settings.nav_active_row,
-        selected_row: settings.selected_row,
-    };
+    let mut quads =
+        settings_frame_quads(settings.panel, settings.nav_divider_x, &theme, scale as f32);
+    quads.extend(settings.quads.iter().map(chrome_quad));
     let scene = Scene {
-        quads: build_settings_quads(&view, &theme, cell_w, cell_h, scale as f32),
-        rows: &settings.rows,
-        left: settings.text_origin.0,
-        top: settings.text_origin.1,
+        quads,
+        rows: &[],
+        left: settings.panel.x,
+        top: settings.panel.y,
         clip: (
             settings.panel.x,
             settings.panel.y,
             settings.panel.w,
             settings.panel.h,
         ),
-        prose: Vec::new(),
+        prose: settings.labels.clone(),
     };
     pollster::block_on(capture_async(
         appearance,

@@ -246,16 +246,12 @@ pub struct TimelineView<'a> {
 pub struct SettingsView<'a> {
     /// The settings panel rectangle on the surface (usually the whole window).
     pub panel: PxRect,
-    /// Pixel position of the text grid's cell `(0, 0)` top-left, physical px.
-    pub text_origin: (f32, f32),
-    /// The settings text as a monospace grid (rows top to bottom), UI-token colored.
-    pub rows: &'a [Vec<GridCell>],
-    /// Width of the left category-nav column, in cells (the divider sits at its edge).
-    pub nav_cols: usize,
-    /// Grid row of the active category, to mark with the `accent` bar + subtle fill.
-    pub nav_active_row: Option<usize>,
-    /// Grid row of the focused control, to mark with the translucent `accent` fill.
-    pub selected_row: Option<usize>,
+    /// The x of the nav/content divider (physical px); the nav strip fills to its left.
+    pub nav_divider_x: f32,
+    /// The content quads over the frame (active-category fill + bar, focused-control fill).
+    pub quads: &'a [ChromeQuad],
+    /// The positioned proportional text labels (nav categories, control label/value, footer).
+    pub labels: &'a [ProseLabel],
 }
 
 /// One cell to render: its character, foreground, optional background fill, and

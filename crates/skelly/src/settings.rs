@@ -16,23 +16,24 @@
 //! registry we do not have yet) and mouse hit-testing.
 
 use skelly_config::{Config, CursorStyle, DiffView, SidebarMode, TabTitle};
-use skelly_render::{GridCell, Srgb, Theme};
+use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
 
-/// Width (cells) of the left category-nav column; the divider sits at its right edge.
-const NAV_COLS: usize = 20;
-/// Column where nav labels begin (leaving column 0 for the active accent bar).
-const NAV_INDENT: usize = 2;
-/// Column where content (the category heading and control rows) begins.
-const CONTENT_INDENT: usize = NAV_COLS + 2;
-/// Grid rows above the lists: the brand line and a blank spacer.
-const HEADER_ROWS: usize = 2;
-/// Grid rows for the content heading (category name) + a blank, before the controls.
-const CONTENT_HEADER_ROWS: usize = 2;
-/// The first grid row of the category nav list.
-const NAV_START: usize = HEADER_ROWS;
-/// The first grid row of the control list.
-const CONTENT_START: usize = HEADER_ROWS + CONTENT_HEADER_ROWS;
-/// The footer hint line - also the view's minimum useful width.
+/// Settings-view layout constants in **logical** px (multiplied by the DPI scale). Tuned to
+/// the guide's settings screen: a left category nav strip and a right control panel.
+const NAV_WIDTH: f32 = 210.0;
+/// Content pad from the window edges (top / bottom / right), the guide's content pad.
+const PAD: f32 = 20.0;
+/// Left inset of a nav label (leaving room for the active accent bar).
+const NAV_PAD: f32 = 16.0;
+/// Left inset of the content column (label + control), from the nav/content divider.
+const CONTENT_PAD: f32 = 24.0;
+/// Header-row height (the category heading).
+const HEADER_H: f32 = 44.0;
+/// Category nav row height.
+const NAV_ROW_H: f32 = 32.0;
+/// Control row height.
+const CTRL_ROW_H: f32 = 34.0;
+/// The footer hint line.
 const FOOTER: &str = "up/down move   left/right change   tab category   esc close";
 
 /// One editable control. It maps to exactly one `config.toml` key (Hard rule 1):
@@ -456,15 +457,13 @@ fn decimals_for(divisor: i32) -> usize {
 
 /// The rendered settings grid plus the highlight rows, for a
 /// [`skelly_render::SettingsView`].
-pub(crate) struct View {
-    /// The settings lines as a grid of UI-colored cells (nav + content in each row).
-    pub(crate) rows: Vec<Vec<GridCell>>,
-    /// Width of the nav column in cells (where the divider is drawn).
-    pub(crate) nav_cols: usize,
-    /// Grid row of the active category (accent bar + subtle fill).
-    pub(crate) nav_active_row: Option<usize>,
-    /// Grid row of the focused control (translucent accent fill).
-    pub(crate) selected_row: Option<usize>,
+pub(crate) struct Paint {
+    /// The x of the nav/content divider (physical px); the nav strip fills to its left.
+    pub(crate) nav_divider_x: f32,
+    /// The content quads over the frame (active-category fill + bar, focused-control fill).
+    pub(crate) quads: Vec<ChromeQuad>,
+    /// The positioned proportional text labels.
+    pub(crate) labels: Vec<ProseLabel>,
 }
 
 /// Settings-view state: whether it is open, the active category, and the focused
@@ -542,58 +541,201 @@ impl Settings {
         Some(control.key)
     }
 
-    /// Build the settings grid `cols` cells wide, reading current values from `config`
-    /// and coloring with `theme`'s UI tokens. Nav labels fill the first [`NAV_COLS`]
-    /// cells of each row; the active category's controls fill the rest.
-    pub(crate) fn view(&self, cols: usize, config: &Config, theme: &Theme) -> View {
-        let cols = cols.max(FOOTER.chars().count() + 2);
-        let controls = self.controls();
-        let nav_end = NAV_START + CATEGORIES.len();
-        let content_end = CONTENT_START + controls.len();
-        let footer_row = nav_end.max(content_end) + 1;
-        let total = footer_row + 1;
+    /// Build the settings view's proportional display list within `panel` (physical px) at
+    /// DPI `scale`, reading current values from `config` in `theme`'s UI tokens: the category
+    /// heading, the left category nav (active one filled + barred), the control rows for the
+    /// active category (label + value, the focused one filled with a guillemet-bracketed
+    /// accent value), and the footer. The renderer draws the panel + nav strip + divider.
+    pub(crate) fn build(
+        &self,
+        panel: PxRect,
+        scale: f32,
+        config: &Config,
+        theme: &Theme,
+        measure: &mut TextMeasure,
+    ) -> Paint {
+        let nav_divider_x = panel.x + NAV_WIDTH * scale;
+        let content_x = nav_divider_x + CONTENT_PAD * scale;
+        let content_right = panel.x + panel.w - PAD * scale;
+        let mut quads = Vec::new();
+        let mut labels = Vec::new();
 
-        let mut rows: Vec<Vec<GridCell>> = (0..total)
-            .map(|_| blank_row(cols, theme.fg_muted))
-            .collect();
-
-        // Header: a quiet brand mark, and the active category name as the content
-        // heading with an Esc hint on the far right.
-        write(&mut rows[0], NAV_INDENT, "skelly", theme.fg_secondary);
-        write(
-            &mut rows[0],
-            CONTENT_INDENT,
+        // Header: the active category name (heading) + an esc hint.
+        let hy = panel.y + PAD * scale;
+        push_row(
+            &mut labels,
+            measure,
             CATEGORIES[self.category].label,
+            FontRole::H2,
             theme.fg_primary,
+            content_x,
+            hy,
+            HEADER_H,
+            scale,
         );
-        write_right(&mut rows[0], cols, "esc to close", theme.fg_muted);
+        push_right(
+            &mut labels,
+            measure,
+            "esc to close",
+            FontRole::Caption,
+            theme.fg_muted,
+            content_right,
+            hy,
+            HEADER_H,
+            scale,
+        );
 
-        // The category nav list.
+        let body_top = hy + HEADER_H * scale;
+        self.push_nav(
+            &mut quads,
+            &mut labels,
+            measure,
+            panel,
+            nav_divider_x,
+            body_top,
+            scale,
+            theme,
+        );
+        self.push_controls(
+            &mut quads,
+            &mut labels,
+            measure,
+            config,
+            (content_x, content_right, nav_divider_x),
+            body_top,
+            scale,
+            theme,
+        );
+
+        // Footer.
+        let fy = panel.y + panel.h - PAD * scale - FontRole::Caption.line_height_px(scale);
+        push_row(
+            &mut labels,
+            measure,
+            FOOTER,
+            FontRole::Caption,
+            theme.fg_muted,
+            content_x,
+            fy,
+            0.0,
+            scale,
+        );
+
+        Paint {
+            nav_divider_x,
+            quads,
+            labels,
+        }
+    }
+
+    /// Draw the left category nav: each category's icon + label, the active one behind an
+    /// `accent.subtle` fill + `accent` bar.
+    #[allow(clippy::too_many_arguments, reason = "one focused nav builder")]
+    fn push_nav(
+        &self,
+        quads: &mut Vec<ChromeQuad>,
+        labels: &mut Vec<ProseLabel>,
+        measure: &mut TextMeasure,
+        panel: PxRect,
+        nav_divider_x: f32,
+        body_top: f32,
+        scale: f32,
+        theme: &Theme,
+    ) {
+        let mut y = body_top;
         for (index, category) in CATEGORIES.iter().enumerate() {
-            let row = NAV_START + index;
-            let fg = if index == self.category {
+            let active = index == self.category;
+            if active {
+                let h = NAV_ROW_H * scale;
+                quads.push(ChromeQuad::tint(
+                    PxRect {
+                        x: panel.x,
+                        y,
+                        w: nav_divider_x - panel.x,
+                        h,
+                    },
+                    theme.accent,
+                    0.14,
+                    0.0,
+                ));
+                quads.push(ChromeQuad::fill(
+                    PxRect {
+                        x: panel.x,
+                        y,
+                        w: (2.0 * scale).max(1.0),
+                        h,
+                    },
+                    theme.accent,
+                ));
+            }
+            let color = if active {
                 theme.fg_primary
             } else {
                 theme.fg_secondary
             };
             let label = format!("{} {}", category.icon, category.label);
-            write(&mut rows[row], NAV_INDENT, &label, fg);
+            push_row(
+                labels,
+                measure,
+                &label,
+                FontRole::Label,
+                color,
+                panel.x + NAV_PAD * scale,
+                y,
+                NAV_ROW_H,
+                scale,
+            );
+            y += NAV_ROW_H * scale;
         }
+    }
 
-        // The control list for the active category.
-        for (index, control) in controls.iter().enumerate() {
-            let row = CONTENT_START + index;
-            let selected = index == self.selected;
-            control_row(&mut rows[row], cols, control, config, selected, theme);
-        }
-
-        write(&mut rows[footer_row], NAV_INDENT, FOOTER, theme.fg_muted);
-
-        View {
-            rows,
-            nav_cols: NAV_COLS,
-            nav_active_row: Some(NAV_START + self.category),
-            selected_row: (!controls.is_empty()).then_some(CONTENT_START + self.selected),
+    /// Draw the active category's control rows: each label + value, the focused one behind an
+    /// `accent.subtle` fill. `x = (content_x, content_right, nav_divider_x)`.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one focused control-list builder"
+    )]
+    fn push_controls(
+        &self,
+        quads: &mut Vec<ChromeQuad>,
+        labels: &mut Vec<ProseLabel>,
+        measure: &mut TextMeasure,
+        config: &Config,
+        x: (f32, f32, f32),
+        body_top: f32,
+        scale: f32,
+        theme: &Theme,
+    ) {
+        let (content_x, content_right, nav_divider_x) = x;
+        let mut y = body_top;
+        for (index, control) in self.controls().iter().enumerate() {
+            let focused = index == self.selected;
+            if focused {
+                quads.push(ChromeQuad::tint(
+                    PxRect {
+                        x: nav_divider_x,
+                        y,
+                        w: content_right + PAD * scale - nav_divider_x,
+                        h: CTRL_ROW_H * scale,
+                    },
+                    theme.accent,
+                    0.14,
+                    0.0,
+                ));
+            }
+            push_control(
+                labels,
+                measure,
+                control,
+                config,
+                focused,
+                content_x,
+                content_right,
+                y,
+                scale,
+                theme,
+            );
+            y += CTRL_ROW_H * scale;
         }
     }
 }
@@ -604,84 +746,152 @@ impl Default for Settings {
     }
 }
 
-/// Write one control row: its label at [`CONTENT_INDENT`] and its value right-aligned.
-/// The focused control brackets the value in guillemets and paints it in `accent`.
-fn control_row(
-    row: &mut [GridCell],
-    cols: usize,
+/// Push one control row: its `label` at the content inset and its value right-anchored. The
+/// focused control brackets the value in guillemets and paints it in `accent`; otherwise the
+/// value is a quiet secondary.
+#[allow(clippy::too_many_arguments, reason = "one focused control-row builder")]
+fn push_control(
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
     control: &Control,
     config: &Config,
-    selected: bool,
+    focused: bool,
+    content_x: f32,
+    content_right: f32,
+    top: f32,
+    scale: f32,
     theme: &Theme,
 ) {
-    let label_fg = if selected {
+    let label_fg = if focused {
         theme.fg_primary
     } else {
         theme.fg_secondary
     };
-    write(row, CONTENT_INDENT, control.label, label_fg);
+    push_row(
+        labels,
+        measure,
+        control.label,
+        FontRole::Label,
+        label_fg,
+        content_x,
+        top,
+        CTRL_ROW_H,
+        scale,
+    );
 
     let value = control.kind.value(config);
-    let value_fg = if selected {
+    let value_fg = if focused {
         theme.accent
     } else {
         theme.fg_secondary
     };
-    if selected {
-        // `‹ value ›`: the guillemets signal the value is adjustable with `←/→`.
-        let width = value.chars().count() + 4;
-        let start = cols.saturating_sub(2 + width);
-        write(row, start, "\u{2039} ", theme.fg_muted);
-        write(row, start + 2, &value, value_fg);
-        write(
-            row,
-            start + 2 + value.chars().count(),
-            " \u{203a}",
+    if focused {
+        // `value ›` bracketed by guillemets: signals the value is adjustable with `←/→`.
+        let close = " \u{203a}";
+        let close_w = measure.width(close, FontRole::Label, None);
+        let value_w = measure.width(&value, FontRole::Label, None);
+        let open = "\u{2039} ";
+        let open_w = measure.width(open, FontRole::Label, None);
+        let mut x = content_right - close_w;
+        push_row(
+            labels,
+            measure,
+            close,
+            FontRole::Label,
             theme.fg_muted,
+            x,
+            top,
+            CTRL_ROW_H,
+            scale,
+        );
+        x -= value_w;
+        push_row(
+            labels,
+            measure,
+            &value,
+            FontRole::Label,
+            value_fg,
+            x,
+            top,
+            CTRL_ROW_H,
+            scale,
+        );
+        x -= open_w;
+        push_row(
+            labels,
+            measure,
+            open,
+            FontRole::Label,
+            theme.fg_muted,
+            x,
+            top,
+            CTRL_ROW_H,
+            scale,
         );
     } else {
-        let start = cols.saturating_sub(2 + value.chars().count());
-        write(row, start, &value, value_fg);
+        let x = content_right - measure.width(&value, FontRole::Label, None);
+        push_row(
+            labels,
+            measure,
+            &value,
+            FontRole::Label,
+            value_fg,
+            x,
+            top,
+            CTRL_ROW_H,
+            scale,
+        );
     }
 }
 
-/// One UI cell: a character in `fg`, no background or attributes.
-fn cell(c: char, fg: Srgb) -> GridCell {
-    GridCell {
-        c,
-        fg,
-        bg: None,
-        bold: false,
-        italic: false,
-        underline: false,
-    }
+/// Push one label vertically centered in a row of `row_h` logical px whose top is physical
+/// `top` (`row_h = 0` places the label's top at `top`).
+#[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
+fn push_row(
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    x: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) {
+    let line_h = measure.line_height(role);
+    labels.push(ProseLabel {
+        text: text.to_owned(),
+        x,
+        y: top + (row_h * scale - line_h) * 0.5,
+        role,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
 }
 
-/// A blank row of `cols` spaces in `fg`.
-fn blank_row(cols: usize, fg: Srgb) -> Vec<GridCell> {
-    vec![cell(' ', fg); cols]
-}
-
-/// Overwrite `text` into `row` starting at column `col`, clipped to the row width.
-fn write(row: &mut [GridCell], col: usize, text: &str, fg: Srgb) {
-    for (i, ch) in text.chars().enumerate() {
-        if let Some(slot) = row.get_mut(col + i) {
-            *slot = cell(ch, fg);
-        }
-    }
-}
-
-/// Write `text` so it ends one cell from the right edge (`cols`).
-fn write_right(row: &mut [GridCell], cols: usize, text: &str, fg: Srgb) {
-    let start = cols.saturating_sub(text.chars().count() + 1);
-    write(row, start, text, fg);
+/// Push a right-anchored label ending at `right`, vertically centered in the row.
+#[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
+fn push_right(
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    right: f32,
+    top: f32,
+    row_h: f32,
+    scale: f32,
+) {
+    let x = right - measure.width(text, role, None);
+    push_row(labels, measure, text, role, color, x, top, row_h, scale);
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, CATEGORIES, CONTENT_START, NAV_START};
+    use super::{Settings, CATEGORIES};
     use skelly_config::Config;
-    use skelly_render::Theme;
+    use skelly_render::{PxRect, TextMeasure, Theme};
 
     #[test]
     fn adjusting_theme_writes_the_config_and_returns_its_key() {
@@ -748,17 +958,26 @@ mod tests {
     }
 
     #[test]
-    fn view_marks_the_active_category_and_focused_control() {
+    fn build_marks_the_active_category_and_focused_control() {
         let config = Config::default();
         let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
         let mut settings = Settings::new();
         settings.move_selection(2); // third control of Appearance
-        let view = settings.view(90, &config, &theme);
-        assert_eq!(view.nav_active_row, Some(NAV_START)); // category 0
-        assert_eq!(view.selected_row, Some(CONTENT_START + 2));
-        assert_eq!(view.nav_cols, super::NAV_COLS);
-        // Every row is padded to the requested width.
-        assert!(view.rows.iter().all(|r| r.len() == 90));
+        let panel = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: 1200.0,
+            h: 800.0,
+        };
+        let paint = settings.build(panel, 2.0, &config, &theme, &mut m);
+        // The active category (Appearance) heading + the focused control value draw in accent;
+        // the active-category fill/bar + focused-control fill are among the quads.
+        assert!(paint.labels.iter().any(|l| l.text == "Appearance"));
+        assert!(paint.labels.iter().any(|l| l.color == theme.accent));
+        // >= 3 quads: the active-category subtle fill + accent bar + the focused-control fill.
+        assert!(paint.quads.len() >= 3);
+        assert!(paint.nav_divider_x > panel.x);
     }
 
     #[test]
