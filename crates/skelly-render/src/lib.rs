@@ -227,3 +227,33 @@ pub struct GridCell {
     /// Draw an underline rule beneath the cell in the foreground color.
     pub underline: bool,
 }
+
+/// Bench-only entry points for the pure, per-frame CPU builders on the render hot path
+/// (playbook §4). These wrap the internal `grid_quads` / `text_runs` - which turn a grid
+/// snapshot into GPU instance / shaping data every frame - so `criterion` can measure them
+/// with no GPU or window. They take and return only public types (the internal `Quad` /
+/// `Run` never leak, and glyphon's `Color` inside `Run` stays hidden); the real output is
+/// black-boxed internally so the optimizer cannot elide the work, and the count is returned
+/// as something to observe. Not a stable API - hidden from the docs, exists solely for the
+/// `benches/render.rs` harness.
+#[doc(hidden)]
+pub mod bench_support {
+    use crate::{GridCell, Srgb};
+
+    /// Build one pane's background / underline / selection / cursor quads for `rows` (a
+    /// focused pane: cursor at `(0, 0)`, no selection) and return how many were produced.
+    #[must_use]
+    pub fn grid_quads_len(cell_w: f32, cell_h: f32, rows: &[Vec<GridCell>], accent: Srgb) -> usize {
+        let quads =
+            crate::cells::grid_quads(cell_w, cell_h, (0.0, 0.0), rows, Some((0, 0)), accent, &[]);
+        std::hint::black_box(&quads).len()
+    }
+
+    /// Merge `rows` into shaping runs (same color / weight / style coalesced) and return
+    /// how many runs resulted.
+    #[must_use]
+    pub fn text_runs_len(rows: &[Vec<GridCell>]) -> usize {
+        let runs = crate::text::text_runs(rows);
+        std::hint::black_box(&runs).len()
+    }
+}

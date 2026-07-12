@@ -16,6 +16,12 @@ workspace = true
 # Headless capture example: encode the offscreen render to a PNG for visual/golden
 # verification without a window.
 png = "0.17"
+# Hot-path benchmarks for the per-frame CPU builders (playbook §4 perf budgets).
+criterion = { workspace = true }
+
+[[bench]]
+name = "render"
+harness = false
 
 [dependencies]
 bytemuck = { version = "1.25.1", features = ["derive"] }

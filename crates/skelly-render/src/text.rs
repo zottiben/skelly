@@ -324,8 +324,9 @@ impl TextLayer {
 
 /// A run of consecutive cells that share a color, weight, and style - the unit we
 /// hand to `set_rich_text` as one span. Newlines are their own (color-irrelevant)
-/// runs separating rows.
-struct Run {
+/// runs separating rows. `pub(crate)` only so the bench seam can observe `text_runs`'
+/// output; its fields stay private (glyphon's `Color` never leaves this module).
+pub(crate) struct Run {
     text: String,
     color: Color,
     bold: bool,
@@ -349,7 +350,7 @@ impl Run {
 /// Merge a grid into runs of same-color, same-weight, same-style cells, with a
 /// newline run between rows. Underline is *not* a run key - it is drawn as a quad,
 /// not a shaping attribute (glyphon does not render text decorations).
-fn text_runs(rows: &[Vec<GridCell>]) -> Vec<Run> {
+pub(crate) fn text_runs(rows: &[Vec<GridCell>]) -> Vec<Run> {
     let mut runs: Vec<Run> = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         if index > 0 {

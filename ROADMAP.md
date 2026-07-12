@@ -288,7 +288,16 @@ follow-ups, finished opportunistically.
     abrupt exit). Tests: `panic_message` payload extraction + a hook-fires-and-logs test;
     verified the log file is created + populated on a real boot. (Follow-up: recover a single
     panicking pane in-window - a dead-pane state - without tearing down the window.)
-  - [ ] Perf budgets (`criterion` on the parser/renderer hot paths).
+  - [x] **Perf budgets** (`criterion` on the parser/renderer hot paths, playbook §4).
+    `skelly-term/benches/parser.rs` measures `Parser::advance` throughput on representative
+    streams - plain text (~100 MiB/s), SGR-heavy color (~120 MiB/s), a full-screen TUI
+    repaint (~170 MiB/s) - plus the per-frame grid read (`cells`, ~5us for 80x24).
+    `skelly-render/benches/render.rs` measures the pure per-frame CPU builders `grid_quads`
+    and `text_runs` on a plain vs. an adversarial all-distinct-color grid (via a
+    `#[doc(hidden)] bench_support` seam so no GPU or window is needed and no internal types
+    leak). criterion is lean (no plotters/rayon); soft budgets are documented in each bench
+    (a CI regression gate is a follow-up). (Surfaced a future optimization: the busy-grid
+    `grid_quads` spends ~60us mostly in per-cell sRGB->linear conversion.)
   - [ ] Packaging (`cargo-dist` + `cargo-release`) and the first tagged release.
 
 ## Open product decisions

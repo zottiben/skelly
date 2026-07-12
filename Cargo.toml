@@ -23,6 +23,9 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
+# Micro-benchmarking (playbook §4 hot-path budgets). Lean: no plotters/gnuplot HTML
+# reports or rayon, just the CLI stats harness, to keep the bench dep graph small.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
 
 [workspace.lints.rust]
 # `unsafe` is a reviewed exception, not a default. Crates that genuinely need FFI /
