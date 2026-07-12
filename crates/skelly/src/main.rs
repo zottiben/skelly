@@ -220,6 +220,9 @@ struct App {
     /// as cwd-based tab titles).
     status_cwd: String,
     status_branch: Option<String>,
+    /// The process repo's working-tree diff `(added, removed)` lines for the status-line dirty
+    /// indicator (§10.3); refreshed at startup + when the git dock refreshes.
+    status_dirty: Option<(u32, u32)>,
     status_shell: String,
     /// The per-repo git diff dock (right dock) state.
     git_dock: GitDock,
@@ -302,6 +305,7 @@ impl App {
             measure: TextMeasure::new(1.0),
             status_cwd: String::new(),
             status_branch: None,
+            status_dirty: None,
             status_shell: String::new(),
             git_dock: GitDock::new(),
             timeline: TimelineDock::new(),
@@ -609,6 +613,7 @@ impl App {
                     &statusline::Info {
                         cwd: &self.status_cwd,
                         branch: self.status_branch.as_deref(),
+                        dirty: self.status_dirty,
                         shell: &self.status_shell,
                         cursor: *cursor,
                     },
@@ -1125,6 +1130,10 @@ impl App {
         match Repo::discover(&start) {
             Ok(Some(repo)) => match repo.status() {
                 Ok(status) => {
+                    // Refresh the status-line dirty indicator from the same status (§10.3).
+                    let added: u32 = status.files.iter().map(|f| f.added).sum();
+                    let removed: u32 = status.files.iter().map(|f| f.removed).sum();
+                    self.status_dirty = (added > 0 || removed > 0).then_some((added, removed));
                     self.git_dock.load(status);
                     self.git_repo = Some(repo);
                     self.load_selected_diff();
@@ -2299,6 +2308,17 @@ fn current_branch() -> Option<String> {
     Repo::discover(&start).ok().flatten()?.status().ok()?.branch
 }
 
+/// The working-tree diff size `(added, removed)` lines of the process-cwd repo, for the status
+/// line's dirty indicator (design §10.3 `●+2 −1`). `None` outside a repo or when there are no
+/// line changes (a clean tree, or only untracked files).
+fn repo_dirty() -> Option<(u32, u32)> {
+    let start = std::env::current_dir().ok()?;
+    let status = Repo::discover(&start).ok().flatten()?.status().ok()?;
+    let added: u32 = status.files.iter().map(|f| f.added).sum();
+    let removed: u32 = status.files.iter().map(|f| f.removed).sum();
+    (added > 0 || removed > 0).then_some((added, removed))
+}
+
 /// `path` with the home directory collapsed to `~` (for the status line), else the path
 /// as-is. Best-effort; falls back to the lossy string form.
 fn home_relative(path: &std::path::Path) -> String {
@@ -2434,6 +2454,7 @@ impl ApplicationHandler<Wakeup> for App {
         // Cache the status-line context (cwd · branch · shell) once at startup.
         self.status_cwd = home_relative(&std::env::current_dir().unwrap_or_default());
         self.status_branch = current_branch();
+        self.status_dirty = repo_dirty();
         self.status_shell = shell_name();
         let renderer = Renderer::new(
             window.clone(),

@@ -285,6 +285,13 @@ fn status_line(
             x += w + gap;
         }
     }
+    // The dirty indicator `●+A −R` (accent), mirroring the binary (representative counts).
+    let dirty = "\u{25cf}+2 \u{2212}1";
+    let dw = m.width(dirty, FontRole::Mono, None);
+    if x + dw <= left_limit {
+        labels.push(label(dirty.to_owned(), x, theme.accent));
+        x += dw + gap;
+    }
     let w = m.width(shell, FontRole::Mono, None);
     if x + w <= left_limit {
         labels.push(label(shell.to_owned(), x, theme.fg_muted));

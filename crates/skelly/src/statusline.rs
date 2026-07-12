@@ -22,6 +22,9 @@ const GAP: f32 = 14.0;
 pub(crate) struct Info<'a> {
     pub(crate) cwd: &'a str,
     pub(crate) branch: Option<&'a str>,
+    /// The working-tree diff `(added, removed)` lines, shown as `●+A −R` in accent after the
+    /// branch (design §10.3); `None` when clean or outside a repo.
+    pub(crate) dirty: Option<(u32, u32)>,
     pub(crate) shell: &'a str,
     pub(crate) cursor: (usize, usize),
 }
@@ -117,6 +120,15 @@ pub(crate) fn paint(
             x += w + gap;
         }
     }
+    if let Some((added, removed)) = info.dirty {
+        // The dirty indicator `●+A −R` (design §10.3), the whole segment in accent.
+        let seg = format!("\u{25cf}+{added} \u{2212}{removed}");
+        let w = measure.width(&seg, FontRole::Mono, None);
+        if x + w <= left_limit {
+            labels.push(label(seg, x, theme.accent));
+            x += w + gap;
+        }
+    }
     if !info.shell.is_empty() {
         let w = measure.width(info.shell, FontRole::Mono, None);
         if x + w <= left_limit {
@@ -161,6 +173,7 @@ mod tests {
         let info = Info {
             cwd: "~/skelly",
             branch: Some("main"),
+            dirty: Some((2, 1)),
             shell: "zsh",
             cursor: (2, 3),
         };
@@ -172,6 +185,7 @@ mod tests {
             .join("\n");
         assert!(joined.contains("~/skelly"), "cwd: {joined}");
         assert!(joined.contains("\u{2442} main"), "branch");
+        assert!(joined.contains("\u{25cf}+2 \u{2212}1"), "dirty: {joined}");
         assert!(joined.contains("zsh"), "shell");
         // Cursor is 1-based: (col 2, row 3) -> Ln 4, Col 3.
         assert!(joined.contains("Ln 4, Col 3"), "cursor: {joined}");
@@ -189,6 +203,7 @@ mod tests {
         let info = Info {
             cwd: "~/tmp",
             branch: None,
+            dirty: None,
             shell: "bash",
             cursor: (0, 0),
         };
@@ -208,6 +223,7 @@ mod tests {
         let info = Info {
             cwd: "~/work/skelly/crates/skelly-render",
             branch: Some("feat/m5-hardening"),
+            dirty: None,
             shell: "zsh",
             cursor: (12, 340),
         };
