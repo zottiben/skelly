@@ -9,7 +9,14 @@
     reason = "surface dimensions and instance counts are small; casts are exact"
 )]
 
-/// One instanced quad: a pixel rectangle and a linear RGBA fill.
+/// One instanced quad: a pixel rectangle, a linear RGBA fill, and shape params.
+///
+/// `params` is `[radius, blur, _, _]` in physical pixels and drives the fragment
+/// shader: `radius == 0 && blur == 0` is a plain sharp fill (every cell background,
+/// divider, cursor, underline, and flush panel - identical to the old flat pipeline);
+/// `radius > 0` rounds the corners with a signed-distance box and a 1px anti-aliased
+/// edge (floating panels); `blur > 0` marks the quad a soft drop shadow, its coverage
+/// feathered over `blur` px around the inset panel box (the guide's elevation tokens).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 pub(crate) struct Quad {
@@ -17,14 +24,76 @@ pub(crate) struct Quad {
     rect: [f32; 4],
     /// Linear RGBA.
     color: [f32; 4],
+    /// `[radius, blur, _, _]` in physical pixels (see the type docs).
+    params: [f32; 4],
 }
 
+/// A drop-shadow spec in *logical* px, matching the guide's elevation tokens (§03).
+/// Every guide shadow has a zero horizontal offset, so only the vertical offset `dy`,
+/// the `blur` radius, and the black `alpha` vary.
+#[derive(Clone, Copy)]
+pub(crate) struct Shadow {
+    dy: f32,
+    blur: f32,
+    alpha: f32,
+}
+
+/// `e4` - command palette, modals. (The lighter `e2`/`e3` tokens land with the dock /
+/// tooltip surfaces that use them.)
+pub(crate) const SHADOW_E4: Shadow = Shadow {
+    dy: 16.0,
+    blur: 48.0,
+    alpha: 0.52,
+};
+
+/// Corner radius (logical px) for floating panels / the palette / panes (the guide's
+/// `lg` radius token).
+pub(crate) const RADIUS_LG: f32 = 10.0;
+/// Corner radius (logical px) for the selected-row pill inside a menu/palette (the
+/// guide's `md` radius: cards, menus, list rows).
+pub(crate) const RADIUS_MD: f32 = 8.0;
+
 impl Quad {
-    /// A quad at pixel `(x, y)` of size `(w, h)` filled with linear `color`.
+    /// A sharp-cornered quad at pixel `(x, y)` of size `(w, h)` filled with linear
+    /// `color` - the flat fill used for cell backgrounds, dividers, cursors, and
+    /// flush surfaces (`params` all zero, so the shader returns the fill directly).
     pub(crate) fn new(x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) -> Self {
         Self {
             rect: [x, y, w, h],
             color,
+            params: [0.0, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// A quad with anti-aliased rounded corners of `radius` physical px (clamped to
+    /// half the shorter side so the corners never overlap). Used for floating panels
+    /// and list-row pills.
+    pub(crate) fn rounded(x: f32, y: f32, w: f32, h: f32, color: [f32; 4], radius: f32) -> Self {
+        let radius = radius.clamp(0.0, w.min(h) * 0.5);
+        Self {
+            rect: [x, y, w, h],
+            color,
+            params: [radius, 0.0, 0.0, 0.0],
+        }
+    }
+
+    /// A soft drop shadow for the rounded `panel` (physical px), following the guide's
+    /// elevation `spec` at DPI `scale`, with corners matching the panel's `radius`. The
+    /// quad is the panel inflated by the blur on every side and shifted down by the
+    /// shadow offset; the fragment shader feathers its coverage from the panel's edge
+    /// outward, so it reads as a shadow cast behind the panel (which is drawn on top).
+    pub(crate) fn shadow(panel: crate::PxRect, spec: Shadow, scale: f32, radius: f32) -> Self {
+        let blur = spec.blur * scale;
+        let dy = spec.dy * scale;
+        Self {
+            rect: [
+                panel.x - blur,
+                panel.y + dy - blur,
+                panel.w + 2.0 * blur,
+                panel.h + 2.0 * blur,
+            ],
+            color: [0.0, 0.0, 0.0, spec.alpha],
+            params: [radius, blur, 0.0, 0.0],
         }
     }
 }
@@ -128,22 +197,42 @@ pub(crate) fn overlay_quads(
 ) -> Vec<Quad> {
     let panel = view.panel;
     let stroke = scale.max(1.0);
-    let mut quads = vec![Quad::new(
+    let radius = RADIUS_LG * scale;
+    let mut quads = Vec::new();
+
+    // The e4 drop shadow behind the floating card, then a rounded `border.strong`
+    // card with the `bg.elevated` fill inset by the stroke - a 1px rounded border ring
+    // (replacing the old four sharp edge bars, which would poke past rounded corners).
+    quads.push(Quad::shadow(panel, SHADOW_E4, scale, radius));
+    quads.push(Quad::rounded(
         panel.x,
         panel.y,
         panel.w,
         panel.h,
+        theme.border_strong.to_linear(),
+        radius,
+    ));
+    quads.push(Quad::rounded(
+        panel.x + stroke,
+        panel.y + stroke,
+        (panel.w - 2.0 * stroke).max(0.0),
+        (panel.h - 2.0 * stroke).max(0.0),
         theme.bg_elevated.to_linear(),
-    )];
+        (radius - stroke).max(0.0),
+    ));
+
+    // The selected command: a rounded `accent.subtle` pill inset from the panel edges
+    // (the guide's rounded list rows).
     if let Some(row) = view.selected_row {
-        let highlight = theme.accent_subtle();
+        let inset = 6.0 * scale;
         let y = view.text_origin.1 + row as f32 * cell_h;
-        quads.push(Quad::new(
-            panel.x + stroke,
+        quads.push(Quad::rounded(
+            panel.x + inset,
             y,
-            panel.w - 2.0 * stroke,
+            (panel.w - 2.0 * inset).max(0.0),
             cell_h,
-            highlight,
+            theme.accent_subtle(),
+            RADIUS_MD * scale,
         ));
     }
     if let Some((col, row)) = view.caret {
@@ -157,15 +246,6 @@ pub(crate) fn overlay_quads(
             theme.accent.to_linear(),
         ));
     }
-    push_outline(
-        &mut quads,
-        panel.x,
-        panel.y,
-        panel.w,
-        panel.h,
-        stroke,
-        theme.border_strong.to_linear(),
-    );
     quads
 }
 
@@ -496,8 +576,8 @@ struct Uniforms {
     _pad: [f32; 2],
 }
 
-const INSTANCE_ATTRS: [wgpu::VertexAttribute; 2] =
-    wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4];
+const INSTANCE_ATTRS: [wgpu::VertexAttribute; 3] =
+    wgpu::vertex_attr_array![0 => Float32x4, 1 => Float32x4, 2 => Float32x4];
 
 /// The colored-quad render pipeline plus its dynamic instance buffer.
 pub(crate) struct QuadLayer {
@@ -690,10 +770,13 @@ struct Uniforms { size: vec2<f32>, _pad: vec2<f32> };
 struct Inst {
     @location(0) rect: vec4<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) params: vec4<f32>,
 };
 struct VOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) @interpolate(flat) rect: vec4<f32>,
+    @location(2) @interpolate(flat) params: vec4<f32>,
 };
 
 @vertex
@@ -708,12 +791,41 @@ fn vs_main(@builtin(vertex_index) vi: u32, inst: Inst) -> VOut {
     var out: VOut;
     out.pos = vec4<f32>(ndc, 0.0, 1.0);
     out.color = inst.color;
+    out.rect = inst.rect;
+    out.params = inst.params;
     return out;
+}
+
+// Signed distance from point `p` to a box of half-size `b` with corner radius `r`
+// (negative inside). The standard rounded-box SDF (Inigo Quilez).
+fn sd_round_box(p: vec2<f32>, b: vec2<f32>, r: f32) -> f32 {
+    let q = abs(p) - b + vec2<f32>(r, r);
+    return min(max(q.x, q.y), 0.0) + length(max(q, vec2<f32>(0.0, 0.0))) - r;
 }
 
 @fragment
 fn fs_main(in: VOut) -> @location(0) vec4<f32> {
-    return in.color;
+    let radius = in.params.x;
+    let blur = in.params.y;
+    // Fast path: a plain sharp fill (cell backgrounds, dividers, cursors, underlines,
+    // selection, flush panels) - identical to the old flat pipeline.
+    if (radius <= 0.0 && blur <= 0.0) {
+        return in.color;
+    }
+    let half = in.rect.zw * 0.5;
+    let center = in.rect.xy + half;
+    let p = in.pos.xy - center;
+    if (blur > 0.0) {
+        // Soft drop shadow: the SDF of the inset panel box, feathered over `blur`.
+        let inner = half - vec2<f32>(blur, blur);
+        let d = sd_round_box(p, inner, radius);
+        let cov = 1.0 - smoothstep(-blur * 0.5, blur * 0.5, d);
+        return vec4<f32>(in.color.rgb, in.color.a * cov);
+    }
+    // Rounded fill with a ~1px anti-aliased edge.
+    let d = sd_round_box(p, half, radius);
+    let cov = clamp(0.5 - d, 0.0, 1.0);
+    return vec4<f32>(in.color.rgb, in.color.a * cov);
 }
 ";
 
@@ -773,5 +885,44 @@ mod tests {
         // Bottom bar sits at y + h - thickness; right bar at x + w - thickness.
         assert!(rect_eq(quads[1].rect, [5.0, 6.0 + 30.0 - 2.0, 40.0, 2.0]));
         assert!(rect_eq(quads[3].rect, [5.0 + 40.0 - 2.0, 6.0, 2.0, 30.0]));
+    }
+
+    #[test]
+    fn plain_quads_carry_no_shape_params_so_the_shader_takes_the_flat_fast_path() {
+        let q = super::Quad::new(1.0, 2.0, 3.0, 4.0, ACCENT.to_linear());
+        assert!(rect_eq(q.params, [0.0, 0.0, 0.0, 0.0]));
+    }
+
+    #[test]
+    fn rounded_clamps_the_radius_to_half_the_shorter_side() {
+        // radius fits: kept as-is.
+        let ok = super::Quad::rounded(0.0, 0.0, 100.0, 40.0, ACCENT.to_linear(), 10.0);
+        assert!((ok.params[0] - 10.0).abs() < 1e-3);
+        assert!(ok.params[1].abs() < 1e-3, "a fill is not a shadow");
+        // radius too large for a 40px-tall quad: clamped to 20 (half the height).
+        let clamped = super::Quad::rounded(0.0, 0.0, 100.0, 40.0, ACCENT.to_linear(), 999.0);
+        assert!((clamped.params[0] - 20.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn shadow_inflates_by_the_blur_and_offsets_down_by_the_spec() {
+        // e4 at scale 1: dy 16, blur 48. A 100x40 panel at (200, 100).
+        let panel = crate::PxRect {
+            x: 200.0,
+            y: 100.0,
+            w: 100.0,
+            h: 40.0,
+        };
+        let q = super::Quad::shadow(panel, super::SHADOW_E4, 1.0, 10.0);
+        // Inflated by blur (48) on every side, shifted down by dy (16).
+        assert!(rect_eq(
+            q.rect,
+            [200.0 - 48.0, 100.0 + 16.0 - 48.0, 100.0 + 96.0, 40.0 + 96.0]
+        ));
+        assert!(
+            (q.params[1] - 48.0).abs() < 1e-3,
+            "blur recorded for the shader"
+        );
+        assert!(rect_eq(q.color, [0.0, 0.0, 0.0, 0.52]), "e4 is 52% black");
     }
 }
