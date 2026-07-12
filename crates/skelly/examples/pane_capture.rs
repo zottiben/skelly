@@ -690,6 +690,9 @@ const SB_BAR_H: f32 = 14.0;
 const SB_BAR_RADIUS: f32 = 2.0;
 const SB_TAB_PAD_X: f32 = 10.0;
 const SB_TAB_GAP: f32 = 8.0;
+const SB_TAB_PROMPT: &str = "\u{276f}";
+const SB_TAB_PROMPT_SLOT: f32 = 9.0;
+const SB_TAB_DOT: f32 = 6.0;
 const SB_PILL_RADIUS: f32 = 6.0;
 /// Workspace-switcher chips (§08 #2) - mirror the binary's `sidebar` module.
 const SB_CHIP_SIZE: f32 = 26.0;
@@ -1048,13 +1051,40 @@ fn push_sb_body(
                 SB_TAB_H,
             );
         } else {
-            // Inset past the pill padding + indicator bar + gap so tabs align (§09).
-            let text_inset = SB_PILL_INSET + SB_TAB_PAD_X + SB_BAR_W + SB_TAB_GAP;
+            // The ❯ prompt (accent), or a ● running dot for the second tab (representative);
+            // then the label inset past the prefix slot + gap (§09/§10.3).
+            let row_top = panel.y + y * scale;
+            let prefix_x = panel.x + (SB_PILL_INSET + SB_TAB_PAD_X + SB_BAR_W + SB_TAB_GAP) * scale;
+            if index == 1 {
+                let dot = SB_TAB_DOT * scale;
+                quads.push(ChromeQuad::rounded(
+                    PxRect {
+                        x: prefix_x + (SB_TAB_PROMPT_SLOT * scale - dot) * 0.5,
+                        y: row_top + (SB_TAB_H * scale - dot) * 0.5,
+                        w: dot,
+                        h: dot,
+                    },
+                    theme.diff_add,
+                    dot * 0.5,
+                ));
+            } else {
+                let pline = measure.line_height(FontRole::Mono);
+                labels.push(ProseLabel {
+                    text: SB_TAB_PROMPT.to_owned(),
+                    x: prefix_x,
+                    y: row_top + (SB_TAB_H * scale - pline) * 0.5,
+                    role: FontRole::Mono,
+                    color: theme.accent,
+                    weight: None,
+                    max_w: f32::MAX,
+                });
+            }
+            let x = prefix_x + (SB_TAB_PROMPT_SLOT + SB_TAB_GAP) * scale;
             let line = measure.line_height(FontRole::Label);
             labels.push(ProseLabel {
                 text: format!("Tab {}", index + 1),
-                x: panel.x + text_inset * scale,
-                y: panel.y + y * scale + (SB_TAB_H * scale - line) * 0.5,
+                x,
+                y: row_top + (SB_TAB_H * scale - line) * 0.5,
                 role: FontRole::Label,
                 color,
                 weight: None,

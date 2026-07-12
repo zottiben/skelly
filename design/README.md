@@ -55,6 +55,17 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Tab prompt glyph + running dot (§09/§10.3).** Each sidebar tab now shows a `❯`
+  shell-prompt glyph before its label, or a green `●` running dot when the tab has a live
+  foreground job (real - from `Terminal::foreground_job_pid`, one flag per tab via the new
+  `View.tab_running`). **Token decision:** the guide colors the inactive `❯` with a bright
+  non-`§03` color that even varies (teal `#94E2D5` in §09, pink `#F5C2E7` in §10.3); rather than
+  cross into a raw/ANSI colour (Hard rule 2), the `❯` is normalized to `accent` for all tabs -
+  which matches the active state + the shell prompt in the pane. The dot uses `diff.add` (the
+  guide's `#A6E3A1` green). A fixed prompt slot keeps labels aligned whether a tab shows the
+  glyph or the dot. The per-tab colour variety (each tab its own hue) is a decorative flourish
+  left out (needs a per-tab colour feature).
+
 - 2026-07-13 - **Sidebar group header (§08 #5): the "repo · branch" context.** The guide's
   "SKELLY · MAIN" header above the tab list is real data, not a fabricated group: it renders the
   active repo's `name · branch` (from the cached status context - the cwd basename + the git

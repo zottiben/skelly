@@ -777,6 +777,20 @@ impl App {
         Some(format!("{repo} \u{b7} {branch}"))
     }
 
+    /// Whether each tab has a live foreground job (its focused pane is running something other
+    /// than an idle shell) - for the tab's `●` running dot (design §10.3).
+    fn tab_running(&self) -> Vec<bool> {
+        self.tabs
+            .iter()
+            .map(|tab| {
+                let id = tab.tree.focused();
+                tab.panes
+                    .get(&id)
+                    .is_some_and(|t| t.foreground_job_pid().is_some())
+            })
+            .collect()
+    }
+
     /// The workspace chip glyphs (each workspace's name's first letter, uppercased).
     fn workspace_chips(&self) -> Vec<char> {
         self.workspaces
@@ -790,12 +804,14 @@ impl App {
         // The sidebar bg fills the whole column (traffic lights sit on it); its content clears
         // the control strip via `top_inset` (logical px, macOS only).
         let group = self.group_label();
+        let running = self.tab_running();
         let view = sidebar::View {
             tab_count: self.tabs.len(),
             active_tab: self.active,
             chips: &self.workspace_chips(),
             active_chip: self.active_workspace,
             group_label: group.as_deref(),
+            tab_running: &running,
             rail: self.sidebar.is_rail(),
             top_inset: self.content_top() / scale,
         };
@@ -1153,6 +1169,7 @@ impl App {
             chips: &self.workspace_chips(),
             active_chip: self.active_workspace,
             group_label: group.as_deref(),
+            tab_running: &[],
             rail: self.sidebar.is_rail(),
             top_inset: self.content_top() / scale,
         };

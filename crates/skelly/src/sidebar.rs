@@ -68,6 +68,12 @@ const BAR_RADIUS: f32 = 2.0;
 /// + `gap:8px`); the label is inset past both so active and inactive tabs align.
 const TAB_PAD_X: f32 = 10.0;
 const TAB_GAP: f32 = 8.0;
+/// The tab prefix glyph (design §09/§10.3): a shell-prompt `❯` in `accent`, or a `●` running
+/// dot when the tab has a live foreground job. A fixed slot keeps the labels aligned.
+const TAB_PROMPT: &str = "\u{276f}";
+const TAB_PROMPT_SLOT: f32 = 9.0;
+/// Diameter of the running-job status dot (the guide's 6px `●`).
+const TAB_DOT: f32 = 6.0;
 /// Corner radius (logical px) of the active-tab pill (the guide's `sm` radius: tab items).
 const PILL_RADIUS: f32 = 6.0;
 
@@ -103,6 +109,9 @@ pub(crate) struct View<'a> {
     /// The group header above the tab list (design §08 #5: the "repo · branch" context), or
     /// `None` outside a git repo. Shown uppercase.
     pub(crate) group_label: Option<&'a str>,
+    /// Whether each tab has a live foreground job (a `●` running dot instead of the `❯` prompt),
+    /// one flag per tab. Empty or short-of-`tab_count` means "not running".
+    pub(crate) tab_running: &'a [bool],
     /// Whether the sidebar is the slim icon rail.
     pub(crate) rail: bool,
     /// The macOS control-strip inset in **logical** px (0 elsewhere); content clears it.
@@ -436,6 +445,7 @@ pub(crate) fn build(
         active: view.active_tab,
         rail: view.rail,
         group_label: view.group_label,
+        tab_running: view.tab_running,
         scale,
         theme,
     };
@@ -480,12 +490,14 @@ struct RowCtx<'a> {
     active: usize,
     rail: bool,
     group_label: Option<&'a str>,
+    tab_running: &'a [bool],
     scale: f32,
     theme: &'a Theme,
 }
 
 /// Render one laid-out row into `quads` + `labels`: the group header, a tab (with its active
-/// marks + label), an overflow indicator, or the new-tab action.
+/// marks + prompt/dot + label), an overflow indicator, or the new-tab action.
+#[allow(clippy::too_many_lines, reason = "one straight-line per-row renderer")]
 fn push_row(
     quads: &mut Vec<ChromeQuad>,
     labels: &mut Vec<ProseLabel>,
@@ -545,10 +557,35 @@ fn push_row(
                     color,
                 );
             } else {
-                // Inset the label past the pill padding + indicator bar + gap so active and
-                // inactive tabs align (§09 `padding:0 10px` + a 3px bar + `gap:8px`).
-                let text_inset = (PILL_INSET + TAB_PAD_X + BAR_W + TAB_GAP) * ctx.scale;
-                let x = ctx.panel.x + text_inset;
+                // After the pill padding + indicator bar + gap: a `●` running dot (design
+                // §10.3) when the tab has a live job, else a `❯` shell-prompt glyph in accent.
+                let prefix_x = ctx.panel.x + (PILL_INSET + TAB_PAD_X + BAR_W + TAB_GAP) * ctx.scale;
+                if ctx.tab_running.get(index).copied().unwrap_or(false) {
+                    let dot = TAB_DOT * ctx.scale;
+                    quads.push(ChromeQuad::rounded(
+                        PxRect {
+                            x: prefix_x + (TAB_PROMPT_SLOT * ctx.scale - dot) * 0.5,
+                            y: top + (height - dot) * 0.5,
+                            w: dot,
+                            h: dot,
+                        },
+                        ctx.theme.diff_add,
+                        dot * 0.5,
+                    ));
+                } else {
+                    let line = measure.line_height(FontRole::Mono);
+                    labels.push(ProseLabel {
+                        text: TAB_PROMPT.to_owned(),
+                        x: prefix_x,
+                        y: top + (height - line) * 0.5,
+                        role: FontRole::Mono,
+                        color: ctx.theme.accent,
+                        weight: None,
+                        max_w: f32::MAX,
+                    });
+                }
+                // The label, inset past the prefix slot + gap so all tabs align.
+                let x = prefix_x + (TAB_PROMPT_SLOT + TAB_GAP) * ctx.scale;
                 let line = measure.line_height(FontRole::Label);
                 labels.push(ProseLabel {
                     text: format!("Tab {}", index + 1),
@@ -891,6 +928,7 @@ mod tests {
             chips: &[],
             active_chip: 0,
             group_label: None,
+            tab_running: &[],
             rail,
             top_inset: 0.0,
         }
@@ -1026,6 +1064,7 @@ mod tests {
             chips: &chips,
             active_chip: 0,
             group_label: None,
+            tab_running: &[],
             rail: false,
             top_inset: 0.0,
         };
