@@ -30,6 +30,10 @@ const PANE_INSET: f32 = 6.0;
 const SIDEBAR_WIDTH: f32 = 240.0;
 /// Logical inset of the sidebar text - mirrors the binary's `SIDEBAR_PAD`.
 const SIDEBAR_PAD: f32 = 12.0;
+/// Logical width of the slim icon rail - mirrors the binary's `RAIL_WIDTH`.
+const RAIL_WIDTH: f32 = 56.0;
+/// Logical horizontal inset of the rail's centered content - mirrors `RAIL_PAD`.
+const RAIL_PAD: f32 = 6.0;
 
 fn main() {
     let path = std::env::args()
@@ -47,12 +51,16 @@ fn main() {
         theme,
         ..Appearance::default()
     };
+    // An optional third arg picks the sidebar mode: `rail` = the slim 56px icon rail,
+    // anything else (default) = the full-width panel.
+    let rail = std::env::args().nth(3).as_deref() == Some("rail");
+
     let (cell_w, cell_h) = measure_cell(&appearance, scale);
     let sc = scale as f32;
     let pad = WINDOW_PAD * sc;
     let inset = PANE_INSET * sc;
     // The pane viewport starts to the right of the sidebar, as the binary insets it.
-    let sidebar_w = SIDEBAR_WIDTH * sc;
+    let sidebar_w = if rail { RAIL_WIDTH } else { SIDEBAR_WIDTH } * sc;
     let viewport = Rect::new(
         sidebar_w + pad,
         pad,
@@ -124,7 +132,7 @@ fn main() {
     // The left sidebar (a two-tab list, tab 1 active) + a command-palette overlay over
     // the panes, verifying the sidebar chrome and the overlay compositing together.
     let theme = Theme::resolve(&appearance.theme);
-    let sidebar = sidebar_panel(height, cell_w, sidebar_w, sc, &theme);
+    let sidebar = sidebar_panel(height, cell_w, sidebar_w, sc, rail, &theme);
     let overlay = palette_overlay(width, height, cell_w, cell_h, sc, &theme);
     let rgba = skelly_render::capture_panes_rgba(
         &appearance,
@@ -199,28 +207,40 @@ fn palette_overlay(
     }
 }
 
-/// Build a representative left sidebar (a brand header, a two-tab list with tab 1
-/// active, and a "+ New tab" action) - mirroring the binary's `sidebar` module layout
-/// so the capture verifies the tab-list chrome. The live binary drives this from the
-/// real module.
+/// Build a representative left sidebar (a two-tab list with tab 1 active and a new-tab
+/// action) - mirroring the binary's `sidebar` module layout so the capture verifies the
+/// tab-list chrome. `rail` picks the slim 56px icon rail (centered tab numbers) over the
+/// full panel. The live binary drives this from the real module.
 fn sidebar_panel(
     height: u32,
     cell_w: f32,
     sidebar_w: f32,
     scale: f32,
+    rail: bool,
     theme: &Theme,
 ) -> CaptureSidebar {
-    let pad = SIDEBAR_PAD * scale;
+    let pad = (if rail { RAIL_PAD } else { SIDEBAR_PAD }) * scale;
     let cols = ((sidebar_w - 2.0 * pad) / cell_w).max(1.0) as usize;
-    let indent = "  ";
-    let rows = vec![
-        ui_row(&format!("{indent}skelly"), cols, theme.fg_secondary), // header
-        ui_row("", cols, theme.fg_muted),                             // spacer
-        ui_row(&format!("{indent}Tab 1"), cols, theme.fg_primary),    // active
-        ui_row(&format!("{indent}Tab 2"), cols, theme.fg_secondary),
-        ui_row("", cols, theme.fg_muted), // spacer
-        ui_row(&format!("{indent}+ New tab"), cols, theme.fg_muted),
-    ];
+    let rows = if rail {
+        vec![
+            centered_row("sk", cols, theme.fg_secondary), // brand mark
+            ui_row("", cols, theme.fg_muted),             // spacer
+            centered_row("1", cols, theme.fg_primary),    // active
+            centered_row("2", cols, theme.fg_secondary),
+            ui_row("", cols, theme.fg_muted), // spacer
+            centered_row("+", cols, theme.fg_muted),
+        ]
+    } else {
+        let indent = "  ";
+        vec![
+            ui_row(&format!("{indent}skelly"), cols, theme.fg_secondary), // header
+            ui_row("", cols, theme.fg_muted),                             // spacer
+            ui_row(&format!("{indent}Tab 1"), cols, theme.fg_primary),    // active
+            ui_row(&format!("{indent}Tab 2"), cols, theme.fg_secondary),
+            ui_row("", cols, theme.fg_muted), // spacer
+            ui_row(&format!("{indent}+ New tab"), cols, theme.fg_muted),
+        ]
+    };
     CaptureSidebar {
         panel: PxRect {
             x: 0.0,
@@ -233,6 +253,19 @@ fn sidebar_panel(
         // Active tab (index 0) sits at grid row HEADER_ROWS (=2); highlight there.
         active_row: Some(2),
     }
+}
+
+/// A `text` centered within `cols` cells in `fg` - mirrors the `sidebar` module's rail
+/// centering.
+fn centered_row(text: &str, cols: usize, fg: Srgb) -> Vec<GridCell> {
+    let left = cols.saturating_sub(text.chars().count()) / 2;
+    let mut row: Vec<GridCell> = (0..left).map(|_| ui_cell(' ', fg)).collect();
+    row.extend(text.chars().map(|c| ui_cell(c, fg)));
+    row.truncate(cols);
+    while row.len() < cols {
+        row.push(ui_cell(' ', fg));
+    }
+    row
 }
 
 fn ui_cell(c: char, fg: Srgb) -> GridCell {

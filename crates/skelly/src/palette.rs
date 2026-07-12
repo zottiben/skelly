@@ -51,6 +51,8 @@ pub(crate) enum Action {
     PrevTab,
     /// Show or hide the left sidebar.
     ToggleSidebar,
+    /// Cycle the sidebar between the full panel and the slim icon rail.
+    CycleSidebarMode,
     /// Open or close the per-repo git diff dock.
     ShowGitDiff,
     /// Open or close the session-timeline dock.
@@ -136,6 +138,11 @@ pub(crate) const COMMANDS: &[Command] = &[
         label: "Toggle sidebar",
         hint: "cmd B",
         action: Action::ToggleSidebar,
+    },
+    Command {
+        label: "Cycle sidebar mode",
+        hint: "shift cmd B",
+        action: Action::CycleSidebarMode,
     },
     Command {
         label: "Show git diff",

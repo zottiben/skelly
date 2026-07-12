@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context as _;
-use skelly_config::{Config, SidebarMode};
+use skelly_config::Config;
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
 use skelly_render::{
     AnsiPalette, DeadPaneView, GitDockView, GridCell, OverlayView, PaneView, PxRect, Renderer,
@@ -54,6 +54,11 @@ const RESIZE_STEP: f32 = 0.04;
 const PALETTE_PAD: f32 = 12.0;
 /// Logical inset (px) of the sidebar's text from the sidebar's top-left corner.
 const SIDEBAR_PAD: f32 = 12.0;
+/// Logical width (px) of the slim icon rail (`⇧⌘B`), per design §08 ("Icon rail 56px").
+const RAIL_WIDTH: f32 = 56.0;
+/// Logical horizontal inset (px) of the rail's centered content - smaller than
+/// `SIDEBAR_PAD` so a couple of glyphs fit inside 56px.
+const RAIL_PAD: f32 = 6.0;
 /// Logical inset (px) of the full-window settings view's text from the window edge.
 const SETTINGS_PAD: f32 = 20.0;
 /// Logical width (px) of the git diff dock - the guide's default (resizable 360-560 is a
@@ -275,14 +280,19 @@ impl App {
         )
     }
 
-    /// The sidebar's width in physical px, or `0.0` when it is hidden. The tab-list
-    /// panel occupies the strip `[0, width)` and the pane viewport starts after it.
+    /// The sidebar's width in physical px, or `0.0` when it is hidden. The panel occupies
+    /// the strip `[0, width)` and the pane viewport starts after it; the slim rail is a
+    /// fixed 56px regardless of `sidebar.width`.
     fn sidebar_width_px(&self) -> f32 {
-        if self.sidebar.visible {
-            f32::from(self.config.sidebar.width) * scale32(self.scale)
-        } else {
-            0.0
+        if !self.sidebar.visible() {
+            return 0.0;
         }
+        let logical = if self.sidebar.is_rail() {
+            RAIL_WIDTH
+        } else {
+            f32::from(self.config.sidebar.width)
+        };
+        logical * scale32(self.scale)
     }
 
     /// The right dock's width in physical px, or `0.0` when neither right dock is open. The
@@ -505,7 +515,7 @@ impl App {
         // Build the dim overlays for any exited panes and the chrome frames, all before
         // the mutable renderer borrow.
         let dead = self.dead_pane_frames();
-        let sidebar = self.sidebar.visible.then(|| self.build_sidebar_frame());
+        let sidebar = self.sidebar.visible().then(|| self.build_sidebar_frame());
         let git_dock = self.git_dock.open.then(|| self.build_git_dock_frame());
         let timeline = self.timeline.open.then(|| self.build_timeline_frame());
         let overlay = self.palette.open.then(|| self.build_palette_frame());
@@ -634,12 +644,17 @@ impl App {
     )]
     fn build_sidebar_frame(&self) -> SidebarFrame {
         let (cell_w, _) = self.cell_size();
-        let pad = SIDEBAR_PAD * scale32(self.scale);
+        let rail = self.sidebar.is_rail();
+        let scale = scale32(self.scale);
+        // Narrower horizontal inset for the rail so its glyphs center inside 56px; the
+        // vertical inset stays `SIDEBAR_PAD` (matched by `sidebar_hit`'s `origin_y`).
+        let pad_x = if rail { RAIL_PAD } else { SIDEBAR_PAD } * scale;
+        let pad_y = SIDEBAR_PAD * scale;
         let sidebar_w = self.sidebar_width_px();
         let surface_h = dim_f32(self.size.1);
 
-        let cols = ((sidebar_w - 2.0 * pad) / cell_w).floor().max(1.0) as usize;
-        let view = sidebar::view(self.tabs.len(), self.active, cols, &self.theme);
+        let cols = ((sidebar_w - 2.0 * pad_x) / cell_w).floor().max(1.0) as usize;
+        let view = sidebar::view(self.tabs.len(), self.active, cols, rail, &self.theme);
 
         SidebarFrame {
             panel: PxRect {
@@ -648,7 +663,7 @@ impl App {
                 w: sidebar_w,
                 h: surface_h,
             },
-            origin: (pad, pad),
+            origin: (pad_x, pad_y),
             rows: view.rows,
             active_row: view.active_row,
         }
@@ -779,7 +794,7 @@ impl App {
         match key {
             "appearance.theme" => self.set_theme_live(),
             "sidebar.mode" => {
-                self.sidebar.visible = !matches!(self.config.sidebar.mode, SidebarMode::Hidden);
+                self.sidebar.set_mode(self.config.sidebar.mode);
                 self.sync_layout();
             }
             "sidebar.width" => self.sync_layout(),
@@ -789,11 +804,29 @@ impl App {
         self.request_redraw();
     }
 
-    /// Toggle the sidebar (`⌘B`). The pane viewport changes width, so re-fit the shells.
+    /// Show or hide the sidebar (`⌘B`). The pane viewport changes width, so re-fit the
+    /// shells; the chosen mode persists (design §08, Hard rule 1).
     fn toggle_sidebar(&mut self) {
         self.sidebar.toggle();
+        self.persist_sidebar_mode();
         self.sync_layout();
         self.request_redraw();
+    }
+
+    /// Cycle the sidebar between the full panel and the slim icon rail (`⇧⌘B`, design
+    /// §08). The viewport changes width, so re-fit the shells; the mode persists.
+    fn cycle_sidebar_mode(&mut self) {
+        self.sidebar.cycle_rail();
+        self.persist_sidebar_mode();
+        self.sync_layout();
+        self.request_redraw();
+    }
+
+    /// Write the sidebar's current display mode back to the config (the file is the
+    /// source of truth, Hard rule 1; the chosen mode persists per workspace) and save it.
+    fn persist_sidebar_mode(&mut self) {
+        self.config.sidebar.mode = self.sidebar.mode();
+        self.persist_config();
     }
 
     /// Toggle the git diff dock (`⇧⌘G`). Opening refreshes the repo status and the
@@ -988,7 +1021,7 @@ impl App {
         reason = "the row index is computed from a guarded non-negative offset"
     )]
     fn sidebar_hit(&self) -> Option<sidebar::Hit> {
-        if !self.sidebar.visible {
+        if !self.sidebar.visible() {
             return None;
         }
         let (px, py) = point_f32(self.pointer);
@@ -1227,6 +1260,7 @@ impl App {
             Action::NextTab => self.cycle_tab(true),
             Action::PrevTab => self.cycle_tab(false),
             Action::ToggleSidebar => self.toggle_sidebar(),
+            Action::CycleSidebarMode => self.cycle_sidebar_mode(),
             Action::ShowGitDiff => self.toggle_git_dock(),
             Action::ShowTimeline => self.toggle_timeline(),
             Action::OpenSettings => self.open_settings(),
@@ -1645,7 +1679,11 @@ impl App {
                     return;
                 }
                 if ch.eq_ignore_ascii_case("b") {
-                    self.toggle_sidebar();
+                    if self.modifiers.shift_key() {
+                        self.cycle_sidebar_mode();
+                    } else {
+                        self.toggle_sidebar();
+                    }
                     return;
                 }
                 if ch.eq_ignore_ascii_case("g") && self.modifiers.shift_key() {

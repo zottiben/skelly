@@ -14,12 +14,14 @@ plus a few M3 follow-ups, which we finish opportunistically rather than block on
 **M4 (signature features) is complete**: the **per-repo git diff dock** (`⇧⌘G`) - the
 diff model, the dock UI, per-file + hunk-level staging, and the commit box - and the
 **session timeline + non-destructive rewind** (`⇧⌘H`, ADR-0007) both land end-to-end.
-**M5 (hardening & release) is now in progress**: two edge states have landed - the
+**M5 (hardening & release) is now in progress**: three edge states have landed - the
 **shell-exit / crash overlay** (design §12; a dim scrim + exit message + `↵ restart` over a
-pane whose shell ended) and the **empty state + never-quit close cascade** (design §10.2;
+pane whose shell ended), the **empty state + never-quit close cascade** (design §10.2;
 closing the last pane closes the tab, closing the last tab resets to a fresh empty-state
-tab). Remaining M5: the other edge states, perf budgets, packaging, and the first tagged
-release - plus the tracked M2-M4 follow-ups, finished opportunistically.
+tab), and the **sidebar collapse rail** (design §08; `⇧⌘B` cycles the full panel <-> a slim
+56px icon rail, the mode persisting to `config.sidebar.mode`). Remaining M5: the other edge
+states, perf budgets, packaging, and the first tagged release - plus the tracked M2-M4
+follow-ups, finished opportunistically.
 
 - [x] **M0 - Foundation.** Workspace, quality gates, CI, docs, ADR log, and the
   `skelly-config` slice (schema + load + validate + tests), with a runnable binary
@@ -239,8 +241,16 @@ release - plus the tracked M2-M4 follow-ups, finished opportunistically.
     first command (or split) via a per-tab `activated` flag. Pure `emptystate` module baked
     into the pane grid (unit-tested); verified by the `empty_state_capture` PNG in both
     themes. (Follow-up: an animated fade rather than an instant clear.)
+  - [x] **Sidebar collapse rail** (design §08 "Sidebar modes"). `⇧⌘B` cycles the sidebar
+    between the full panel and a slim 56px icon rail (compact centered tab numbers + a
+    `sk` brand mark, the active tab keeping its accent bar + subtle fill); `⌘B` still
+    shows/hides. The chosen mode round-trips `config.sidebar.mode` and persists per
+    workspace (Hard rule 1). Pure `sidebar` module (`Fixed`/`Autohide`/`Hidden` state +
+    the shared row layout so hit-testing works in both modes), unit-tested; surfaced in the
+    palette ("Cycle sidebar mode"); verified by the `pane_capture` PNG (rail arg) in both
+    themes. (Follow-up: hover-to-expand the rail.)
   - [ ] Remaining edge/empty states: process-running-on-close confirm, not-a-git-repo Init
-    button, sidebar collapse rail, tab overflow.
+    button, tab overflow.
   - [ ] Perf budgets (`criterion` on the parser/renderer hot paths).
   - [ ] Packaging (`cargo-dist` + `cargo-release`) and the first tagged release.
 

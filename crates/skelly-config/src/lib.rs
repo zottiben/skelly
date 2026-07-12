@@ -117,7 +117,8 @@ pub enum CursorStyle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Sidebar {
-    /// Sidebar width in px. Valid range 56..=360; <180 is treated as the 56px rail.
+    /// Full-panel sidebar width in px (valid range 56..=360). The slim icon rail is a
+    /// fixed 56px and is selected by `mode = "autohide"`, not by a narrow `width`.
     pub width: u16,
     /// Show the pinned-tab grid.
     pub show_pinned: bool,

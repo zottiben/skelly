@@ -73,7 +73,18 @@ old tab drops so its shells are killed). A pristine single-pane tab (`Tab::activ
 a faint `skelly` wordmark + hint chips (`⌘K`/`⌘T`/`⌥|`, `bg.elevated` pills) centered over its
 blank grid via the pure `emptystate` module (baked into the pane grid, no new render layer),
 cleared on the first command (Enter) or split. Unit-tested + `empty_state_capture` PNG (both
-themes). The build target is native Rust, not the mockup HTML. See `ROADMAP.md`.
+themes). Also landed: the **sidebar collapse rail** (design §08 "Sidebar modes"). `⇧⌘B` cycles
+the sidebar between the full panel and a slim 56px icon rail (compact centered tab numbers + a
+`sk` brand mark; the active tab keeps its accent bar + `accent.subtle` fill); `⌘B` still
+shows/hides. The mode round-trips `config.sidebar.mode` and persists per workspace (Hard rule 1 -
+`⌘B`/`⇧⌘B` now write the config too, closing a latent gap where the sidebar's shown/hidden state
+diverged from the file). The `sidebar` module now holds a `mode` (`Fixed`=full / `Autohide`=rail /
+`Hidden`) + a `restore` target so hide/recall preserves the rail-vs-full choice; `Fixed` and the
+rail share the same grid row layout, so `hit()`/`active_row` work unchanged for both. Surfaced in
+the palette ("Cycle sidebar mode"); the `pane_capture` example takes a `rail` arg for the PNG.
+Verified both themes + clean boot. (Follow-up: hover-to-expand the rail - the design's "hover to
+expand" - which needs a transient-expand state and mouse-region tracking.) The build target is
+native Rust, not the mockup HTML. See `ROADMAP.md`.
 
 **Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
 workspace. Foundation crates are *proposed* in ADR-0001..0004 (terminal core
