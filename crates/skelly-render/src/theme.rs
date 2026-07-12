@@ -25,7 +25,7 @@ pub struct Rgba {
 /// An 8-bit sRGB color, as the design guide specifies it. Text rasterizers
 /// (glyphon/cosmic-text) take sRGB bytes directly, so glyph colors stay in this
 /// form rather than being pre-linearized.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Srgb {
     /// Red, 0..=255.
     pub r: u8,

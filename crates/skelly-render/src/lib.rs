@@ -216,7 +216,7 @@ pub struct SettingsView<'a> {
 /// Colors are already resolved against the ANSI palette (reverse video and dim
 /// folded in), so the renderer only needs the font-level attributes: `bold` and
 /// `italic` pick the face; `underline` draws a rule beneath the glyph.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GridCell {
     /// The cell's character.
     pub c: char,

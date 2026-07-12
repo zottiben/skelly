@@ -7,6 +7,9 @@
 //! capture share the exact drawing code - no drift between what ships and what we
 //! verify.
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
     SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
@@ -28,6 +31,10 @@ struct PaneBuf {
     left: f32,
     top: f32,
     clip: (f32, f32, f32, f32),
+    /// A fingerprint of the last grid + size actually shaped into `buffer`, so an
+    /// identical grid on a later frame skips the (expensive) re-shape - see the note
+    /// on [`TextLayer::set_panes`]. `None` forces the next call to shape.
+    shaped: Option<u64>,
 }
 
 /// One pane's text input to [`TextLayer::set_panes`]: the cell grid plus the pixel
@@ -156,6 +163,7 @@ impl TextLayer {
                 left: 0.0,
                 top: 0.0,
                 clip: (0.0, 0.0, 0.0, 0.0),
+                shaped: None,
             });
         }
         panes.truncate(n);
@@ -164,6 +172,15 @@ impl TextLayer {
     /// Shape each pane's grid into its own buffer, recording where it draws. One
     /// buffer per input; consecutive cells with the same color and attributes merge
     /// into runs to keep the span count down.
+    ///
+    /// Shaping a full grid with `cosmic-text` costs on the order of a millisecond (many
+    /// more for a busy colored grid), and the windowed renderer calls this every redraw -
+    /// including redraws driven by animation, selection, or an *unchanged* pane. So each
+    /// pane skips the re-shape when its grid + size fingerprint matches what is already
+    /// shaped in its buffer; only its draw position (which is cheap and applied below
+    /// regardless) may have moved. This is the difference between a repaint costing
+    /// microseconds and costing milliseconds. (A true fixed-metric atlas renderer would
+    /// remove the shaping entirely - tracked as the M2c follow-up.)
     pub(crate) fn set_panes(&mut self, inputs: &[PaneTextInput]) {
         self.ensure_panes(inputs.len());
         let Self {
@@ -175,9 +192,17 @@ impl TextLayer {
         let family = family_of(family_name.as_deref());
         let default = Attrs::new().family(family);
         for (pane, input) in panes.iter_mut().zip(inputs) {
+            // Position is cheap and may change without the content changing (e.g. a pane
+            // slides on resize), so always refresh it; only the shaping is gated.
             pane.left = input.left;
             pane.top = input.top;
             pane.clip = input.clip;
+
+            let fingerprint = shape_fingerprint(input.rows, input.clip.2, input.clip.3);
+            if pane.shaped == Some(fingerprint) {
+                continue;
+            }
+
             pane.buffer
                 .set_size(Some(input.clip.2.max(1.0)), Some(input.clip.3.max(1.0)));
             let runs = text_runs(input.rows);
@@ -191,6 +216,7 @@ impl TextLayer {
                     .set_rich_text(spans, &default, Shaping::Advanced, None);
             }
             pane.buffer.shape_until_scroll(font_system, false);
+            pane.shaped = Some(fingerprint);
         }
     }
 
@@ -216,6 +242,9 @@ impl TextLayer {
         let attrs = Attrs::new().family(family_of(family_name.as_deref()));
         pane.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         pane.buffer.shape_until_scroll(font_system, false);
+        // This path shapes unconditionally and isn't grid-fingerprinted; clear any stale
+        // fingerprint so a later `set_panes` on the reused buffer still re-shapes.
+        pane.shaped = None;
     }
 
     /// Replace the display with a single colored grid at the content pad, filling the
@@ -470,9 +499,29 @@ fn px_to_i32(value: f32) -> i32 {
     value.max(0.0).round() as i32
 }
 
+/// A 64-bit fingerprint of the grid a pane buffer was shaped from, plus its clip size, so an
+/// identical grid on a later frame is detected and the re-shape skipped (see [`TextLayer::
+/// set_panes`]). Every field that changes the shaped glyphs - character, color, and the
+/// bold/italic face - lives in the hashed `GridCell`; the clip size is hashed by its bit
+/// pattern. A hash collision is astronomically unlikely and would at worst leave one frame's
+/// glyphs stale until the next change repaints - never a persistent artifact.
+fn shape_fingerprint(rows: &[Vec<GridCell>], clip_w: f32, clip_h: f32) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    clip_w.to_bits().hash(&mut hasher);
+    clip_h.to_bits().hash(&mut hasher);
+    rows.len().hash(&mut hasher);
+    for row in rows {
+        row.len().hash(&mut hasher);
+        for cell in row {
+            cell.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::text_runs;
+    use super::{shape_fingerprint, text_runs};
     use crate::{GridCell, Srgb};
 
     fn cell(c: char, fg: Srgb, bold: bool, italic: bool) -> GridCell {
@@ -484,6 +533,44 @@ mod tests {
             italic,
             underline: false,
         }
+    }
+
+    #[test]
+    fn shape_fingerprint_changes_with_anything_that_alters_the_shaped_glyphs() {
+        // The fingerprint gates whether `set_panes` re-shapes; if it missed a field, an
+        // identical fingerprint would skip a needed re-shape and leave stale glyphs. So every
+        // glyph-affecting change must move it, and an identical grid must keep it stable.
+        let white = Srgb {
+            r: 255,
+            g: 255,
+            b: 255,
+        };
+        let red = Srgb { r: 255, g: 0, b: 0 };
+        let base = vec![vec![cell('a', white, false, false)]];
+        let fp = shape_fingerprint(&base, 100.0, 50.0);
+
+        // Identical grid + size -> identical fingerprint (the skip fires).
+        assert_eq!(fp, shape_fingerprint(&base, 100.0, 50.0));
+        // A different character, color, or face all move it (a re-shape is needed).
+        assert_ne!(
+            fp,
+            shape_fingerprint(&[vec![cell('b', white, false, false)]], 100.0, 50.0)
+        );
+        assert_ne!(
+            fp,
+            shape_fingerprint(&[vec![cell('a', red, false, false)]], 100.0, 50.0)
+        );
+        assert_ne!(
+            fp,
+            shape_fingerprint(&[vec![cell('a', white, true, false)]], 100.0, 50.0)
+        );
+        assert_ne!(
+            fp,
+            shape_fingerprint(&[vec![cell('a', white, false, true)]], 100.0, 50.0)
+        );
+        // A resize (clip size change) re-shapes, so it must move too.
+        assert_ne!(fp, shape_fingerprint(&base, 120.0, 50.0));
+        assert_ne!(fp, shape_fingerprint(&base, 100.0, 60.0));
     }
 
     #[test]
