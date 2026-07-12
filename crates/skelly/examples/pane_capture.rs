@@ -621,7 +621,8 @@ const SB_IND_H: f32 = 16.0;
 const SB_TAB_H: f32 = 30.0;
 const SB_PAD_BOTTOM: f32 = 10.0;
 const SB_LABEL_INSET: f32 = 12.0;
-const SB_PILL_INSET: f32 = 6.0;
+const SB_PILL_INSET: f32 = 9.0;
+const SB_TAB_GAP_V: f32 = 3.0;
 const SB_BAR_W: f32 = 3.0;
 const SB_BAR_H: f32 = 14.0;
 const SB_BAR_RADIUS: f32 = 2.0;
@@ -809,7 +810,7 @@ fn push_sb_body(
     let reserved_below = SB_IND_H + SB_TAB_H + SB_PAD_BOTTOM;
     let cmd_block = SB_CMD_H + SB_CMD_GAP;
     let avail = panel.h / scale - SB_UTIL_H - SB_PAD_TOP - cmd_block - SB_IND_H - reserved_below;
-    let capacity = (avail / SB_TAB_H).floor().max(1.0) as usize;
+    let capacity = (avail / (SB_TAB_H + SB_TAB_GAP_V)).floor().max(1.0) as usize;
     let visible = count.min(capacity);
     let first = if count <= visible {
         0
@@ -884,7 +885,7 @@ fn push_sb_body(
                 max_w: f32::MAX,
             });
         }
-        y += SB_TAB_H;
+        y += SB_TAB_H + SB_TAB_GAP_V;
     }
     let more_below = count - first - visible;
     if more_below > 0 {

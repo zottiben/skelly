@@ -44,8 +44,11 @@ const PAD_BOTTOM: f32 = 10.0;
 const UTIL_H: f32 = 40.0;
 /// Horizontal inset (logical px) of a full-panel label from the sidebar edge (content pad).
 const LABEL_INSET: f32 = 12.0;
-/// Horizontal inset of the active-tab pill from the sidebar edges.
-const PILL_INSET: f32 = 6.0;
+/// Horizontal inset of the tab pill from the sidebar edges (the guide's tab container
+/// `padding:0 9px`, consistent across the window-anatomy + empty-state mockups).
+const PILL_INSET: f32 = 9.0;
+/// Vertical gap between tab pills (the guide's per-tab `margin-bottom:3px`).
+const TAB_GAP_V: f32 = 3.0;
 /// The active tab's `accent` indicator bar (design §09 "Sidebar tab item": a 3x14 rounded bar
 /// seated inside the pill, not a full-height rule at the sidebar edge).
 const BAR_W: f32 = 3.0;
@@ -221,9 +224,10 @@ fn rows_layout(count: usize, active: usize, panel_h: f32) -> Vec<Row> {
     y += CMD_H + CMD_GAP;
 
     // Capacity for tab rows, reserving both overflow-indicator slots + the new-tab action.
+    // Each tab occupies its pill height plus the inter-tab gap.
     let reserved_below = IND_H + TAB_H + PAD_BOTTOM;
     let avail = flow_h - y - IND_H - reserved_below;
-    let capacity = (avail / TAB_H).floor().max(1.0) as usize;
+    let capacity = (avail / (TAB_H + TAB_GAP_V)).floor().max(1.0) as usize;
     let visible = count.min(capacity);
     let first = if count <= visible {
         0
@@ -245,7 +249,7 @@ fn rows_layout(count: usize, active: usize, panel_h: f32) -> Vec<Row> {
             height: TAB_H,
             kind: RowKind::Tab(index),
         });
-        y += TAB_H;
+        y += TAB_H + TAB_GAP_V;
     }
     rows.push(Row {
         top: y,
