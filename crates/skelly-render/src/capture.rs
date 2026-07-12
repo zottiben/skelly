@@ -131,6 +131,8 @@ pub struct CaptureGitDock {
     pub del_rows: Vec<usize>,
     /// Grid rows that are `@@` hunk headers.
     pub hunk_rows: Vec<usize>,
+    /// Grid row of the focused hunk's header (accent highlight).
+    pub focused_hunk_row: Option<usize>,
     /// The commit-message caret `(column, row)`, when the commit box has focus.
     pub caret: Option<(usize, usize)>,
 }
@@ -209,6 +211,7 @@ pub fn capture_panes_rgba(
             add_rows: &gd.add_rows,
             del_rows: &gd.del_rows,
             hunk_rows: &gd.hunk_rows,
+            focused_hunk_row: gd.focused_hunk_row,
             caret: gd.caret,
         };
         Scene {

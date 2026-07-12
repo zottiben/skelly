@@ -12,6 +12,19 @@ use std::process::Command;
 
 use skelly_session::{FileStatus, Repo};
 
+/// A 20-line file `line 1..line 20`, where `edit(n)` may override line `n`'s text.
+fn numbered(edit: impl Fn(u32) -> Option<&'static str>) -> String {
+    use std::fmt::Write as _;
+    let mut buf = String::new();
+    for n in 1..=20 {
+        match edit(n) {
+            Some(text) => writeln!(buf, "{text}").unwrap(),
+            None => writeln!(buf, "line {n}").unwrap(),
+        }
+    }
+    buf
+}
+
 /// Run `git -C <root> <args>` in a config-isolated environment, asserting success.
 fn git(root: &Path, args: &[&str]) {
     let status = Command::new("git")
@@ -188,6 +201,64 @@ fn head_sha(root: &Path) -> String {
         .expect("run git rev-parse");
     assert!(out.status.success(), "git rev-parse failed");
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+#[test]
+fn apply_hunk_stages_and_unstages_a_single_hunk() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+
+    git(root, &["init", "-b", "main"]);
+    std::fs::write(root.join("f.txt"), numbered(|_| None)).expect("write f");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "init", "--no-gpg-sign"]);
+
+    // Two well-separated edits produce two independent hunks.
+    let edited = numbered(|n| match n {
+        3 => Some("line 3 changed"),
+        18 => Some("line 18 changed"),
+        _ => None,
+    });
+    std::fs::write(root.join("f.txt"), edited).expect("edit f");
+
+    let repo = Repo::discover(root).expect("discover").expect("in a repo");
+    let f = Path::new("f.txt");
+    let diff = repo.diff(f, false).expect("unstaged diff");
+    assert_eq!(diff.hunks.len(), 2, "two separate hunks");
+
+    // Stage only the first hunk: the file becomes partially staged.
+    repo.apply_hunk(f, &diff.hunks[0], false)
+        .expect("stage hunk 0");
+    let changed = |repo: &Repo| {
+        repo.status()
+            .expect("status")
+            .files
+            .into_iter()
+            .find(|c| c.path == f)
+            .expect("f.txt changed")
+    };
+    let partial = changed(&repo);
+    assert!(partial.staged && partial.unstaged, "partially staged");
+
+    // The staged side holds only the line-3 change; the unstaged side only line-18.
+    let staged = repo.diff(f, true).expect("staged diff");
+    assert_eq!(staged.hunks.len(), 1);
+    assert!(staged.hunks[0]
+        .lines
+        .iter()
+        .any(|l| l.text.contains("line 3 changed")));
+    let unstaged = repo.diff(f, false).expect("unstaged diff");
+    assert_eq!(unstaged.hunks.len(), 1);
+    assert!(unstaged.hunks[0]
+        .lines
+        .iter()
+        .any(|l| l.text.contains("line 18 changed")));
+
+    // Reverse-applying the staged hunk unstages it again.
+    repo.apply_hunk(f, &staged.hunks[0], true)
+        .expect("unstage hunk 0");
+    let after = changed(&repo);
+    assert!(!after.staged && after.unstaged, "fully unstaged again");
 }
 
 #[test]

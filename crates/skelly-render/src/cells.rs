@@ -365,6 +365,18 @@ pub(crate) fn gitdock_quads(
         ));
     }
 
+    // The focused hunk header's fill (accent over its existing `diff.hunk` tint), marking
+    // the target of a hunk-stage.
+    if let Some(row) = view.focused_hunk_row {
+        quads.push(Quad::new(
+            panel.x,
+            row_y(row),
+            panel.w,
+            cell_h,
+            tint(theme.accent, SELECTED_ROW_ALPHA),
+        ));
+    }
+
     // The commit-message caret (an accent bar), when the commit box has focus.
     if let Some((col, row)) = view.caret {
         quads.push(Quad::new(

@@ -435,6 +435,7 @@ impl App {
                     add_rows: &frame.add_rows,
                     del_rows: &frame.del_rows,
                     hunk_rows: &frame.hunk_rows,
+                    focused_hunk_row: frame.focused_hunk_row,
                     caret: frame.caret,
                 })),
                 None => renderer.set_git_dock(None),
@@ -597,6 +598,7 @@ impl App {
             add_rows: view.add_rows,
             del_rows: view.del_rows,
             hunk_rows: view.hunk_rows,
+            focused_hunk_row: view.focused_hunk_row,
             caret: view.caret,
             diff_scroll: view.diff_scroll,
         }
@@ -697,13 +699,14 @@ impl App {
             return;
         };
         if matches!(file.status, skelly_session::FileStatus::Untracked) {
-            self.git_dock.set_diff(skelly_session::FileDiff::default());
+            self.git_dock
+                .set_diff(skelly_session::FileDiff::default(), false);
             return;
         }
         let path = file.path.clone();
         let staged = file.staged && !file.unstaged;
         match repo.diff(&path, staged) {
-            Ok(diff) => self.git_dock.set_diff(diff),
+            Ok(diff) => self.git_dock.set_diff(diff, staged),
             Err(err) => self.git_dock.set_error(err.to_string()),
         }
     }
@@ -1031,10 +1034,26 @@ impl App {
     /// stages everything, `u` undoes the last commit, `Tab` moves to the commit box, and
     /// `Esc` closes the dock.
     fn on_gitlist_key(&mut self, key_event: &KeyEvent) {
+        // `⌘↵` stages (or unstages) the focused hunk.
+        if self.modifiers.super_key()
+            && matches!(key_event.logical_key.as_ref(), Key::Named(NamedKey::Enter))
+        {
+            self.stage_hunk();
+            return;
+        }
         match key_event.logical_key.as_ref() {
             Key::Named(NamedKey::Escape) => self.toggle_git_dock(),
             Key::Named(NamedKey::Tab) => {
                 self.git_dock.focus_commit();
+                self.request_redraw();
+            }
+            // `[` / `]` move the focused hunk (jumping the diff scroll to it).
+            Key::Character("[") => {
+                self.git_dock.focus_hunk(-1);
+                self.request_redraw();
+            }
+            Key::Character("]") => {
+                self.git_dock.focus_hunk(1);
                 self.request_redraw();
             }
             Key::Named(NamedKey::ArrowUp) => {
@@ -1141,6 +1160,28 @@ impl App {
             repo.stage(&path)
         };
         match result {
+            Ok(()) => self.reload_git_status(),
+            Err(err) => self.git_dock.set_error(err.to_string()),
+        }
+        self.request_redraw();
+    }
+
+    /// Stage (or unstage) the focused hunk of the selected file, then reload and repaint.
+    /// The direction follows which diff is shown: staging when viewing the working-tree
+    /// diff, unstaging (`--reverse`) when viewing the staged diff.
+    fn stage_hunk(&mut self) {
+        let Some(repo) = self.git_repo.clone() else {
+            return;
+        };
+        let Some(file) = self.git_dock.selected_file() else {
+            return;
+        };
+        let path = file.path.clone();
+        let reverse = self.git_dock.diff_is_staged();
+        let Some(hunk) = self.git_dock.focused_hunk().cloned() else {
+            return;
+        };
+        match repo.apply_hunk(&path, &hunk, reverse) {
             Ok(()) => self.reload_git_status(),
             Err(err) => self.git_dock.set_error(err.to_string()),
         }
@@ -1394,6 +1435,7 @@ struct GitDockFrame {
     add_rows: Vec<usize>,
     del_rows: Vec<usize>,
     hunk_rows: Vec<usize>,
+    focused_hunk_row: Option<usize>,
     caret: Option<(usize, usize)>,
     /// The clamped diff scroll the view actually used, written back to the dock.
     diff_scroll: usize,

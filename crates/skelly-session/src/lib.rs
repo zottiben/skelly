@@ -208,6 +208,53 @@ impl Repo {
         Ok(())
     }
 
+    /// Stage (or, with `reverse`, unstage) a single `hunk` of `path` (repo-relative) by
+    /// piping a reconstructed one-hunk patch to `git apply --cached [--reverse]`. Stage
+    /// the hunk when the dock is showing the working-tree (unstaged) diff; unstage it
+    /// (`reverse = true`) when showing the index (staged) diff.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git apply` cannot be run or the patch does not apply
+    /// cleanly (a stale diff, or a hunk whose last line lacks a trailing newline).
+    pub fn apply_hunk(&self, path: &Path, hunk: &Hunk, reverse: bool) -> Result<(), GitError> {
+        let buf = diff::hunk_patch(&path.to_string_lossy(), hunk);
+        let mut args = vec!["apply", "--cached"];
+        if reverse {
+            args.push("--reverse");
+        }
+        self.git_apply(&args, &buf)
+    }
+
+    /// Run `git -C <root> <args>` feeding `stdin` to it, erroring on a non-zero exit. Used
+    /// for `git apply`, which reads its patch from standard input.
+    fn git_apply(&self, args: &[&str], stdin: &str) -> Result<(), GitError> {
+        use std::io::Write as _;
+        use std::process::Stdio;
+
+        let mut child = Command::new("git")
+            .arg("-C")
+            .arg(&self.root)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(GitError::Spawn)?;
+        // Write the patch, then drop the handle to close stdin (EOF) before waiting, so
+        // git does not block reading while we block on its output.
+        if let Some(mut sink) = child.stdin.take() {
+            sink.write_all(stdin.as_bytes()).map_err(GitError::Spawn)?;
+        }
+        let output = child.wait_with_output().map_err(GitError::Spawn)?;
+        if !output.status.success() {
+            return Err(GitError::Command {
+                args: args.join(" "),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            });
+        }
+        Ok(())
+    }
+
     /// Run `git -C <root> <args>` and return its stdout, erroring on a non-zero exit.
     fn git_stdout(&self, args: &[&str]) -> Result<String, GitError> {
         let output = Command::new("git")

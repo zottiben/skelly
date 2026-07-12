@@ -11,9 +11,10 @@ pane tree, command palette, settings view, live theming) are in place and run
 end-to-end. M2 has a handful of tracked carry-overs - the unchecked boxes below
 (bespoke cell renderer, cargo-fuzz, reflow/theme polish, SGR fidelity follow-ups) -
 plus a few M3 follow-ups, which we finish opportunistically rather than block M4 on.
-M4 (signature features) is under way: the git diff **model** and the read-only diff
-**dock UI** (`⇧⌘G`) have landed; hunk staging + the commit box and the session
-timeline / non-destructive rewind are next.
+M4 (signature features) is under way: the **per-repo git diff dock** (`⇧⌘G`) is
+complete - the diff model, the dock UI, per-file + hunk-level staging, and the commit
+box all land end-to-end. The session timeline / non-destructive rewind is the remaining
+M4 feature (blocked on the open design decisions).
 
 - [x] **M0 - Foundation.** Workspace, quality gates, CI, docs, ADR log, and the
   `skelly-config` slice (schema + load + validate + tests), with a runnable binary
@@ -157,7 +158,7 @@ timeline / non-destructive rewind are next.
     both, and there is no theme-file watch yet.)
 - [~] **M4 - Signature features.** Per-repo git diff dock with hunk staging;
   session timeline with non-destructive rewind (shadow worktree).
-  - [~] Per-repo git diff dock.
+  - [x] Per-repo git diff dock.
     - [x] The read-only git diff **model** in `skelly-session` (ADR-0006: shell out
       to the `git` CLI behind a Skelly-owned type, not libgit2). `Repo::discover`
       finds the working tree; `Repo::status` reports the branch, ahead/behind, and
@@ -182,7 +183,7 @@ timeline / non-destructive rewind are next.
       vertical stack replaces the guide's wide side-by-side layout at 420px (design
       decision, recorded in `design/README.md`). Deferred: the resizable width, the
       wide split view, click-to-select / mouse, and moving git calls off the UI thread.
-    - [~] Staging + commit box.
+    - [x] Staging + commit box.
       - [x] Per-file staging: `skelly_session::Repo` gained `stage` / `unstage` /
         `stage_all` (`git add` / `git reset`, integration-tested on a temp repo); the
         dock shows a per-file `[x]`/`[ ]` checkbox, `Space` toggles the selected file
@@ -194,7 +195,11 @@ timeline / non-destructive rewind are next.
         when >=1 file is staged and the message is non-blank, `Esc` returns to the list),
         with an accent caret and a `N staged` status line; after a commit a "committed
         <sha>" line offers Undo (`u`, a soft reset).
-      - [ ] Hunk-level staging (`⌘↵`, via `git apply --cached` of a constructed patch).
+      - [x] Hunk-level staging: `Repo::apply_hunk` reconstructs a one-hunk patch
+        (`diff::hunk_patch`) and pipes it to `git apply --cached [--reverse]`
+        (integration-tested staging one hunk of a two-hunk file). In the dock, `[` / `]`
+        move the focused hunk (highlighted, with a `stage`/`unstage ⌘↵` affordance) and
+        `⌘↵` stages it (or unstages when viewing the staged diff).
   - [ ] Session timeline + non-destructive rewind (shadow worktree via
     `git worktree add --detach`; Hard rule 3 - HEAD/refs untouched, adversarially
     tested). Blocked on the open decisions (timeline AI-actions contract, rewind +

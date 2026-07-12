@@ -14,7 +14,7 @@
 //! [`Repo`]: skelly_session::Repo
 
 use skelly_render::{GridCell, Srgb, Theme};
-use skelly_session::{ChangedFile, FileDiff, FileStatus, LineKind, Status};
+use skelly_session::{ChangedFile, FileDiff, FileStatus, Hunk, LineKind, Status};
 
 /// Grid row of the status bar (branch / ahead-behind / totals).
 const STATUS_ROW: usize = 0;
@@ -67,6 +67,11 @@ pub(crate) struct GitDock {
     diff: FileDiff,
     /// Index of the selected file in `status.files`.
     selected: usize,
+    /// Whether `diff` is the staged (index-vs-HEAD) diff rather than the working-tree
+    /// one; determines whether `⌘↵` stages or unstages the focused hunk.
+    diff_is_staged: bool,
+    /// Index of the focused hunk in `diff.hunks` (the target of `⌘↵`).
+    focused_hunk: usize,
     /// Top line offset into the selected file's flattened diff (scrolled with PageUp/Dn).
     diff_scroll: usize,
     /// Which part of the dock has keyboard focus (the list or the commit box).
@@ -89,6 +94,8 @@ impl GitDock {
             status: Status::default(),
             diff: FileDiff::default(),
             selected: 0,
+            diff_is_staged: false,
+            focused_hunk: 0,
             diff_scroll: 0,
             focus: Focus::List,
             message: String::new(),
@@ -191,10 +198,47 @@ impl GitDock {
         self.diff_scroll = 0;
     }
 
-    /// Set the selected file's diff (from `Repo::diff`), resetting the diff scroll.
-    pub(crate) fn set_diff(&mut self, diff: FileDiff) {
+    /// Set the selected file's diff (from `Repo::diff`), recording whether it is the
+    /// staged side and resetting the focused hunk + scroll.
+    pub(crate) fn set_diff(&mut self, diff: FileDiff, staged: bool) {
         self.diff = diff;
+        self.diff_is_staged = staged;
+        self.focused_hunk = 0;
         self.diff_scroll = 0;
+    }
+
+    /// Whether the shown diff is the staged side (so `⌘↵` unstages rather than stages).
+    pub(crate) fn diff_is_staged(&self) -> bool {
+        self.diff_is_staged
+    }
+
+    /// The focused hunk of the shown diff, if any (the target of `⌘↵`).
+    pub(crate) fn focused_hunk(&self) -> Option<&Hunk> {
+        self.diff.hunks.get(self.focused_hunk)
+    }
+
+    /// Move the focused hunk by `delta`, clamped, and scroll the diff so its header is at
+    /// the top of the body. A no-op when the diff has no hunks.
+    pub(crate) fn focus_hunk(&mut self, delta: i32) {
+        let count = self.diff.hunks.len();
+        if count == 0 {
+            return;
+        }
+        let last = i32::try_from(count - 1).unwrap_or(0);
+        let cur = i32::try_from(self.focused_hunk).unwrap_or(0);
+        self.focused_hunk = usize::try_from((cur + delta).clamp(0, last)).unwrap_or(0);
+        self.diff_scroll = self.hunk_line_offset(self.focused_hunk);
+    }
+
+    /// The flattened-diff display-line index of hunk `index`'s header (each earlier hunk
+    /// contributes its header line plus its body lines).
+    fn hunk_line_offset(&self, index: usize) -> usize {
+        self.diff
+            .hunks
+            .iter()
+            .take(index)
+            .map(|h| 1 + h.lines.len())
+            .sum()
     }
 
     /// Surface a git error in place of the file list.
@@ -315,6 +359,7 @@ impl GitDock {
             add_rows: Vec::new(),
             del_rows: Vec::new(),
             hunk_rows: Vec::new(),
+            focused_hunk_row: None,
             diff_scroll: 0,
             caret: None,
         };
@@ -508,6 +553,16 @@ impl GitDock {
                 DiffRowKind::Hunk => {
                     view.hunk_rows.push(row);
                     write(&mut grid[row], 0, &line.text, theme.diff_hunk);
+                    // Mark the focused hunk + show its stage/unstage affordance (`⌘↵`).
+                    if line.hunk_index == Some(self.focused_hunk) {
+                        view.focused_hunk_row = Some(row);
+                        let hint = if self.diff_is_staged {
+                            "unstage \u{2318}\u{21a9}"
+                        } else {
+                            "stage \u{2318}\u{21a9}"
+                        };
+                        write_before(&mut grid[row], cols, hint, theme.accent);
+                    }
                 }
                 DiffRowKind::Add => {
                     view.add_rows.push(row);
@@ -529,8 +584,8 @@ impl GitDock {
     /// hunk, then its context/add/del lines with the right gutter number and sign).
     fn flatten_diff(&self) -> Vec<DiffRow> {
         let mut lines = Vec::new();
-        for hunk in &self.diff.hunks {
-            let (old_count, new_count) = hunk_counts(hunk);
+        for (index, hunk) in self.diff.hunks.iter().enumerate() {
+            let (old_count, new_count) = hunk.counts();
             let mut header = format!(
                 "@@ -{},{} +{},{} @@",
                 hunk.old_start, old_count, hunk.new_start, new_count
@@ -544,6 +599,7 @@ impl GitDock {
                 gutter: None,
                 sign: ' ',
                 text: header,
+                hunk_index: Some(index),
             });
             for line in &hunk.lines {
                 let (kind, sign, gutter) = match line.kind {
@@ -556,6 +612,7 @@ impl GitDock {
                     gutter,
                     sign,
                     text: line.text.clone(),
+                    hunk_index: None,
                 });
             }
         }
@@ -581,6 +638,8 @@ pub(crate) struct View {
     pub(crate) del_rows: Vec<usize>,
     /// Grid rows that are `@@` hunk headers (for the `diff.hunk` background quads).
     pub(crate) hunk_rows: Vec<usize>,
+    /// Grid row of the focused hunk's header (for the `accent.subtle` highlight quad).
+    pub(crate) focused_hunk_row: Option<usize>,
     /// The clamped diff scroll actually used (the binary writes it back).
     pub(crate) diff_scroll: usize,
     /// The commit-message caret `(column, row)`, when the commit box has focus.
@@ -596,6 +655,7 @@ impl View {
             add_rows: Vec::new(),
             del_rows: Vec::new(),
             hunk_rows: Vec::new(),
+            focused_hunk_row: None,
             diff_scroll: 0,
             caret: None,
         }
@@ -611,6 +671,8 @@ struct DiffRow {
     sign: char,
     /// The code text (or the whole `@@ ... @@` header line).
     text: String,
+    /// The hunk this row belongs to, for a hunk header (`None` for a body line).
+    hunk_index: Option<usize>,
 }
 
 /// The role of a flattened diff line.
@@ -620,23 +682,6 @@ enum DiffRowKind {
     Add,
     Del,
     Hunk,
-}
-
-/// A hunk's `(old_count, new_count)` line spans, for reconstructing its `@@` header.
-fn hunk_counts(hunk: &skelly_session::Hunk) -> (u32, u32) {
-    let mut old = 0;
-    let mut new = 0;
-    for line in &hunk.lines {
-        match line.kind {
-            LineKind::Context => {
-                old += 1;
-                new += 1;
-            }
-            LineKind::Add => new += 1,
-            LineKind::Del => old += 1,
-        }
-    }
-    (old, new)
 }
 
 /// The scroll offset that keeps `anchor` visible in a `visible`-row window over `len`
@@ -1018,7 +1063,7 @@ mod tests {
         let theme = Theme::resolve("ossein-dark");
         let mut dock = GitDock::new();
         dock.load(sample_status());
-        dock.set_diff(sample_diff());
+        dock.set_diff(sample_diff(), false);
         let view = dock.view(60, 30, &theme);
         assert_eq!(view.hunk_rows.len(), 1, "one hunk header");
         assert_eq!(view.add_rows.len(), 1, "one addition");
@@ -1026,6 +1071,44 @@ mod tests {
         // The hunk header reconstructs its counts (1 context + 1 del = 2 old; 1+1 = 2 new).
         let hunk_row = view.hunk_rows[0];
         assert!(row_text(&view.rows[hunk_row]).contains("@@ -18,2 +18,2 @@ impl PaneTree"));
+        // The first (only) hunk is focused, and its header shows the stage affordance.
+        assert_eq!(view.focused_hunk_row, Some(hunk_row));
+        assert!(row_text(&view.rows[hunk_row]).contains("stage"));
+    }
+
+    #[test]
+    fn focus_hunk_moves_between_hunks_and_reports_the_target() {
+        let mut two = sample_diff();
+        // Give the diff a second hunk so there is something to move to.
+        two.hunks.push(skelly_session::Hunk {
+            old_start: 40,
+            new_start: 41,
+            heading: String::new(),
+            lines: vec![DiffLine {
+                kind: LineKind::Add,
+                old_no: None,
+                new_no: Some(41),
+                text: "added tail".to_owned(),
+            }],
+        });
+        let mut dock = GitDock::new();
+        dock.load(sample_status());
+        dock.set_diff(two, false);
+        assert_eq!(
+            dock.focused_hunk().unwrap().old_start,
+            18,
+            "starts on hunk 0"
+        );
+        dock.focus_hunk(1);
+        assert_eq!(
+            dock.focused_hunk().unwrap().old_start,
+            40,
+            "moved to hunk 1"
+        );
+        dock.focus_hunk(5); // clamps at the last hunk
+        assert_eq!(dock.focused_hunk().unwrap().old_start, 40);
+        dock.focus_hunk(-5); // clamps back to the first
+        assert_eq!(dock.focused_hunk().unwrap().old_start, 18);
     }
 
     #[test]
@@ -1071,7 +1154,7 @@ mod tests {
         let theme = Theme::resolve("ossein-dark");
         let mut dock = GitDock::new();
         dock.load(sample_status());
-        dock.set_diff(sample_diff());
+        dock.set_diff(sample_diff(), false);
         dock.scroll_diff(1000); // far past the end
                                 // With plenty of rows the whole (3-line) diff fits, so the used scroll clamps to 0.
         let view = dock.view(60, 40, &theme);

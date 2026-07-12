@@ -173,6 +173,12 @@ fn build_dock(
     let mut kinds = DiffRows::default();
     write_diff_rows(&mut rows, diff_header + 1, content_rows, theme, &mut kinds);
 
+    // The first hunk is focused: mark it and show the `⌘↵` stage affordance.
+    let focused_hunk_row = kinds.hunk.first().copied();
+    if let Some(row) = focused_hunk_row {
+        write_right(&mut rows[row], cols, "stage \u{2318}\u{21a9}", theme.accent);
+    }
+
     // The commit box: a divider, a message input with a caret, and a status line.
     let caret = Some(write_commit_band(&mut rows, content_rows, cols, theme));
 
@@ -189,6 +195,7 @@ fn build_dock(
         add_rows: kinds.add,
         del_rows: kinds.del,
         hunk_rows: kinds.hunk,
+        focused_hunk_row,
         caret,
     }
 }

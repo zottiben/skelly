@@ -45,6 +45,61 @@ pub struct Hunk {
     pub lines: Vec<DiffLine>,
 }
 
+impl Hunk {
+    /// The hunk's old-side and new-side line spans `(old_count, new_count)` - the counts
+    /// in its `@@ -old,oldCount +new,newCount @@` header (context lines count on both
+    /// sides, deletions only old, additions only new).
+    #[must_use]
+    pub fn counts(&self) -> (u32, u32) {
+        let mut old = 0;
+        let mut new = 0;
+        for line in &self.lines {
+            match line.kind {
+                LineKind::Context => {
+                    old += 1;
+                    new += 1;
+                }
+                LineKind::Add => new += 1,
+                LineKind::Del => old += 1,
+            }
+        }
+        (old, new)
+    }
+}
+
+/// Reconstruct a standalone unified-diff patch for a single `hunk` of `path` (repo-
+/// relative), suitable for `git apply --cached` to (un)stage just that hunk. The header
+/// counts are recomputed from the hunk's lines so they are always consistent.
+///
+/// A limitation: a hunk whose final line has no trailing newline is emitted without the
+/// `\ No newline at end of file` marker (the parser drops it), so `git apply` may reject
+/// it - uncommon, since most files end in a newline.
+#[must_use]
+pub(crate) fn hunk_patch(path: &str, hunk: &Hunk) -> String {
+    let (old_count, new_count) = hunk.counts();
+    // The file preamble + the `@@` header in one allocation; the body lines append below.
+    let mut buf = format!(
+        "diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ -{},{} +{},{} @@",
+        hunk.old_start, old_count, hunk.new_start, new_count
+    );
+    if !hunk.heading.is_empty() {
+        buf.push(' ');
+        buf.push_str(&hunk.heading);
+    }
+    buf.push('\n');
+    for line in &hunk.lines {
+        let marker = match line.kind {
+            LineKind::Context => ' ',
+            LineKind::Add => '+',
+            LineKind::Del => '-',
+        };
+        buf.push(marker);
+        buf.push_str(&line.text);
+        buf.push('\n');
+    }
+    buf
+}
+
 /// One line within a hunk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiffLine {
@@ -191,7 +246,7 @@ fn start_of(range: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_unified_diff, LineKind};
+    use super::{hunk_patch, parse_unified_diff, LineKind};
 
     // Built with `concat!` (not `\`-line-continuation, which strips the leading
     // whitespace that distinguishes a context line's ` ` marker).
@@ -287,5 +342,26 @@ mod tests {
         let diff = parse_unified_diff(text);
         assert_eq!(diff.hunks.len(), 1);
         assert_eq!(diff.stats(), (1, 0));
+    }
+
+    #[test]
+    fn hunk_patch_reconstructs_a_standalone_appliable_patch() {
+        let hunk = &parse_unified_diff(SAMPLE).hunks[0];
+        // Counts recomputed from the lines: 4 old (3 context + 1 del), 5 new (3 + 2 add).
+        assert_eq!(hunk.counts(), (4, 5));
+        let patch = hunk_patch("src/pane/tree.rs", hunk);
+        let expected = concat!(
+            "diff --git a/src/pane/tree.rs b/src/pane/tree.rs\n",
+            "--- a/src/pane/tree.rs\n",
+            "+++ b/src/pane/tree.rs\n",
+            "@@ -18,4 +18,5 @@ impl PaneTree\n",
+            " fn split(&mut self, dir: Dir) {\n",
+            "     let node = self.focused();\n",
+            "-    node.grow(dir);\n",
+            "+    if self.count() >= 8 { return; }\n",
+            "+    node.grow(dir);\n",
+            "     self.rebalance();\n",
+        );
+        assert_eq!(patch, expected);
     }
 }
