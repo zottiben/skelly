@@ -155,6 +155,12 @@ struct Tab {
     /// (`false`) and shows the empty-state overlay (a faint mark + hint chips); the first
     /// command run (or a split) activates it and the overlay clears (guide §10.2).
     activated: bool,
+    /// The focused pane's foreground-job command name (design §10.3: tabs titled by their
+    /// running command, e.g. `nvim`), cached with the pid it was read for so `ps` only runs
+    /// when the job changes. `None` when the shell is idle at its prompt.
+    job_name: Option<String>,
+    /// The pid `job_name` was resolved for, so the cache is invalidated on a job change.
+    job_pid: Option<u32>,
 }
 
 impl Tab {
@@ -167,6 +173,8 @@ impl Tab {
             dims: HashMap::new(),
             selection: None,
             activated: false,
+            job_name: None,
+            job_pid: None,
         }
     }
 
@@ -791,6 +799,29 @@ impl App {
             .collect()
     }
 
+    /// The tab titles (design §10.3): each tab's focused-pane running-command name (e.g.
+    /// `nvim`), else `Tab N`. Refreshes the per-tab job-name cache first, re-reading the
+    /// command via `ps` only when a tab's foreground pid changes (so idle frames are cheap).
+    fn tab_titles(&mut self) -> Vec<String> {
+        for tab in &mut self.tabs {
+            let id = tab.tree.focused();
+            let pid = tab.panes.get(&id).and_then(Terminal::foreground_job_pid);
+            if pid != tab.job_pid {
+                tab.job_pid = pid;
+                tab.job_name = pid.and_then(process_name);
+            }
+        }
+        self.tabs
+            .iter()
+            .enumerate()
+            .map(|(i, tab)| {
+                tab.job_name
+                    .clone()
+                    .unwrap_or_else(|| format!("Tab {}", i + 1))
+            })
+            .collect()
+    }
+
     /// The workspace chip glyphs (each workspace's name's first letter, uppercased).
     fn workspace_chips(&self) -> Vec<char> {
         self.workspaces
@@ -803,6 +834,7 @@ impl App {
         let scale = scale32(self.scale);
         // The sidebar bg fills the whole column (traffic lights sit on it); its content clears
         // the control strip via `top_inset` (logical px, macOS only).
+        let titles = self.tab_titles();
         let group = self.group_label();
         let running = self.tab_running();
         let view = sidebar::View {
@@ -812,6 +844,7 @@ impl App {
             active_chip: self.active_workspace,
             group_label: group.as_deref(),
             tab_running: &running,
+            tab_titles: &titles,
             rail: self.sidebar.is_rail(),
             top_inset: self.content_top() / scale,
         };
@@ -1170,6 +1203,7 @@ impl App {
             active_chip: self.active_workspace,
             group_label: group.as_deref(),
             tab_running: &[],
+            tab_titles: &[],
             rail: self.sidebar.is_rail(),
             top_inset: self.content_top() / scale,
         };

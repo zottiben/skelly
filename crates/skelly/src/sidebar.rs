@@ -112,6 +112,8 @@ pub(crate) struct View<'a> {
     /// Whether each tab has a live foreground job (a `●` running dot instead of the `❯` prompt),
     /// one flag per tab. Empty or short-of-`tab_count` means "not running".
     pub(crate) tab_running: &'a [bool],
+    /// Each tab's title (design §10.3), one per tab; a missing entry falls back to `Tab N`.
+    pub(crate) tab_titles: &'a [String],
     /// Whether the sidebar is the slim icon rail.
     pub(crate) rail: bool,
     /// The macOS control-strip inset in **logical** px (0 elsewhere); content clears it.
@@ -446,6 +448,7 @@ pub(crate) fn build(
         rail: view.rail,
         group_label: view.group_label,
         tab_running: view.tab_running,
+        tab_titles: view.tab_titles,
         scale,
         theme,
     };
@@ -491,6 +494,7 @@ struct RowCtx<'a> {
     rail: bool,
     group_label: Option<&'a str>,
     tab_running: &'a [bool],
+    tab_titles: &'a [String],
     scale: f32,
     theme: &'a Theme,
 }
@@ -584,11 +588,17 @@ fn push_row(
                         max_w: f32::MAX,
                     });
                 }
-                // The label, inset past the prefix slot + gap so all tabs align.
+                // The label (the tab title, §10.3), inset past the prefix slot + gap so all
+                // tabs align.
                 let x = prefix_x + (TAB_PROMPT_SLOT + TAB_GAP) * ctx.scale;
                 let line = measure.line_height(FontRole::Label);
+                let title = ctx
+                    .tab_titles
+                    .get(index)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Tab {}", index + 1));
                 labels.push(ProseLabel {
-                    text: format!("Tab {}", index + 1),
+                    text: title,
                     x,
                     y: top + (height - line) * 0.5,
                     role: FontRole::Label,
@@ -929,6 +939,7 @@ mod tests {
             active_chip: 0,
             group_label: None,
             tab_running: &[],
+            tab_titles: &[],
             rail,
             top_inset: 0.0,
         }
@@ -1065,6 +1076,7 @@ mod tests {
             active_chip: 0,
             group_label: None,
             tab_running: &[],
+            tab_titles: &[],
             rail: false,
             top_inset: 0.0,
         };

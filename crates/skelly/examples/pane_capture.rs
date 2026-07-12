@@ -1081,8 +1081,15 @@ fn push_sb_body(
             }
             let x = prefix_x + (SB_TAB_PROMPT_SLOT + SB_TAB_GAP) * scale;
             let line = measure.line_height(FontRole::Label);
+            // Representative §10.3 titles: the active tab shows a command, the running tab a
+            // long-lived process (in the binary these come from each tab's foreground job).
+            let title = match index {
+                0 => "git status".to_owned(),
+                1 => "dev server".to_owned(),
+                n => format!("Tab {}", n + 1),
+            };
             labels.push(ProseLabel {
-                text: format!("Tab {}", index + 1),
+                text: title,
                 x,
                 y: row_top + (SB_TAB_H * scale - line) * 0.5,
                 role: FontRole::Label,
