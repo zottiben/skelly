@@ -40,6 +40,14 @@ const CMD_RADIUS: f32 = 8.0;
 /// The command well's search glyph + placeholder (design §08 #3).
 const CMD_ICON: &str = "\u{2315}";
 const CMD_PLACEHOLDER: &str = "Search or run\u{2026}";
+/// Pinned-tab grid (design §08 #4): a "PINNED" label over a 3-column grid of square tiles.
+/// Its `13px` horizontal inset + `6px` gap + `8px` tile radius are the guide's `padding:0 13px`,
+/// grid `gap:6px`, and `border-radius:8px`; the label is 9px with a 7px margin below (~16px).
+const PINNED_LABEL_H: f32 = 16.0;
+const PINNED_INSET: f32 = 13.0;
+const PINNED_GRID_GAP: f32 = 6.0;
+const PINNED_RADIUS: f32 = 8.0;
+const PINNED_COLS: usize = 3;
 /// Height of the group header row (design §08 #5: the "repo · branch" context label above the
 /// tab list), an uppercase micro label with breathing room.
 const GROUP_H: f32 = 22.0;
@@ -84,6 +92,8 @@ pub(crate) enum Hit {
     Workspace(usize),
     /// Add a new workspace (the `+` chip).
     AddWorkspace,
+    /// Switch to the pinned tab at this 0-based grid position (design §08 #4).
+    Pinned(usize),
     /// Open the command palette (the command-input well, design §08 #3).
     CommandInput,
     /// Switch to the tab at this 0-based index.
@@ -106,6 +116,11 @@ pub(crate) struct View<'a> {
     pub(crate) chips: &'a [char],
     /// Index of the active workspace (highlighted chip).
     pub(crate) active_chip: usize,
+    /// One glyph per pinned tab for the 3-up pinned grid (design §08 #4); empty when nothing is
+    /// pinned (the grid is then hidden).
+    pub(crate) pinned: &'a [char],
+    /// The grid position of the active tab when it is pinned (highlights that tile).
+    pub(crate) active_pinned: Option<usize>,
     /// The group header above the tab list (design §08 #5: the "repo · branch" context), or
     /// `None` outside a git repo. Shown uppercase.
     pub(crate) group_label: Option<&'a str>,
@@ -228,6 +243,8 @@ fn visible_or(mode: SidebarMode, fallback: SidebarMode) -> SidebarMode {
 enum RowKind {
     /// The command-input well (design §08 #3), which opens the palette.
     Command,
+    /// The pinned-tab grid (design §08 #4), drawn only when tabs are pinned.
+    Pinned,
     /// The group header (design §08 #5), drawn only when there is a group label.
     Group,
     /// A tab at this 0-based index.
@@ -265,6 +282,7 @@ fn rows_layout(
     panel_h: f32,
     top_inset: f32,
     has_group: bool,
+    pinned_h: f32,
 ) -> Vec<Row> {
     // Reserve the bottom-anchored utility bar so the top-down flow stops above it.
     let flow_h = panel_h - UTIL_H;
@@ -278,6 +296,16 @@ fn rows_layout(
         kind: RowKind::Command,
     });
     y += CMD_H + CMD_GAP;
+
+    // The pinned-tab grid (design §08 #4), above the group header, when anything is pinned.
+    if pinned_h > 0.0 {
+        rows.push(Row {
+            top: y,
+            height: pinned_h,
+            kind: RowKind::Pinned,
+        });
+        y += pinned_h;
+    }
 
     // The group header (design §08 #5), above the tab list, when there is one.
     if has_group {
@@ -371,10 +399,19 @@ pub(crate) fn hit(view: &View, panel: PxRect, scale: f32, px: f32, py: f32) -> O
         panel.h / scale,
         top_inset,
         view.group_label.is_some(),
+        pinned_block_h(view, panel, scale),
     ) {
         if y_logical >= row.top && y_logical < row.top + row.height {
             return match row.kind {
                 RowKind::Command => Some(Hit::CommandInput),
+                RowKind::Pinned => {
+                    // Map the click to the pinned tile under it (`block_top` is the row top).
+                    let block_top = panel.y + row.top * scale;
+                    pinned_slots(view.pinned.len(), panel, block_top, scale)
+                        .into_iter()
+                        .position(|s| px >= s.x && px < s.x + s.w && py >= s.y && py < s.y + s.h)
+                        .map(Hit::Pinned)
+                }
                 RowKind::Tab(index) => Some(Hit::Tab(index)),
                 RowKind::NewTab => Some(Hit::NewTab),
                 _ => None,
@@ -449,6 +486,8 @@ pub(crate) fn build(
         group_label: view.group_label,
         tab_running: view.tab_running,
         tab_titles: view.tab_titles,
+        pinned: view.pinned,
+        active_pinned: view.active_pinned,
         scale,
         theme,
     };
@@ -458,6 +497,7 @@ pub(crate) fn build(
         panel.h / scale,
         view.top_inset + chips_block,
         view.group_label.is_some(),
+        pinned_block_h(view, panel, scale),
     ) {
         push_row(&mut quads, &mut labels, row, &ctx, measure);
     }
@@ -495,6 +535,8 @@ struct RowCtx<'a> {
     group_label: Option<&'a str>,
     tab_running: &'a [bool],
     tab_titles: &'a [String],
+    pinned: &'a [char],
+    active_pinned: Option<usize>,
     scale: f32,
     theme: &'a Theme,
 }
@@ -522,6 +564,21 @@ fn push_row(
     };
     match row.kind {
         RowKind::Command => push_command_well(quads, labels, top, height, ctx, measure),
+        RowKind::Pinned => {
+            if !ctx.rail {
+                push_pinned(
+                    quads,
+                    labels,
+                    ctx.pinned,
+                    ctx.active_pinned,
+                    ctx.panel,
+                    top,
+                    ctx.scale,
+                    ctx.theme,
+                    measure,
+                );
+            }
+        }
         RowKind::Group => {
             // The "repo · branch" group header (design §08 #5): an uppercase micro label,
             // quiet (fg.faint), inset like the tab labels.
@@ -758,8 +815,14 @@ fn push_chips(
         let is_add = i >= view.chips.len();
         let active = !is_add && i == view.active_chip;
         if active {
-            // accent@0.4 border ring, interior reset to the sidebar bg, then accent@0.16 fill.
-            quads.push(ChromeQuad::tint(*slot, theme.accent, 0.4, radius));
+            // accent@0.4 border ring over an accent.subtle (§03) fill, both composited in sRGB
+            // over the sidebar bg so they read at the guide's weight (not the brighter linear-
+            // space GPU blend).
+            quads.push(ChromeQuad::rounded(
+                *slot,
+                theme.accent.over(theme.bg_sidebar, 0.4),
+                radius,
+            ));
             let inner = PxRect {
                 x: slot.x + stroke,
                 y: slot.y + stroke,
@@ -767,8 +830,11 @@ fn push_chips(
                 h: (slot.h - 2.0 * stroke).max(0.0),
             };
             let inner_r = (radius - stroke).max(0.0);
-            quads.push(ChromeQuad::rounded(inner, theme.bg_sidebar, inner_r));
-            quads.push(ChromeQuad::tint(inner, theme.accent, 0.16, inner_r));
+            quads.push(ChromeQuad::rounded(
+                inner,
+                theme.accent_subtle_on(theme.bg_sidebar),
+                inner_r,
+            ));
         } else {
             quads.push(ChromeQuad::rounded(*slot, theme.bg_surface, radius));
         }
@@ -782,6 +848,123 @@ fn push_chips(
             text: glyph,
             x: slot.x + (slot.w - gw) * 0.5,
             y: slot.y + (slot.h - line) * 0.5,
+            role: FontRole::Mono,
+            color: if active { theme.accent } else { theme.fg_muted },
+            weight: None,
+            max_w: f32::MAX,
+        });
+    }
+}
+
+/// The width (physical px) of one square pinned tile: the content span split into
+/// `PINNED_COLS` columns with a `PINNED_GRID_GAP` between them.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "PINNED_COLS is a tiny fixed count (3)"
+)]
+fn pinned_tile_w(panel: PxRect, scale: f32) -> f32 {
+    let gaps = (PINNED_COLS - 1) as f32 * PINNED_GRID_GAP;
+    ((panel.w / scale - 2.0 * PINNED_INSET - gaps) / PINNED_COLS as f32).max(1.0) * scale
+}
+
+/// The logical height the pinned grid block occupies (its "PINNED" label + the tile rows), or
+/// 0 when nothing is pinned or in the rail.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the pinned-row count is a tiny value (few pinned tabs)"
+)]
+fn pinned_block_h(view: &View, panel: PxRect, scale: f32) -> f32 {
+    if view.rail || view.pinned.is_empty() {
+        return 0.0;
+    }
+    let rows = view.pinned.len().div_ceil(PINNED_COLS) as f32;
+    let tile = pinned_tile_w(panel, scale) / scale; // logical
+    PINNED_LABEL_H + rows * tile + rows * PINNED_GRID_GAP
+}
+
+/// The pinned tiles' hit/draw rectangles (physical px), a 3-column grid below the "PINNED"
+/// label whose top is `block_top`. Shared by [`hit`] and [`push_pinned`].
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the tile col/row indices are tiny values"
+)]
+fn pinned_slots(count: usize, panel: PxRect, block_top: f32, scale: f32) -> Vec<PxRect> {
+    let tile = pinned_tile_w(panel, scale);
+    let gap = PINNED_GRID_GAP * scale;
+    let x0 = panel.x + PINNED_INSET * scale;
+    let y0 = block_top + PINNED_LABEL_H * scale;
+    (0..count)
+        .map(|i| {
+            let col = (i % PINNED_COLS) as f32;
+            let row = (i / PINNED_COLS) as f32;
+            PxRect {
+                x: x0 + col * (tile + gap),
+                y: y0 + row * (tile + gap),
+                w: tile,
+                h: tile,
+            }
+        })
+        .collect()
+}
+
+/// The pinned-tab grid (design §08 #4): a `fg.faint` "PINNED" label over a 3-up grid of rounded
+/// `bg.surface` tiles (the active one `accent`-bordered), each holding its glyph in `fg.muted`.
+#[allow(clippy::too_many_arguments, reason = "one focused pinned-grid builder")]
+fn push_pinned(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    pinned: &[char],
+    active_pinned: Option<usize>,
+    panel: PxRect,
+    block_top: f32,
+    scale: f32,
+    theme: &Theme,
+    measure: &mut TextMeasure,
+) {
+    // The "PINNED" label.
+    let lh = measure.line_height(FontRole::Micro);
+    labels.push(ProseLabel {
+        text: "PINNED".to_owned(),
+        x: panel.x + PINNED_INSET * scale,
+        y: block_top + (PINNED_LABEL_H * scale - lh) * 0.5,
+        role: FontRole::Micro,
+        color: theme.fg_faint,
+        weight: None,
+        max_w: f32::MAX,
+    });
+    let slots = pinned_slots(pinned.len(), panel, block_top, scale);
+    let radius = PINNED_RADIUS * scale;
+    let stroke = scale.max(1.0);
+    let gline = measure.line_height(FontRole::Mono);
+    for (i, slot) in slots.iter().enumerate() {
+        let active = active_pinned == Some(i);
+        quads.push(ChromeQuad::rounded(*slot, theme.bg_surface, radius));
+        if active {
+            // A 1px accent@0.4 ring (composited in sRGB over the surface) for the active pinned
+            // tab, its interior left as the surface fill.
+            quads.push(ChromeQuad::rounded(
+                *slot,
+                theme.accent.over(theme.bg_surface, 0.4),
+                radius,
+            ));
+            let inner = PxRect {
+                x: slot.x + stroke,
+                y: slot.y + stroke,
+                w: (slot.w - 2.0 * stroke).max(0.0),
+                h: (slot.h - 2.0 * stroke).max(0.0),
+            };
+            quads.push(ChromeQuad::rounded(
+                inner,
+                theme.bg_surface,
+                (radius - stroke).max(0.0),
+            ));
+        }
+        let glyph = pinned[i].to_string();
+        let gw = measure.width(&glyph, FontRole::Mono, None);
+        labels.push(ProseLabel {
+            text: glyph,
+            x: slot.x + (slot.w - gw) * 0.5,
+            y: slot.y + (slot.h - gline) * 0.5,
             role: FontRole::Mono,
             color: if active { theme.accent } else { theme.fg_muted },
             weight: None,
@@ -812,10 +995,13 @@ fn push_active_marks(
         w: (panel.w - 2.0 * inset).max(0.0),
         h: height,
     };
-    // The 1px accent@0.28 border ring.
-    quads.push(ChromeQuad::tint(pill, theme.accent, 0.28, radius));
-    // Reset the interior to the sidebar surface, then lay the accent@0.14 fill over it, so the
-    // border reads stronger than the fill (translucent-over-translucent would only add up).
+    // The 1px accent@0.28 border ring over an accent.subtle (§03) fill, both composited in sRGB
+    // over the sidebar bg so the border reads stronger than the fill at the guide's weight.
+    quads.push(ChromeQuad::rounded(
+        pill,
+        theme.accent.over(theme.bg_sidebar, 0.28),
+        radius,
+    ));
     let inner = PxRect {
         x: pill.x + stroke,
         y: pill.y + stroke,
@@ -823,8 +1009,11 @@ fn push_active_marks(
         h: (pill.h - 2.0 * stroke).max(0.0),
     };
     let inner_r = (radius - stroke).max(0.0);
-    quads.push(ChromeQuad::rounded(inner, theme.bg_sidebar, inner_r));
-    quads.push(ChromeQuad::tint(inner, theme.accent, 0.14, inner_r));
+    quads.push(ChromeQuad::rounded(
+        inner,
+        theme.accent_subtle_on(theme.bg_sidebar),
+        inner_r,
+    ));
     // The 3x14 rounded indicator bar inside the pill's left padding, vertically centered.
     let bar_h = BAR_H * scale;
     quads.push(ChromeQuad::rounded(
@@ -937,6 +1126,8 @@ mod tests {
             active_tab: active,
             chips: &[],
             active_chip: 0,
+            pinned: &[],
+            active_pinned: None,
             group_label: None,
             tab_running: &[],
             tab_titles: &[],
@@ -1074,6 +1265,8 @@ mod tests {
             active_tab: 0,
             chips: &chips,
             active_chip: 0,
+            pinned: &[],
+            active_pinned: None,
             group_label: None,
             tab_running: &[],
             tab_titles: &[],

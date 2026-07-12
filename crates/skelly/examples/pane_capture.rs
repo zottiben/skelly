@@ -767,15 +767,16 @@ fn sidebar_panel(
             let x = x0 + i as f32 * step;
             let active_ws = i == 0;
             if active_ws {
-                quads.push(ChromeQuad::tint(
+                // accent@0.4 ring over an accent.subtle fill, composited in sRGB over the
+                // sidebar bg - mirrors the binary's `push_chips`.
+                quads.push(ChromeQuad::rounded(
                     PxRect {
                         x,
                         y: cy,
                         w: size,
                         h: size,
                     },
-                    theme.accent,
-                    0.4,
+                    theme.accent.over(theme.bg_sidebar, 0.4),
                     radius,
                 ));
                 quads.push(ChromeQuad::rounded(
@@ -785,18 +786,7 @@ fn sidebar_panel(
                         w: size - 2.0 * stroke,
                         h: size - 2.0 * stroke,
                     },
-                    theme.bg_sidebar,
-                    radius - stroke,
-                ));
-                quads.push(ChromeQuad::tint(
-                    PxRect {
-                        x: x + stroke,
-                        y: cy + stroke,
-                        w: size - 2.0 * stroke,
-                        h: size - 2.0 * stroke,
-                    },
-                    theme.accent,
-                    0.16,
+                    theme.accent_subtle_on(theme.bg_sidebar),
                     radius - stroke,
                 ));
             } else {
@@ -1151,7 +1141,13 @@ fn push_sb_active(
         w: (panel.w - 2.0 * inset).max(0.0),
         h: height,
     };
-    quads.push(ChromeQuad::tint(pill, theme.accent, 0.28, radius));
+    // accent@0.28 border ring over an accent.subtle fill, both composited in sRGB over the
+    // sidebar bg - mirrors the binary's `push_active_marks`.
+    quads.push(ChromeQuad::rounded(
+        pill,
+        theme.accent.over(theme.bg_sidebar, 0.28),
+        radius,
+    ));
     let inner = PxRect {
         x: pill.x + stroke,
         y: pill.y + stroke,
@@ -1159,8 +1155,11 @@ fn push_sb_active(
         h: (pill.h - 2.0 * stroke).max(0.0),
     };
     let inner_r = (radius - stroke).max(0.0);
-    quads.push(ChromeQuad::rounded(inner, theme.bg_sidebar, inner_r));
-    quads.push(ChromeQuad::tint(inner, theme.accent, 0.14, inner_r));
+    quads.push(ChromeQuad::rounded(
+        inner,
+        theme.accent_subtle_on(theme.bg_sidebar),
+        inner_r,
+    ));
     let bar_h = SB_BAR_H * scale;
     quads.push(ChromeQuad::rounded(
         PxRect {

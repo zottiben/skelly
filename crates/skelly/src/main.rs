@@ -161,6 +161,9 @@ struct Tab {
     job_name: Option<String>,
     /// The pid `job_name` was resolved for, so the cache is invalidated on a job change.
     job_pid: Option<u32>,
+    /// Whether this tab is pinned to the sidebar's 3-up pinned grid (design §08 #4). Pinned
+    /// tabs show as icon tiles above the tab list instead of in it.
+    pinned: bool,
 }
 
 impl Tab {
@@ -175,6 +178,7 @@ impl Tab {
             activated: false,
             job_name: None,
             job_pid: None,
+            pinned: false,
         }
     }
 
@@ -835,21 +839,58 @@ impl App {
             .collect()
     }
 
+    /// The tab indices split into `(unpinned, pinned)` - the unpinned show in the tab list, the
+    /// pinned in the 3-up grid (design §08 #4).
+    fn split_pinned(&self) -> (Vec<usize>, Vec<usize>) {
+        let mut unpinned = Vec::new();
+        let mut pinned = Vec::new();
+        for (i, tab) in self.tabs.iter().enumerate() {
+            if tab.pinned {
+                pinned.push(i);
+            } else {
+                unpinned.push(i);
+            }
+        }
+        (unpinned, pinned)
+    }
+
     fn build_sidebar_frame(&mut self) -> sidebar::Paint {
         let scale = scale32(self.scale);
         // The sidebar bg fills the whole column (traffic lights sit on it); its content clears
         // the control strip via `top_inset` (logical px, macOS only).
         let titles = self.tab_titles();
-        let group = self.group_label();
         let running = self.tab_running();
+        let group = self.group_label();
+        let chips = self.workspace_chips();
+        let (unpinned, pinned) = self.split_pinned();
+        // The tab list shows the unpinned tabs; the grid shows the pinned ones (glyph = the
+        // tab title's first letter). `active_tab` is the active tab's position in the list, or
+        // `usize::MAX` when the active tab is pinned (then `active_pinned` marks its tile).
+        let list_titles: Vec<String> = unpinned.iter().map(|&i| titles[i].clone()).collect();
+        let list_running: Vec<bool> = unpinned.iter().map(|&i| running[i]).collect();
+        let pinned_glyphs: Vec<char> = pinned
+            .iter()
+            .map(|&i| {
+                titles[i]
+                    .chars()
+                    .next()
+                    .unwrap_or('\u{2022}')
+                    .to_ascii_uppercase()
+            })
+            .collect();
         let view = sidebar::View {
-            tab_count: self.tabs.len(),
-            active_tab: self.active,
-            chips: &self.workspace_chips(),
+            tab_count: unpinned.len(),
+            active_tab: unpinned
+                .iter()
+                .position(|&i| i == self.active)
+                .unwrap_or(usize::MAX),
+            chips: &chips,
             active_chip: self.active_workspace,
+            pinned: &pinned_glyphs,
+            active_pinned: pinned.iter().position(|&i| i == self.active),
             group_label: group.as_deref(),
-            tab_running: &running,
-            tab_titles: &titles,
+            tab_running: &list_running,
+            tab_titles: &list_titles,
             rail: self.sidebar.is_rail(),
             top_inset: self.content_top() / scale,
         };
@@ -1205,11 +1246,21 @@ impl App {
         }
         let scale = scale32(self.scale);
         let group = self.group_label();
+        let chips = self.workspace_chips();
+        let (unpinned, pinned) = self.split_pinned();
+        // Layout only depends on the counts, so glyph placeholders and empty title/running
+        // slices are fine here (the real strings feed rendering, not hit-testing).
+        let pinned_glyphs = vec!['\u{2022}'; pinned.len()];
         let view = sidebar::View {
-            tab_count: self.tabs.len(),
-            active_tab: self.active,
-            chips: &self.workspace_chips(),
+            tab_count: unpinned.len(),
+            active_tab: unpinned
+                .iter()
+                .position(|&i| i == self.active)
+                .unwrap_or(usize::MAX),
+            chips: &chips,
             active_chip: self.active_workspace,
+            pinned: &pinned_glyphs,
+            active_pinned: pinned.iter().position(|&i| i == self.active),
             group_label: group.as_deref(),
             tab_running: &[],
             tab_titles: &[],
@@ -1222,7 +1273,13 @@ impl App {
             w: self.sidebar_width_px(),
             h: dim_f32(self.size.1),
         };
-        sidebar::hit(&view, panel, scale, px, py)
+        // The sidebar reports positions within the filtered lists; map them back to real tab
+        // indices (a pinned-tile click just activates that tab).
+        match sidebar::hit(&view, panel, scale, px, py) {
+            Some(sidebar::Hit::Tab(pos)) => unpinned.get(pos).copied().map(sidebar::Hit::Tab),
+            Some(sidebar::Hit::Pinned(gi)) => pinned.get(gi).copied().map(sidebar::Hit::Tab),
+            other => other,
+        }
     }
 
     /// Run a sidebar utility-bar toggle (design §08 #7). Each is a second entry point to an
@@ -1485,6 +1542,16 @@ impl App {
         }
     }
 
+    /// Pin or unpin the active tab (design §08 #4, ⇧⌘P): pinned tabs move into the sidebar's
+    /// 3-up icon grid and out of the tab list, keeping their shell alive. The active tab stays
+    /// active in either list.
+    fn toggle_pin(&mut self) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.pinned = !tab.pinned;
+            self.request_redraw();
+        }
+    }
+
     /// Cycle to the next (`forward`) or previous tab, wrapping around.
     fn cycle_tab(&mut self, forward: bool) {
         let next = cycle_index(self.active, self.tabs.len(), forward);
@@ -1630,6 +1697,7 @@ impl App {
             Action::NextTab => self.cycle_tab(true),
             Action::PrevTab => self.cycle_tab(false),
             Action::GotoTab(index) => self.goto_tab(index),
+            Action::TogglePin => self.toggle_pin(),
             Action::ToggleSidebar => self.toggle_sidebar(),
             Action::CycleSidebarMode => self.cycle_sidebar_mode(),
             Action::ShowGitDiff => self.toggle_git_dock(),
@@ -1999,6 +2067,45 @@ impl App {
         self.request_redraw();
     }
 
+    /// The Cmd/Super chords, matched on the logical character: `⌘K` palette, `⌘Q` quit, `⌘C`/`⌘V`
+    /// copy/paste, `⌘B`/`⇧⌘B` sidebar toggle/mode, `⇧⌘G` git dock, `⇧⌘H` timeline, `⇧⌘P` pin,
+    /// `⌘,` settings. Returns `true` when a chord fired (the caller then stops routing the key).
+    fn on_super_chord(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) -> bool {
+        if !self.modifiers.super_key() {
+            return false;
+        }
+        let Key::Character(ch) = key_event.logical_key.as_ref() else {
+            return false;
+        };
+        let shift = self.modifiers.shift_key();
+        if ch.eq_ignore_ascii_case("k") {
+            self.open_palette();
+        } else if ch.eq_ignore_ascii_case("q") {
+            event_loop.exit();
+        } else if ch.eq_ignore_ascii_case("c") {
+            self.copy_selection();
+        } else if ch.eq_ignore_ascii_case("v") {
+            self.paste();
+        } else if ch.eq_ignore_ascii_case("b") {
+            if shift {
+                self.cycle_sidebar_mode();
+            } else {
+                self.toggle_sidebar();
+            }
+        } else if shift && ch.eq_ignore_ascii_case("g") {
+            self.toggle_git_dock();
+        } else if shift && ch.eq_ignore_ascii_case("h") {
+            self.toggle_timeline();
+        } else if shift && ch.eq_ignore_ascii_case("p") {
+            self.toggle_pin();
+        } else if ch == "," {
+            self.open_settings();
+        } else {
+            return false;
+        }
+        true
+    }
+
     /// Handle a key press: the palette (when open), platform combos (quit/copy/paste/
     /// palette), pane chords, scrollback keys, then terminal input to the focused pane.
     fn on_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
@@ -2040,47 +2147,10 @@ impl App {
                 return;
             }
         }
-        // Platform combos (Cmd/Super + K/Q/C/V). The terminal owns every other key -
-        // Ctrl+C etc. still reach the shell.
-        if self.modifiers.super_key() {
-            if let Key::Character(ch) = key_event.logical_key.as_ref() {
-                if ch.eq_ignore_ascii_case("k") {
-                    self.open_palette();
-                    return;
-                }
-                if ch.eq_ignore_ascii_case("q") {
-                    event_loop.exit();
-                    return;
-                }
-                if ch.eq_ignore_ascii_case("c") {
-                    self.copy_selection();
-                    return;
-                }
-                if ch.eq_ignore_ascii_case("v") {
-                    self.paste();
-                    return;
-                }
-                if ch.eq_ignore_ascii_case("b") {
-                    if self.modifiers.shift_key() {
-                        self.cycle_sidebar_mode();
-                    } else {
-                        self.toggle_sidebar();
-                    }
-                    return;
-                }
-                if ch.eq_ignore_ascii_case("g") && self.modifiers.shift_key() {
-                    self.toggle_git_dock();
-                    return;
-                }
-                if ch.eq_ignore_ascii_case("h") && self.modifiers.shift_key() {
-                    self.toggle_timeline();
-                    return;
-                }
-                if ch == "," {
-                    self.open_settings();
-                    return;
-                }
-            }
+        // Platform combos (Cmd/Super + K/Q/C/V/B, and the ⇧-modified dock/pin chords). The
+        // terminal owns every other key - Ctrl+C etc. still reach the shell.
+        if self.on_super_chord(event_loop, key_event) {
+            return;
         }
         // Pane control (the `⌥` leader chords). Matched on the physical key so macOS
         // Option-key glyph remapping does not get in the way.
@@ -2180,7 +2250,11 @@ impl App {
                         sidebar::Hit::Workspace(index) => self.switch_workspace(index),
                         sidebar::Hit::AddWorkspace => self.add_workspace(),
                         sidebar::Hit::CommandInput => self.open_palette(),
-                        sidebar::Hit::Tab(index) => self.goto_tab(index),
+                        // `sidebar_hit` maps a pinned-tile hit to `Tab`, so `Pinned` is
+                        // unreachable here; both just activate the tab defensively.
+                        sidebar::Hit::Tab(index) | sidebar::Hit::Pinned(index) => {
+                            self.goto_tab(index);
+                        }
                         sidebar::Hit::NewTab => self.new_tab(),
                         sidebar::Hit::Util(action) => self.on_util_action(action),
                     }

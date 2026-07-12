@@ -41,6 +41,28 @@ impl Srgb {
     pub(crate) fn to_linear(self) -> [f32; 4] {
         [lin(self.r), lin(self.g), lin(self.b), 1.0]
     }
+
+    /// Composite this color over an opaque `base` at `alpha` (clamped to `0..=1`) in **sRGB
+    /// (gamma) space** - exactly how the guide's CSS `rgba()` tints composite, and the opaque
+    /// result to fill. A GPU alpha blend of the same tint happens in *linear* space, which over
+    /// a dark surface reads noticeably brighter/more saturated than the guide, so chrome tints
+    /// on a known solid background (chips, the active-tab pill, palette rows) pre-composite here
+    /// instead of relying on [`ChromeQuad::tint`](crate::ChromeQuad::tint).
+    #[must_use]
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the blended channel is a rounded value in 0.0..=255.0"
+    )]
+    pub fn over(self, base: Srgb, alpha: f32) -> Srgb {
+        let a = alpha.clamp(0.0, 1.0);
+        let mix = |f: u8, b: u8| (f32::from(f) * a + f32::from(b) * (1.0 - a)).round() as u8;
+        Srgb {
+            r: mix(self.r, base.r),
+            g: mix(self.g, base.g),
+            b: mix(self.b, base.b),
+        }
+    }
 }
 
 impl Rgba {
@@ -91,6 +113,9 @@ pub struct Theme {
     pub accent: Srgb,
     /// `accent.hover` - the brighter accent for hover / pressed states (sRGB).
     pub accent_hover: Srgb,
+    /// `accent.subtle` alpha (§03: 0.14 dark / 0.12 light) - the accent tint weight for
+    /// selected-row / active-chip fills, composited over their surface by [`accent_subtle_on`].
+    pub accent_subtle_alpha: f32,
     /// `border.subtle` - hairline dividers and inner separators (sRGB).
     pub border_subtle: Srgb,
     /// `border` (`border.default`) - card and pane edges (sRGB).
@@ -129,6 +154,7 @@ impl Theme {
                 fg_faint: srgb(0xBC, 0xC0, 0xCC),
                 accent: srgb(0x88, 0x39, 0xEF),
                 accent_hover: srgb(0x94, 0x50, 0xF0),
+                accent_subtle_alpha: 0.12,
                 border_subtle: srgb(0xDC, 0xE0, 0xE8),
                 border: srgb(0xCC, 0xD0, 0xDA),
                 border_strong: srgb(0xAC, 0xB0, 0xBE),
@@ -149,6 +175,7 @@ impl Theme {
                 fg_faint: srgb(0x52, 0x52, 0x6A),
                 accent: srgb(0xBD, 0x93, 0xF9),
                 accent_hover: srgb(0xD6, 0xBB, 0xFC),
+                accent_subtle_alpha: 0.14,
                 border_subtle: srgb(0x2E, 0x2E, 0x44),
                 border: srgb(0x3A, 0x3A, 0x54),
                 border_strong: srgb(0x6C, 0x6F, 0x93),
@@ -157,6 +184,15 @@ impl Theme {
                 diff_hunk: srgb(0x89, 0xB4, 0xFA),
             },
         }
+    }
+
+    /// The opaque fill for an `accent.subtle` (§03) tint over the opaque `base` surface -
+    /// the accent composited at this theme's [`accent_subtle_alpha`](Self::accent_subtle_alpha)
+    /// in sRGB space (see [`Srgb::over`]). Used for selected-row / active-chip / active-tab
+    /// fills so they read at the guide's weight instead of the brighter GPU linear-space blend.
+    #[must_use]
+    pub fn accent_subtle_on(&self, base: Srgb) -> Srgb {
+        self.accent.over(base, self.accent_subtle_alpha)
     }
 }
 
@@ -231,6 +267,29 @@ mod tests {
     fn srgb_endpoints_map_to_linear_endpoints() {
         assert!((srgb_to_linear(0) - 0.0).abs() < 1e-9);
         assert!((srgb_to_linear(255) - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn over_composites_in_srgb_space_like_the_guide_css() {
+        // `Srgb::over` reproduces the guide's CSS `rgba()` compositing (gamma-space per-channel
+        // mix), NOT the brighter linear-space GPU blend. accent #BD93F9 at 0.14 over the sidebar
+        // bg #1E1E2E: round(0.14*fg + 0.86*bg) per channel.
+        let dark = Theme::resolve("ossein-dark");
+        let got = dark.accent.over(dark.bg_sidebar, 0.14);
+        let mix = |f: u8, b: u8| (0.14_f32 * f32::from(f) + 0.86 * f32::from(b)).round() as u8;
+        assert_eq!(
+            got,
+            srgb(mix(0xBD, 0x1E), mix(0x93, 0x1E), mix(0xF9, 0x2E),)
+        );
+        // The opaque result is far dimmer than the bare accent (the whole point of the fix).
+        assert!(got.r < dark.accent.r && got.g < dark.accent.g && got.b < dark.accent.b);
+        // The endpoints: alpha 0 is the base, alpha 1 is the fg.
+        assert_eq!(dark.accent.over(dark.bg_sidebar, 0.0), dark.bg_sidebar);
+        assert_eq!(dark.accent.over(dark.bg_sidebar, 1.0), dark.accent);
+        // `accent_subtle_on` uses the per-theme token alpha (0.14 dark / 0.12 light).
+        assert_eq!(dark.accent_subtle_alpha, 0.14);
+        assert_eq!(dark.accent_subtle_on(dark.bg_sidebar), got);
+        assert_eq!(Theme::resolve("ossein-light").accent_subtle_alpha, 0.12);
     }
 
     #[test]

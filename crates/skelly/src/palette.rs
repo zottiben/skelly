@@ -85,6 +85,8 @@ pub(crate) enum Action {
     PrevTab,
     /// Switch to the tab at this 0-based index (a surfaced tab entry, §10.8).
     GotoTab(usize),
+    /// Pin or unpin the active tab (move it in/out of the 3-up pinned grid, §08 #4).
+    TogglePin,
     /// Show or hide the left sidebar.
     ToggleSidebar,
     /// Cycle the sidebar between the full panel and the slim icon rail.
@@ -182,6 +184,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         label: "Close tab",
         hint: "cmd W",
         action: Action::CloseTab,
+    },
+    Command {
+        category: "Tabs",
+        icon: "\u{25C8}", // ◈ pin
+        label: "Pin / unpin tab",
+        hint: "shift cmd P",
+        action: Action::TogglePin,
     },
     Command {
         category: "Tabs",
@@ -524,15 +533,16 @@ impl Palette {
             let selected = index == self.selected;
             if selected {
                 let inset = ROW_INSET * 0.5 * scale;
-                quads.push(ChromeQuad::tint(
+                // accent.subtle (§03) selected-row pill, composited in sRGB over the palette
+                // card (bg.elevated) so it reads at the guide's weight, not the brighter blend.
+                quads.push(ChromeQuad::rounded(
                     PxRect {
                         x: cx + inset,
                         y,
                         w: (cw - 2.0 * inset).max(0.0),
                         h: CMD_H * scale,
                     },
-                    theme.accent,
-                    0.14,
+                    theme.accent_subtle_on(theme.bg_elevated),
                     PILL_RADIUS * scale,
                 ));
             }
