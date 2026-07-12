@@ -52,6 +52,11 @@ use winit::window::{Window, WindowId};
 const WINDOW_PAD: f32 = 12.0;
 /// Logical inset (px) inside each pane, between its border and its cells.
 const PANE_INSET: f32 = 6.0;
+/// Logical height (px) of the top control strip that clears the macOS traffic lights
+/// (design §08 anatomy #1). The window uses a transparent, full-size-content-view title bar
+/// (the standard native-terminal look), so app content reserves this band at the top; it is
+/// zero where the platform keeps native decorations.
+const TITLE_STRIP: f32 = 38.0;
 /// One keyboard resize step, as a fraction of the enclosing split's extent.
 const RESIZE_STEP: f32 = 0.04;
 /// Logical width (px) of the slim icon rail (`⇧⌘B`), per design §08 ("Icon rail 56px").
@@ -304,20 +309,35 @@ impl App {
         &mut self.tabs[self.active]
     }
 
-    /// The pane area within the window: the surface inset by the window margin, by the
-    /// sidebar's width on the left when it is shown, and by the git dock's width on the
-    /// right when it is open.
+    /// The height (physical px) of the top control strip reserved for the macOS traffic
+    /// lights (design §08 anatomy #1). Zero on platforms that keep native window decorations,
+    /// so their layout is unchanged.
+    fn content_top(&self) -> f32 {
+        #[cfg(target_os = "macos")]
+        {
+            TITLE_STRIP * scale32(self.scale)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            0.0
+        }
+    }
+
+    /// The pane area within the window: the surface inset by the window margin, by the top
+    /// control strip, by the sidebar's width on the left when it is shown, and by the git
+    /// dock's width on the right when it is open.
     fn viewport_rect(&self) -> Rect {
         let pad = WINDOW_PAD * scale32(self.scale);
+        let top = self.content_top();
         let sidebar = self.sidebar_width_px();
         let dock = self.right_dock_width_px();
         let w = dim_f32(self.size.0);
         let h = dim_f32(self.size.1);
         Rect::new(
             sidebar + pad,
-            pad,
+            top + pad,
             (w - sidebar - dock - 2.0 * pad).max(1.0),
-            (h - 2.0 * pad).max(1.0),
+            (h - top - 2.0 * pad).max(1.0),
         )
     }
 
@@ -724,11 +744,12 @@ impl App {
     fn build_sidebar_frame(&mut self) -> sidebar::Paint {
         let rail = self.sidebar.is_rail();
         let scale = scale32(self.scale);
+        let top = self.content_top();
         let panel = PxRect {
             x: 0.0,
-            y: 0.0,
+            y: top,
             w: self.sidebar_width_px(),
-            h: dim_f32(self.size.1),
+            h: (dim_f32(self.size.1) - top).max(1.0),
         };
         sidebar::build(
             self.tabs.len(),
@@ -745,11 +766,12 @@ impl App {
     /// in UI tokens and clipped to the window.
     fn build_settings_frame(&mut self) -> SettingsFrame {
         let scale = scale32(self.scale);
+        let top = self.content_top();
         let panel = PxRect {
             x: 0.0,
-            y: 0.0,
+            y: top,
             w: dim_f32(self.size.0),
-            h: dim_f32(self.size.1),
+            h: (dim_f32(self.size.1) - top).max(1.0),
         };
         let paint = self
             .settings
@@ -768,12 +790,13 @@ impl App {
     fn build_git_dock_frame(&mut self) -> GitDockFrame {
         let scale = scale32(self.scale);
         let dock_w = self.right_dock_width_px();
+        let top = self.content_top();
         let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
         let panel = PxRect {
             x: (surface_w - dock_w).max(0.0),
-            y: 0.0,
+            y: top,
             w: dock_w,
-            h: surface_h,
+            h: (surface_h - top).max(1.0),
         };
         let paint = self
             .git_dock
@@ -791,12 +814,13 @@ impl App {
     fn build_timeline_frame(&mut self) -> TimelineFrame {
         let scale = scale32(self.scale);
         let dock_w = self.right_dock_width_px();
+        let top = self.content_top();
         let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
         let panel = PxRect {
             x: (surface_w - dock_w).max(0.0),
-            y: 0.0,
+            y: top,
             w: dock_w,
-            h: surface_h,
+            h: (surface_h - top).max(1.0),
         };
         let paint = self
             .timeline
@@ -1077,11 +1101,12 @@ impl App {
         if px >= self.sidebar_width_px() {
             return None;
         }
+        let top = self.content_top();
         let panel = PxRect {
             x: 0.0,
-            y: 0.0,
+            y: top,
             w: self.sidebar_width_px(),
-            h: dim_f32(self.size.1),
+            h: (dim_f32(self.size.1) - top).max(1.0),
         };
         sidebar::hit(
             self.tabs.len(),
@@ -2237,6 +2262,19 @@ impl ApplicationHandler<Wakeup> for App {
         let attributes = Window::default_attributes()
             .with_title("skelly")
             .with_inner_size(LogicalSize::new(960.0, 600.0));
+        // macOS: a transparent, full-size-content-view title bar so app chrome extends to the
+        // top edge with the traffic lights floating inset top-left (design §08 anatomy #1, the
+        // standard native-terminal look). The title text is hidden; the buttons stay visible +
+        // functional, and the title-bar height stays draggable. `content_top` reserves the
+        // strip below them so nothing sits under the lights.
+        #[cfg(target_os = "macos")]
+        let attributes = {
+            use winit::platform::macos::WindowAttributesExtMacOS;
+            attributes
+                .with_titlebar_transparent(true)
+                .with_title_hidden(true)
+                .with_fullsize_content_view(true)
+        };
         let window = match event_loop.create_window(attributes) {
             Ok(window) => Arc::new(window),
             Err(err) => {

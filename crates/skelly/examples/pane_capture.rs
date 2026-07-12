@@ -30,6 +30,8 @@ use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 const WINDOW_PAD: f32 = 12.0;
 /// Logical inset inside each pane - mirrors the binary's `PANE_INSET`.
 const PANE_INSET: f32 = 6.0;
+/// Logical height of the macOS control strip - mirrors the binary's `TITLE_STRIP`.
+const TITLE_STRIP: f32 = 38.0;
 /// Logical sidebar width - mirrors the config default (`[sidebar] width = 240`).
 const SIDEBAR_WIDTH: f32 = 240.0;
 /// Logical width of the slim icon rail - mirrors the binary's `RAIL_WIDTH`.
@@ -71,13 +73,18 @@ fn main() {
     let sc = scale as f32;
     let pad = WINDOW_PAD * sc;
     let inset = PANE_INSET * sc;
-    // The pane viewport starts to the right of the sidebar, as the binary insets it.
+    // The macOS control strip (§08 anatomy #1): app content reserves this band at the top so
+    // the (OS-drawn) traffic lights float clear of it. Mirrors the binary's `content_top`; the
+    // lights themselves are drawn by macOS and cannot appear in a headless capture.
+    let strip = TITLE_STRIP * sc;
+    // The pane viewport starts to the right of the sidebar and below the control strip, as the
+    // binary insets it.
     let sidebar_w = if rail { RAIL_WIDTH } else { SIDEBAR_WIDTH } * sc;
     let viewport = Rect::new(
         sidebar_w + pad,
-        pad,
+        strip + pad,
         width as f32 - sidebar_w - 2.0 * pad,
-        height as f32 - 2.0 * pad,
+        height as f32 - strip - 2.0 * pad,
     );
 
     // Two panes, side by side; focus lands on the new (right) pane, matching the binary's
@@ -169,7 +176,7 @@ fn main() {
         pane_overlay.quads.extend(q);
         pane_overlay.labels.extend(l);
     }
-    let sidebar = sidebar_panel(height, sidebar_w, sc, rail, overflow, &theme);
+    let sidebar = sidebar_panel(height, sidebar_w, strip, sc, rail, overflow, &theme);
     // `solo` shows the bare pane + status line (no overlay); otherwise the palette (or the
     // confirm modal) composites on top.
     let overlay = if solo {
@@ -635,20 +642,23 @@ const SB_UTIL_STEP: f32 = 34.0;
 /// binary's `sidebar` module layout (§08) so the capture verifies the tab-list chrome.
 /// `rail` picks the slim 56px icon rail (centered tab numbers); `overflow` shows the
 /// many-tab windowed state. The live binary drives this from the real module.
+#[allow(clippy::too_many_arguments, reason = "one focused example builder")]
 fn sidebar_panel(
     height: u32,
     sidebar_w: f32,
+    strip: f32,
     scale: f32,
     rail: bool,
     overflow: bool,
     theme: &Theme,
 ) -> CaptureSidebar {
     let mut measure = TextMeasure::new(scale);
+    // Below the macOS control strip (§08 #1), mirroring the binary's `content_top`.
     let panel = PxRect {
         x: 0.0,
-        y: 0.0,
+        y: strip,
         w: sidebar_w,
-        h: height as f32,
+        h: height as f32 - strip,
     };
     let (count, active): (usize, usize) = if overflow { (10, 8) } else { (2, 0) };
     let mut quads = vec![ChromeQuad::fill(panel, theme.bg_sidebar)];

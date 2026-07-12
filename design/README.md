@@ -76,9 +76,16 @@ open question>)`.
   one-off inline `#1A1826`/10.5px (Hard rule 2). Still deferred as genuinely blocked on absent
   features (would be fabrication): the workspace switcher (#2), pinned grid (#4), collapsible
   groups (#5), per-tab cwd titling, and editor mode/filetype - each needs a real feature first.
-  The macOS control strip (#1, traffic lights via CSD/`fullSizeContentView`) is buildable but
-  a windowing change that can't be verified from the headless render captures, so it is left as
-  the next windowing item.
+  (c) the **macOS control strip** (§08 #1, slice 15) is now built: the window uses a
+  transparent, full-size-content-view title bar with the title hidden and the traffic-light
+  buttons kept visible + functional (the standard native-terminal look, same as Alacritty/
+  WezTerm), and app content reserves a 38px `TITLE_STRIP` band at the top (`content_top`, macOS
+  only) so nothing sits under the lights. NOTE: the traffic lights are OS-drawn and cannot
+  appear in the headless render captures, so this slice's live-window appearance (light
+  alignment, drag region) needs a look on a real macOS window - the reservation (content
+  correctly shifted below the strip) is capture-verified, the OS chrome is not. Linux keeps
+  native decorations for v1 (`content_top` = 0); the guide's Linux top-right CSD is a separate
+  follow-up.
 
 - 2026-07-12 - **Design-fidelity: rounded corners + drop shadows (campaign slice 2).**
   The guide renders every chrome surface as a rounded, shadowed card, but the two
