@@ -54,6 +54,9 @@ fn main() {
     // An optional third arg picks the sidebar mode: `rail` = the slim 56px icon rail,
     // anything else (default) = the full-width panel.
     let rail = std::env::args().nth(3).as_deref() == Some("rail");
+    // `overflow` renders a many-tab full panel scrolled so the active tab stays in view,
+    // exercising the tab-list windowing + the ↑/↓ overflow indicators (design §12).
+    let overflow = std::env::args().nth(3).as_deref() == Some("overflow");
 
     let (cell_w, cell_h) = measure_cell(&appearance, scale);
     let sc = scale as f32;
@@ -133,7 +136,7 @@ fn main() {
     // verifying the sidebar chrome and the overlay compositing together. The overlay is
     // the command palette by default, or the "running job" confirm modal for `confirm`.
     let theme = Theme::resolve(&appearance.theme);
-    let sidebar = sidebar_panel(height, cell_w, sidebar_w, sc, rail, &theme);
+    let sidebar = sidebar_panel(height, cell_w, sidebar_w, sc, rail, overflow, &theme);
     let overlay = if std::env::args().nth(3).as_deref() == Some("confirm") {
         confirm_overlay(width, height, cell_w, cell_h, sc, &theme)
     } else {
@@ -288,29 +291,55 @@ fn sidebar_panel(
     sidebar_w: f32,
     scale: f32,
     rail: bool,
+    overflow: bool,
     theme: &Theme,
 ) -> CaptureSidebar {
     let pad = (if rail { RAIL_PAD } else { SIDEBAR_PAD }) * scale;
     let cols = ((sidebar_w - 2.0 * pad) / cell_w).max(1.0) as usize;
-    let rows = if rail {
-        vec![
-            centered_row("sk", cols, theme.fg_secondary), // brand mark
-            ui_row("", cols, theme.fg_muted),             // spacer
-            centered_row("1", cols, theme.fg_primary),    // active
-            centered_row("2", cols, theme.fg_secondary),
-            ui_row("", cols, theme.fg_muted), // spacer
-            centered_row("+", cols, theme.fg_muted),
-        ]
+    let indent = "  ";
+    let (rows, active_row) = if overflow {
+        // Ten tabs windowed into a 6-tab list with the active tab (Tab 9) scrolled to the
+        // bottom row: the ↑/↓ spacers carry the hidden-tab counts. Mirrors what the binary's
+        // `sidebar` module produces for count=10, active=8, a 6-row window.
+        (
+            vec![
+                ui_row(&format!("{indent}skelly"), cols, theme.fg_secondary), // header
+                ui_row(&format!("{indent}↑ 3 more"), cols, theme.fg_muted),   // more above
+                ui_row(&format!("{indent}Tab 4"), cols, theme.fg_secondary),
+                ui_row(&format!("{indent}Tab 5"), cols, theme.fg_secondary),
+                ui_row(&format!("{indent}Tab 6"), cols, theme.fg_secondary),
+                ui_row(&format!("{indent}Tab 7"), cols, theme.fg_secondary),
+                ui_row(&format!("{indent}Tab 8"), cols, theme.fg_secondary),
+                ui_row(&format!("{indent}Tab 9"), cols, theme.fg_primary), // active
+                ui_row(&format!("{indent}↓ 1 more"), cols, theme.fg_muted), // more below
+                ui_row(&format!("{indent}+ New tab"), cols, theme.fg_muted),
+            ],
+            Some(7),
+        )
+    } else if rail {
+        (
+            vec![
+                centered_row("sk", cols, theme.fg_secondary), // brand mark
+                ui_row("", cols, theme.fg_muted),             // spacer
+                centered_row("1", cols, theme.fg_primary),    // active
+                centered_row("2", cols, theme.fg_secondary),
+                ui_row("", cols, theme.fg_muted), // spacer
+                centered_row("+", cols, theme.fg_muted),
+            ],
+            Some(2),
+        )
     } else {
-        let indent = "  ";
-        vec![
-            ui_row(&format!("{indent}skelly"), cols, theme.fg_secondary), // header
-            ui_row("", cols, theme.fg_muted),                             // spacer
-            ui_row(&format!("{indent}Tab 1"), cols, theme.fg_primary),    // active
-            ui_row(&format!("{indent}Tab 2"), cols, theme.fg_secondary),
-            ui_row("", cols, theme.fg_muted), // spacer
-            ui_row(&format!("{indent}+ New tab"), cols, theme.fg_muted),
-        ]
+        (
+            vec![
+                ui_row(&format!("{indent}skelly"), cols, theme.fg_secondary), // header
+                ui_row("", cols, theme.fg_muted),                             // spacer
+                ui_row(&format!("{indent}Tab 1"), cols, theme.fg_primary),    // active
+                ui_row(&format!("{indent}Tab 2"), cols, theme.fg_secondary),
+                ui_row("", cols, theme.fg_muted), // spacer
+                ui_row(&format!("{indent}+ New tab"), cols, theme.fg_muted),
+            ],
+            Some(2),
+        )
     };
     CaptureSidebar {
         panel: PxRect {
@@ -321,8 +350,8 @@ fn sidebar_panel(
         },
         text_origin: (pad, pad),
         rows,
-        // Active tab (index 0) sits at grid row HEADER_ROWS (=2); highlight there.
-        active_row: Some(2),
+        // The active tab's grid row (index 0 at HEADER_ROWS=2, or Tab 9 scrolled to row 7).
+        active_row,
     }
 }
 

@@ -706,7 +706,15 @@ impl App {
         let surface_h = dim_f32(self.size.1);
 
         let cols = ((sidebar_w - 2.0 * pad_x) / cell_w).floor().max(1.0) as usize;
-        let view = sidebar::view(self.tabs.len(), self.active, cols, rail, &self.theme);
+        let max_rows = self.sidebar_max_rows();
+        let view = sidebar::view(
+            self.tabs.len(),
+            self.active,
+            cols,
+            max_rows,
+            rail,
+            &self.theme,
+        );
 
         SidebarFrame {
             panel: PxRect {
@@ -1098,7 +1106,24 @@ impl App {
             return None;
         }
         let row = ((py - origin_y) / cell_h).floor() as usize;
-        sidebar::hit(self.tabs.len(), row)
+        sidebar::hit(self.tabs.len(), self.active, self.sidebar_max_rows(), row)
+    }
+
+    /// The number of grid rows the sidebar's tab list can occupy at the current window
+    /// height - the shared height budget that [`Self::build_sidebar_frame`] windows the tab
+    /// list into and [`Self::sidebar_hit`] maps clicks against, so the rendered rows and the
+    /// click map agree on where each tab is.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the row count is a small, non-negative value"
+    )]
+    fn sidebar_max_rows(&self) -> usize {
+        let (_, cell_h) = self.cell_size();
+        let pad_y = SIDEBAR_PAD * scale32(self.scale);
+        let surface_h = dim_f32(self.size.1);
+        ((surface_h - 2.0 * pad_y) / cell_h).floor().max(1.0) as usize
     }
 
     /// Copy the current selection to the clipboard.

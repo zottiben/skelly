@@ -14,15 +14,17 @@ plus a few M3 follow-ups, which we finish opportunistically rather than block on
 **M4 (signature features) is complete**: the **per-repo git diff dock** (`⇧⌘G`) - the
 diff model, the dock UI, per-file + hunk-level staging, and the commit box - and the
 **session timeline + non-destructive rewind** (`⇧⌘H`, ADR-0007) both land end-to-end.
-**M5 (hardening & release) is now in progress**: five edge states have landed - the
+**M5 (hardening & release) is now in progress**: six edge states have landed - the
 **shell-exit / crash overlay** (design §12; a dim scrim + exit message + `↵ restart` over a
 pane whose shell ended), the **empty state + never-quit close cascade** (design §10.2;
 closing the last pane closes the tab, closing the last tab resets to a fresh empty-state
 tab), the **sidebar collapse rail** (design §08; `⇧⌘B` cycles the full panel <-> a slim
 56px icon rail, the mode persisting to `config.sidebar.mode`), the **not-a-git-repo
 Init button** (design §12; the git dock's empty state offers `Init repo`, running
-`git init`), and the **process-running-on-close confirm** (design §12; closing a pane/tab
-with a running foreground job asks first, naming the process). Remaining M5: the other edge
+`git init`), the **process-running-on-close confirm** (design §12; closing a pane/tab
+with a running foreground job asks first, naming the process), and the **tab overflow
+scroll** (design §12; the tab list windows into the available height, keeping the active
+tab in view and marking hidden tabs with `↑`/`↓` counts). Remaining M5: the other edge
 states, perf budgets, packaging, and the first tagged release - plus the tracked M2-M4
 follow-ups, finished opportunistically.
 
@@ -267,8 +269,16 @@ follow-ups, finished opportunistically.
     (`portable-pty`'s `process_group_leader`) and compares it to the shell's own pid
     (e2e-tested); the binary looks up the name via `ps -o comm=`. Pure `confirm` module (unit-
     tested); verified by the `pane_capture` `confirm` arg PNG in both themes.
-  - [ ] Remaining edge/empty states: tab overflow scroll, detached/rewound "warns before
-    forking", theme-with-no-light-variant fallback.
+  - [x] **Tab overflow scroll** (design §12 "Many tabs overflow"). The sidebar tab list
+    windows into the available window height instead of clipping: the header stays pinned,
+    the tab rows between it and the `+ New tab` action scroll, and the active tab always
+    auto-scrolls into view. Hidden tabs are marked with `↑ N more` / `↓ N more` indicators
+    on the spacer rows (single-width arrows, alignment-safe). A shared `Layout` drives both
+    the rendered rows and the click hit-test so a click lands on exactly the tab drawn there,
+    scroll offset included. Pure `sidebar` module (unit-tested: windowing, scroll-into-view,
+    hit-through-offset); verified by the `pane_capture` `overflow` arg PNG in both themes.
+  - [ ] Remaining edge/empty states: detached/rewound "warns before forking",
+    theme-with-no-light-variant fallback.
   - [ ] Perf budgets (`criterion` on the parser/renderer hot paths).
   - [ ] Packaging (`cargo-dist` + `cargo-release`) and the first tagged release.
 
