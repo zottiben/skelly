@@ -55,6 +55,20 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Command palette: mode prefixes + surfaced tabs (§10.8).** The palette's query
+  now takes a leading mode prefix: `>` = commands only, `?` = the keybinding help (the command
+  list as a reference), `/` = file search (deferred - shows a "coming soon" hint), and **no
+  prefix = the universal mode** that lists commands *and* surfaces the open tabs under a "Tabs"
+  group (each runs `Action::GotoTab`). Themes were already commands, so "surface themes" needed
+  no new entries. The input renders the mode's prompt glyph + the term (query minus the prefix).
+  **Interpretation decisions:** (a) the guide's "plain text searches scrollback" is read as the
+  *universal* command/tab/theme browse (scrollback search is a separate feature - it needs
+  scrollback access + result navigation - deferred); (b) `/` file search is deferred (needs a
+  filesystem lister + a defined action, e.g. insert-path); (c) tabs are surfaced by their current
+  titles ("Tab N" today; per-tab cwd titling is the blocked feature). The palette result model
+  moved from a static `COMMANDS`-index list to a dynamic `Row`/`Entry` list so tabs (and later
+  files) compose in.
+
 - 2026-07-13 - **Settings view: real §09 widgets (§10.9).** The settings controls now render the
   guide's actual widgets instead of the placeholder `‹ value ›` text: `Kind::Toggle` -> a 38x22
   toggle switch (accent on / border off, sprung knob), `Kind::Choice` -> a segmented control

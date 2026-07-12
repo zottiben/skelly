@@ -1480,6 +1480,7 @@ impl App {
             Action::CloseTab => self.request_close_tab(),
             Action::NextTab => self.cycle_tab(true),
             Action::PrevTab => self.cycle_tab(false),
+            Action::GotoTab(index) => self.goto_tab(index),
             Action::ToggleSidebar => self.toggle_sidebar(),
             Action::CycleSidebarMode => self.cycle_sidebar_mode(),
             Action::ShowGitDiff => self.toggle_git_dock(),
@@ -2384,7 +2385,10 @@ impl App {
     /// polls until it settles.
     fn open_palette(&mut self) {
         let from = overlay_offset_logical(self.palette_anim).unwrap_or(OVERLAY_RISE);
-        self.palette.open();
+        // Surface the open tabs in the palette (§10.8). Tabs are numbered today; per-tab cwd
+        // titling is a later slice.
+        let tabs = (1..=self.tabs.len()).map(|n| format!("Tab {n}")).collect();
+        self.palette.open(tabs);
         self.palette_anim = Some(OverlayAnim {
             anim: motion::Anim::start(Instant::now(), motion::BASE),
             from,

@@ -5,8 +5,11 @@
 //! (decorative quads + positioned labels in the guide's fonts, §09 "Command palette row").
 //! The binary owns opening it, routing keys, and executing the chosen command.
 //!
-//! The built-in [`COMMANDS`] set is the seed of the keybinding registry; merging user
-//! `[keys]` overrides + surfacing tabs/themes/files is a later slice.
+//! A leading mode prefix narrows the results (design §10.8): `>` restricts to commands, `?`
+//! shows the keybinding help, `/` is file search (deferred), and no prefix is the universal
+//! mode that also surfaces the open tabs (themes are already commands). The built-in
+//! [`COMMANDS`] set is the seed of the keybinding registry; merging user `[keys]` overrides +
+//! file search + scrollback search are later slices.
 
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
 
@@ -80,6 +83,8 @@ pub(crate) enum Action {
     NextTab,
     /// Switch to the previous tab.
     PrevTab,
+    /// Switch to the tab at this 0-based index (a surfaced tab entry, §10.8).
+    GotoTab(usize),
     /// Show or hide the left sidebar.
     ToggleSidebar,
     /// Cycle the sidebar between the full panel and the slim icon rail.
@@ -259,12 +264,46 @@ pub(crate) struct Paint {
     pub(crate) labels: Vec<ProseLabel>,
 }
 
-/// Palette state: whether it is open, the query, and the selected match.
+/// A search mode selected by the query's leading prefix (design §10.8).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// No prefix: commands + surfaced tabs (themes are commands).
+    All,
+    /// `>`: commands only.
+    Commands,
+    /// `?`: the keybinding help (the command list as a reference).
+    Help,
+    /// `/`: file search - deferred (shows an empty hint).
+    Files,
+}
+
+impl Mode {
+    /// The prompt glyph shown at the input's left for this mode.
+    fn prompt(self) -> &'static str {
+        match self {
+            Mode::All | Mode::Commands | Mode::Help => ">",
+            Mode::Files => "/",
+        }
+    }
+}
+
+/// One thing the palette can surface and run.
+#[derive(Clone, Copy)]
+enum Entry {
+    /// A built-in command, by [`COMMANDS`] index.
+    Command(usize),
+    /// Switch to the open tab at this 0-based index.
+    Tab(usize),
+}
+
+/// Palette state: whether it is open, the query, the selected match, and a snapshot of the
+/// open tab titles (captured at open time, since the palette captures all input while up).
 pub(crate) struct Palette {
     /// Whether the palette overlay is showing.
     pub(crate) open: bool,
     query: String,
     selected: usize,
+    tabs: Vec<String>,
 }
 
 impl Palette {
@@ -274,14 +313,28 @@ impl Palette {
             open: false,
             query: String::new(),
             selected: 0,
+            tabs: Vec::new(),
         }
     }
 
-    /// Open the palette fresh (empty query, first match selected).
-    pub(crate) fn open(&mut self) {
+    /// Open the palette fresh (empty query, first match selected), snapshotting the open tab
+    /// titles so they can be surfaced as entries.
+    pub(crate) fn open(&mut self, tabs: Vec<String>) {
         self.open = true;
         self.query.clear();
         self.selected = 0;
+        self.tabs = tabs;
+    }
+
+    /// The active mode + the search term (the query minus any leading mode prefix).
+    fn mode_and_term(&self) -> (Mode, &str) {
+        let q = self.query.as_str();
+        match q.as_bytes().first() {
+            Some(b'>') => (Mode::Commands, q[1..].trim_start()),
+            Some(b'?') => (Mode::Help, q[1..].trim_start()),
+            Some(b'/') => (Mode::Files, q[1..].trim_start()),
+            _ => (Mode::All, q.trim()),
+        }
     }
 
     /// Close the palette.
@@ -289,29 +342,50 @@ impl Palette {
         self.open = false;
     }
 
-    /// The commands whose label fuzzy-matches the query, in [`COMMANDS`] (category-grouped)
-    /// order. Each carries the matched character positions (for accent highlighting). The
-    /// order is preserved rather than score-sorted so the §10.8 category headers stay coherent
-    /// (a command never jumps out of its group); an empty query matches everything.
-    pub(crate) fn results(&self) -> Vec<Match> {
-        let query = self.query.trim();
-        COMMANDS
+    /// The rows the palette shows for the current query, in a stable category-grouped order
+    /// (so the §10.8 headers stay coherent - a match never jumps out of its group): the
+    /// fuzzy-matched commands, then in the universal mode the matched open tabs. An empty term
+    /// matches everything in the active mode; the deferred file mode yields nothing.
+    fn rows(&self) -> Vec<Row> {
+        let (mode, term) = self.mode_and_term();
+        if mode == Mode::Files {
+            return Vec::new();
+        }
+        let mut rows: Vec<Row> = COMMANDS
             .iter()
             .enumerate()
             .filter_map(|(index, cmd)| {
-                fuzzy_match(query, cmd.label).map(|(_, positions)| Match { index, positions })
+                fuzzy_match(term, cmd.label).map(|(_, positions)| Row {
+                    entry: Entry::Command(index),
+                    category: cmd.category,
+                    icon: cmd.icon,
+                    label: cmd.label.to_owned(),
+                    hint: cmd.hint,
+                    positions,
+                })
             })
-            .collect()
+            .collect();
+        // The universal mode also surfaces the open tabs (under their own group).
+        if mode == Mode::All {
+            for (index, title) in self.tabs.iter().enumerate() {
+                if let Some((_, positions)) = fuzzy_match(term, title) {
+                    rows.push(Row {
+                        entry: Entry::Tab(index),
+                        category: "Tabs",
+                        icon: "\u{276f}", // ❯
+                        label: title.clone(),
+                        hint: "",
+                        positions,
+                    });
+                }
+            }
+        }
+        rows
     }
 
-    /// The matched command indices, best first (positions dropped).
-    pub(crate) fn matches(&self) -> Vec<usize> {
-        self.results().into_iter().map(|m| m.index).collect()
-    }
-
-    /// Move the selection by `delta`, clamped to the current match count.
+    /// Move the selection by `delta`, clamped to the current row count.
     pub(crate) fn move_selection(&mut self, delta: i32) {
-        let count = self.matches().len();
+        let count = self.rows().len();
         if count == 0 {
             self.selected = 0;
             return;
@@ -334,11 +408,12 @@ impl Palette {
         self.selected = 0;
     }
 
-    /// The action of the currently selected match, if any.
+    /// The action of the currently selected row, if any (run a command, or switch to a tab).
     pub(crate) fn selected_action(&self) -> Option<Action> {
-        self.results()
-            .get(self.selected)
-            .map(|m| COMMANDS[m.index].action)
+        self.rows().get(self.selected).map(|row| match row.entry {
+            Entry::Command(index) => COMMANDS[index].action,
+            Entry::Tab(index) => Action::GotoTab(index),
+        })
     }
 
     /// The palette's natural panel size in **physical** px (including the card padding),
@@ -346,32 +421,28 @@ impl Palette {
     /// command's label + gap + hint, the footer, or the input) plus insets; height is the
     /// sum of the fixed row heights.
     pub(crate) fn natural_size(&self, scale: f32, measure: &mut TextMeasure) -> (f32, f32) {
-        let results = self.results();
+        let rows = self.rows();
         let inset = (PAD + ROW_INSET) * scale;
         let mut content_w = measure.width(FOOTER, FontRole::Caption, None);
-        // The input line ("> " + query or placeholder).
-        let query = if self.query.is_empty() {
-            PLACEHOLDER
-        } else {
-            &self.query
-        };
+        // The input line (prompt + term or placeholder).
+        let (_, term) = self.mode_and_term();
+        let shown = if term.is_empty() { PLACEHOLDER } else { term };
         content_w = content_w.max(
-            measure.width("> ", FontRole::Body, None) + measure.width(query, FontRole::Body, None),
+            measure.width("> ", FontRole::Body, None) + measure.width(shown, FontRole::Body, None),
         );
         let mut current_category = "";
         let mut categories = 0_usize;
-        for hit in &results {
-            let cmd = &COMMANDS[hit.index];
-            if cmd.category != current_category {
-                current_category = cmd.category;
+        for row in &rows {
+            if row.category != current_category {
+                current_category = row.category;
                 categories += 1;
             }
-            let row = measure.width(cmd.icon, FontRole::Body, None)
+            let w = measure.width(row.icon, FontRole::Body, None)
                 + ICON_GAP * scale
-                + measure.width(cmd.label, FontRole::Body, None)
+                + measure.width(&row.label, FontRole::Body, None)
                 + HINT_GAP * scale
-                + measure.width(cmd.hint, FontRole::Micro, None);
-            content_w = content_w.max(row);
+                + measure.width(row.hint, FontRole::Micro, None);
+            content_w = content_w.max(w);
         }
         let width = content_w + 2.0 * inset;
         #[allow(
@@ -381,7 +452,7 @@ impl Palette {
         let rows_h = INPUT_H
             + COUNT_H
             + categories as f32 * CAT_H
-            + results.len() as f32 * CMD_H
+            + rows.len() as f32 * CMD_H
             + SPACER_H
             + FOOTER_H;
         let height = rows_h * scale + 2.0 * PAD * scale;
@@ -409,12 +480,15 @@ impl Palette {
         self.push_input(&mut quads, &mut labels, prompt_x, y, scale, theme, measure);
         y += INPUT_H * scale;
 
-        // Result count.
-        let results = self.results();
-        let count = if results.len() == 1 {
+        // Result count (or the deferred-file-search hint).
+        let (mode, _) = self.mode_and_term();
+        let rows = self.rows();
+        let count = if mode == Mode::Files {
+            "file search is coming soon".to_owned()
+        } else if rows.len() == 1 {
             "1 result".to_owned()
         } else {
-            format!("{} results", results.len())
+            format!("{} results", rows.len())
         };
         push_line(
             &mut labels,
@@ -429,12 +503,11 @@ impl Palette {
         );
         y += COUNT_H * scale;
 
-        // Command rows, grouped under a category header whenever the category changes.
+        // Rows, grouped under a category header whenever the category changes.
         let mut current_category = "";
-        for (index, hit) in results.iter().enumerate() {
-            let cmd = &COMMANDS[hit.index];
-            if cmd.category != current_category {
-                current_category = cmd.category;
+        for (index, row) in rows.iter().enumerate() {
+            if row.category != current_category {
+                current_category = row.category;
                 push_line(
                     &mut labels,
                     &current_category.to_uppercase(),
@@ -463,18 +536,7 @@ impl Palette {
                     PILL_RADIUS * scale,
                 ));
             }
-            push_command(
-                &mut labels,
-                cmd,
-                &hit.positions,
-                selected,
-                cx,
-                cw,
-                y,
-                scale,
-                theme,
-                measure,
-            );
+            push_command(&mut labels, row, selected, cx, cw, y, scale, theme, measure);
             y += CMD_H * scale;
         }
 
@@ -507,9 +569,11 @@ impl Palette {
         theme: &Theme,
         measure: &mut TextMeasure,
     ) {
+        // The mode prompt (accent), then the search term (the query minus its mode prefix).
+        let (mode, term) = self.mode_and_term();
         push_line(
             labels,
-            ">",
+            mode.prompt(),
             FontRole::Body,
             theme.accent,
             prompt_x,
@@ -518,11 +582,13 @@ impl Palette {
             scale,
             measure,
         );
-        let query_x = prompt_x + measure.width("> ", FontRole::Body, None);
-        let (query_text, query_color) = if self.query.is_empty() {
+        let query_x = prompt_x
+            + measure.width(mode.prompt(), FontRole::Body, None)
+            + measure.width(" ", FontRole::Body, None);
+        let (query_text, query_color) = if term.is_empty() {
             (PLACEHOLDER, theme.fg_muted)
         } else {
-            (self.query.as_str(), theme.fg_primary)
+            (term, theme.fg_primary)
         };
         push_line(
             labels,
@@ -535,12 +601,12 @@ impl Palette {
             scale,
             measure,
         );
-        // Caret after the query text (or at the input start when empty).
+        // Caret after the term (or at the input start when empty).
         let caret_x = query_x
-            + if self.query.is_empty() {
+            + if term.is_empty() {
                 0.0
             } else {
-                measure.width(&self.query, FontRole::Body, None)
+                measure.width(term, FontRole::Body, None)
             };
         let line_h = measure.line_height(FontRole::Body);
         quads.push(ChromeQuad::fill(
@@ -555,9 +621,13 @@ impl Palette {
     }
 }
 
-/// A fuzzy match: a command index plus the label positions the query matched.
-pub(crate) struct Match {
-    pub(crate) index: usize,
+/// A matched, renderable palette row: what it runs plus everything [`build`] needs to draw it.
+struct Row {
+    entry: Entry,
+    category: &'static str,
+    icon: &'static str,
+    label: String,
+    hint: &'static str,
     positions: Vec<usize>,
 }
 
@@ -631,8 +701,7 @@ fn push_line(
 #[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
 fn push_command(
     labels: &mut Vec<ProseLabel>,
-    cmd: &Command,
-    positions: &[usize],
+    row: &Row,
     selected: bool,
     cx: f32,
     cw: f32,
@@ -646,7 +715,7 @@ fn push_command(
     // The reference-glyph icon (accent when selected, else muted), then the label after a gap.
     let icon_x = cx + ROW_INSET * scale;
     labels.push(ProseLabel {
-        text: cmd.icon.to_owned(),
+        text: row.icon.to_owned(),
         x: icon_x,
         y,
         role: FontRole::Body,
@@ -659,8 +728,8 @@ fn push_command(
         max_w: f32::MAX,
     });
     // The label, split into matched / unmatched runs so matched chars draw in accent.
-    let mut x = icon_x + measure.width(cmd.icon, FontRole::Body, None) + ICON_GAP * scale;
-    for (text, matched) in matched_runs(cmd.label, positions) {
+    let mut x = icon_x + measure.width(row.icon, FontRole::Body, None) + ICON_GAP * scale;
+    for (text, matched) in matched_runs(&row.label, &row.positions) {
         let color = if matched {
             theme.accent
         } else {
@@ -679,12 +748,12 @@ fn push_command(
         x += w;
     }
     // The right-anchored key hint (micro mono, muted).
-    if !cmd.hint.is_empty() {
-        let hint_w = measure.width(cmd.hint, FontRole::Micro, None);
+    if !row.hint.is_empty() {
+        let hint_w = measure.width(row.hint, FontRole::Micro, None);
         let hint_x = cx + cw - ROW_INSET * scale - hint_w;
         let hint_line = measure.line_height(FontRole::Micro);
         labels.push(ProseLabel {
-            text: cmd.hint.to_owned(),
+            text: row.hint.to_owned(),
             x: hint_x,
             y: top + (CMD_H * scale - hint_line) * 0.5,
             role: FontRole::Micro,
@@ -711,7 +780,20 @@ fn matched_runs(label: &str, positions: &[usize]) -> Vec<(String, bool)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{matched_runs, Action, Palette, PxRect, TextMeasure, Theme, COMMANDS};
+    use super::{matched_runs, Action, Entry, Palette, PxRect, TextMeasure, Theme, COMMANDS};
+
+    impl Palette {
+        /// Test-only: the action each visible row would run, in display order.
+        fn match_actions(&self) -> Vec<Action> {
+            self.rows()
+                .iter()
+                .map(|r| match r.entry {
+                    Entry::Command(i) => COMMANDS[i].action,
+                    Entry::Tab(i) => Action::GotoTab(i),
+                })
+                .collect()
+        }
+    }
 
     #[test]
     fn matched_characters_render_in_accent_and_the_rest_in_primary() {
@@ -731,7 +813,7 @@ mod tests {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
         let mut p = Palette::new();
-        p.open();
+        p.open(Vec::new());
         for c in "zm".chars() {
             p.push_char(c);
         }
@@ -751,27 +833,25 @@ mod tests {
 
     #[test]
     fn empty_query_matches_every_command() {
-        let p = Palette::new();
-        assert_eq!(p.matches().len(), COMMANDS.len());
+        let p = Palette::new(); // no tabs, so the universal mode lists just the commands
+        assert_eq!(p.match_actions().len(), COMMANDS.len());
     }
 
     #[test]
     fn query_filters_by_label_substring_case_insensitively() {
         let mut p = Palette::new();
-        p.open();
+        p.open(Vec::new());
         for c in "zoom".chars() {
             p.push_char(c);
         }
-        let matches = p.matches();
-        assert_eq!(matches.len(), 1);
-        assert_eq!(COMMANDS[matches[0]].action, Action::Zoom);
+        assert_eq!(p.match_actions(), vec![Action::Zoom]);
         assert_eq!(p.selected_action(), Some(Action::Zoom));
     }
 
     #[test]
     fn selection_clamps_within_matches() {
         let mut p = Palette::new();
-        p.open();
+        p.open(Vec::new());
         p.move_selection(-1); // cannot go below 0
         assert_eq!(p.selected_action(), Some(COMMANDS[0].action));
         p.move_selection(1000); // clamps to the last match
@@ -784,72 +864,99 @@ mod tests {
     #[test]
     fn filtering_resets_selection_and_narrows() {
         let mut p = Palette::new();
-        p.open();
+        p.open(Vec::new());
         p.move_selection(3);
         for c in "focus".chars() {
             p.push_char(c);
         }
         // "focus" matches the four focus commands; selection reset to the first.
-        assert_eq!(p.matches().len(), 4);
+        assert_eq!(p.match_actions().len(), 4);
         assert_eq!(p.selected_action(), Some(Action::FocusLeft));
     }
 
     #[test]
     fn a_no_match_query_has_no_action() {
         let mut p = Palette::new();
-        p.open();
+        p.open(Vec::new());
         for c in "zzzz".chars() {
             p.push_char(c);
         }
-        assert!(p.matches().is_empty());
+        assert!(p.match_actions().is_empty());
         assert_eq!(p.selected_action(), None);
     }
 
     #[test]
     fn fuzzy_matches_a_subsequence_and_records_matched_positions() {
         let mut p = Palette::new();
-        p.open();
+        p.open(Vec::new());
         for c in "zm".chars() {
             p.push_char(c);
         }
-        let results = p.results();
-        assert_eq!(results.len(), 1, "'zm' fuzzy-matches only Zoom");
-        assert_eq!(COMMANDS[results[0].index].action, Action::Zoom);
+        let rows = p.rows();
+        assert_eq!(rows.len(), 1, "'zm' fuzzy-matches only Zoom");
+        assert_eq!(p.selected_action(), Some(Action::Zoom));
         // "Zoom / unzoom pane": z at 0, m at 3.
-        assert_eq!(results[0].positions, vec![0, 3]);
-    }
-
-    #[test]
-    fn earlier_first_match_ranks_ahead() {
-        // 's' starts "Split pane right" (position 0) and appears mid-word elsewhere;
-        // the earliest first-match wins, and ties keep COMMANDS order.
-        let mut p = Palette::new();
-        p.open();
-        p.push_char('s');
-        let results = p.results();
-        assert_eq!(COMMANDS[results[0].index].action, Action::SplitRight);
+        assert_eq!(rows[0].positions, vec![0, 3]);
     }
 
     #[test]
     fn theme_query_surfaces_both_theme_commands() {
         let mut p = Palette::new();
-        p.open();
+        p.open(Vec::new());
         for c in "theme".chars() {
             p.push_char(c);
         }
-        let actions: Vec<Action> = p.matches().iter().map(|&i| COMMANDS[i].action).collect();
-        assert_eq!(actions, vec![Action::ThemeDark, Action::ThemeLight]);
+        assert_eq!(
+            p.match_actions(),
+            vec![Action::ThemeDark, Action::ThemeLight]
+        );
     }
 
     #[test]
     fn backspace_widens_the_match_set_again() {
         let mut p = Palette::new();
-        p.open();
+        p.open(Vec::new());
         for c in "zoomx".chars() {
             p.push_char(c);
         }
-        assert!(p.matches().is_empty());
+        assert!(p.match_actions().is_empty());
         p.backspace();
-        assert_eq!(p.matches().len(), 1);
+        assert_eq!(p.match_actions().len(), 1);
+    }
+
+    #[test]
+    fn universal_mode_surfaces_open_tabs_and_the_prefix_filters_them_out() {
+        let mut p = Palette::new();
+        p.open(vec!["Tab 1".to_owned(), "Tab 2".to_owned()]);
+        // No prefix: commands + the two tabs.
+        assert_eq!(p.match_actions().len(), COMMANDS.len() + 2);
+        // A tab entry runs GotoTab.
+        for c in "Tab 2".chars() {
+            p.push_char(c);
+        }
+        assert_eq!(p.match_actions(), vec![Action::GotoTab(1)]);
+        assert_eq!(p.selected_action(), Some(Action::GotoTab(1)));
+    }
+
+    #[test]
+    fn the_commands_prefix_restricts_to_commands_and_hides_tabs() {
+        let mut p = Palette::new();
+        p.open(vec!["Tab 1".to_owned()]);
+        p.push_char('>'); // commands-only mode
+                          // Every match is a command, never a tab.
+        assert_eq!(p.match_actions().len(), COMMANDS.len());
+        assert!(p
+            .match_actions()
+            .iter()
+            .all(|a| !matches!(a, Action::GotoTab(_))));
+    }
+
+    #[test]
+    fn the_files_prefix_is_deferred_and_yields_nothing() {
+        let mut p = Palette::new();
+        p.open(Vec::new());
+        p.push_char('/');
+        assert!(p.match_actions().is_empty());
+        assert_eq!(p.selected_action(), None);
     }
 }
