@@ -55,10 +55,16 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
-- 2026-07-13 - **Sidebar utility bar + per-pane status line (design-fidelity slices 12-13,
-  §08 anatomy #7, #9).** Two of the guide's window-anatomy pieces were still missing; decided
-  how each maps to real Skelly capabilities rather than fabricated UI (Hard rule 5): (a) the
-  **utility bar** (§08 #7 - the ⚙ ◐ ⟲ ⑂ footer) is a *second entry point* to existing commands,
+- 2026-07-13 - **Sidebar apparatus + per-pane status line (design-fidelity slices 12-14, §08
+  anatomy #3, #7, #9).** Several of the guide's window-anatomy pieces were still missing;
+  decided how each maps to real Skelly capabilities rather than fabricated UI (Hard rule 5):
+  (0) the **command input** (§08 #3, the "Search or run…" well at the sidebar top) is an
+  *affordance that opens the existing centered palette overlay* on click (matching the guide's
+  "opens the command palette. Focus with Mod+K") - NOT a separate inline text input; it replaces
+  the earlier non-guide "SKELLY" text header, and resolves the canonical `bg.surface` token
+  (which equals the mockup's `#313244` exactly) with a `border.subtle` ring. In the 56px rail it
+  collapses to a centered `⌕` button. (a) the **utility bar** (§08 #7 - the ⚙ ◐ ⟲ ⑂ footer) is a
+  *second entry point* to existing commands,
   not new behavior - ⚙ opens settings, ◐ toggles Ossein Dark<->Light, ⟲ toggles the timeline
   dock, ⑂ toggles the git dock. Rendered as the same unicode glyphs the mockup itself uses (no
   bespoke icon subsystem yet), left-clustered per the guide (`padding:0 15px; gap:16px`), full

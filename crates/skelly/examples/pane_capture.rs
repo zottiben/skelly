@@ -610,7 +610,6 @@ fn push_centered_pl(
 // Sidebar layout constants (logical px) - mirror the binary's `sidebar` module (§08) so the
 // capture reproduces the real proportional tab list.
 const SB_PAD_TOP: f32 = 10.0;
-const SB_HEADER_H: f32 = 24.0;
 const SB_IND_H: f32 = 16.0;
 const SB_TAB_H: f32 = 28.0;
 const SB_PAD_BOTTOM: f32 = 10.0;
@@ -618,6 +617,13 @@ const SB_LABEL_INSET: f32 = 12.0;
 const SB_PILL_INSET: f32 = 6.0;
 const SB_BAR_W: f32 = 2.0;
 const SB_PILL_RADIUS: f32 = 6.0;
+/// Command-input well (§08 #3) - mirror the binary's `sidebar` module.
+const SB_CMD_H: f32 = 30.0;
+const SB_CMD_GAP: f32 = 12.0;
+const SB_CMD_INSET: f32 = 12.0;
+const SB_CMD_RADIUS: f32 = 8.0;
+const SB_CMD_ICON: &str = "\u{2315}";
+const SB_CMD_PLACEHOLDER: &str = "Search or run\u{2026}";
 /// Utility-bar footer height + glyphs - mirror the binary's `sidebar` module (§08 #7).
 const SB_UTIL_H: f32 = 40.0;
 const SB_UTIL_ICONS: [&str; 4] = ["\u{2699}", "\u{25D0}", "\u{27F2}", "\u{2442}"];
@@ -648,20 +654,71 @@ fn sidebar_panel(
     let mut quads = vec![ChromeQuad::fill(panel, theme.bg_sidebar)];
     let mut labels = Vec::new();
 
-    // Header.
-    let head = if rail { "SK" } else { "SKELLY" };
-    push_sb_label(
-        &mut labels,
-        &mut measure,
-        head,
-        FontRole::Micro,
-        theme.fg_muted,
-        panel,
-        panel.y + SB_PAD_TOP * scale,
-        SB_HEADER_H * scale,
-        rail,
-        scale,
-    );
+    // Command-input well (§08 #3) - full panel = a bg.surface field with ⌕ + placeholder;
+    // rail = a centered ⌕. Mirrors the binary's `push_command_well`.
+    let cmd_top = panel.y + SB_PAD_TOP * scale;
+    if rail {
+        let w = measure.width(SB_CMD_ICON, FontRole::Caption, None);
+        push_pl(
+            &mut labels,
+            &mut measure,
+            SB_CMD_ICON,
+            FontRole::Caption,
+            theme.fg_muted,
+            panel.x + (panel.w - w) * 0.5,
+            cmd_top,
+            SB_CMD_H,
+            scale,
+        );
+    } else {
+        let inset = SB_CMD_INSET * scale;
+        let well = PxRect {
+            x: panel.x + inset,
+            y: cmd_top,
+            w: panel.w - 2.0 * inset,
+            h: SB_CMD_H * scale,
+        };
+        let stroke = scale.max(1.0);
+        quads.push(ChromeQuad::rounded(
+            well,
+            theme.border_subtle,
+            SB_CMD_RADIUS * scale,
+        ));
+        quads.push(ChromeQuad::rounded(
+            PxRect {
+                x: well.x + stroke,
+                y: well.y + stroke,
+                w: well.w - 2.0 * stroke,
+                h: well.h - 2.0 * stroke,
+            },
+            theme.bg_surface,
+            SB_CMD_RADIUS * scale - stroke,
+        ));
+        let pad = 10.0 * scale;
+        let icon_w = measure.width(SB_CMD_ICON, FontRole::Caption, None);
+        push_pl(
+            &mut labels,
+            &mut measure,
+            SB_CMD_ICON,
+            FontRole::Caption,
+            theme.fg_muted,
+            well.x + pad,
+            cmd_top,
+            SB_CMD_H,
+            scale,
+        );
+        push_pl(
+            &mut labels,
+            &mut measure,
+            SB_CMD_PLACEHOLDER,
+            FontRole::Caption,
+            theme.fg_muted,
+            well.x + pad + icon_w + 8.0 * scale,
+            cmd_top,
+            SB_CMD_H,
+            scale,
+        );
+    }
 
     push_sb_body(
         &mut quads,
@@ -736,7 +793,8 @@ fn push_sb_body(
 ) {
     let (count, active) = tabs;
     let reserved_below = SB_IND_H + SB_TAB_H + SB_PAD_BOTTOM;
-    let avail = panel.h / scale - SB_UTIL_H - SB_PAD_TOP - SB_HEADER_H - SB_IND_H - reserved_below;
+    let cmd_block = SB_CMD_H + SB_CMD_GAP;
+    let avail = panel.h / scale - SB_UTIL_H - SB_PAD_TOP - cmd_block - SB_IND_H - reserved_below;
     let capacity = (avail / SB_TAB_H).floor().max(1.0) as usize;
     let visible = count.min(capacity);
     let first = if count <= visible {
@@ -744,7 +802,7 @@ fn push_sb_body(
     } else {
         active.saturating_sub(visible - 1).min(count - visible)
     };
-    let mut y = SB_PAD_TOP + SB_HEADER_H;
+    let mut y = SB_PAD_TOP + cmd_block;
     let place = |labels: &mut Vec<ProseLabel>, m: &mut TextMeasure, t: &str, r, c, yy, h| {
         push_sb_label(
             labels,

@@ -2002,6 +2002,7 @@ impl App {
             ElementState::Pressed => {
                 if let Some(hit) = self.sidebar_hit() {
                     match hit {
+                        sidebar::Hit::CommandInput => self.open_palette(),
                         sidebar::Hit::Tab(index) => self.goto_tab(index),
                         sidebar::Hit::NewTab => self.new_tab(),
                         sidebar::Hit::Util(action) => self.on_util_action(action),

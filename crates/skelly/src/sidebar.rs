@@ -9,10 +9,11 @@
 //! Two display modes (design §08 "Sidebar modes"): the full-width panel listing tabs
 //! (active highlighted) with a "+ New tab" action, and the slim 56px icon rail with
 //! compact centered tab numbers. `⌘B` shows/hides; `⇧⌘B` cycles full <-> rail. The
-//! chosen mode persists to `config.sidebar.mode` (Hard rule 1). The bottom-anchored utility
-//! bar (§08 #7 - the ⚙ settings / ◐ theme / ⟲ timeline / ⑂ git toggles) is built here too.
-//! Deferred to later slices: the workspace switcher, command input, pinned grid, and
-//! collapsible groups; per-tab cwd/branch titling (tabs are numbered today).
+//! chosen mode persists to `config.sidebar.mode` (Hard rule 1). The command-input well (§08 #3,
+//! which opens the palette) at the top and the bottom-anchored utility bar (§08 #7 - the ⚙
+//! settings / ◐ theme / ⟲ timeline / ⑂ git toggles) are built here too. Deferred to later
+//! slices: the workspace switcher, pinned grid, and collapsible groups; per-tab cwd/branch
+//! titling (tabs are numbered today).
 
 use skelly_config::SidebarMode;
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
@@ -21,8 +22,17 @@ use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure,
 /// the guide's §08 sidebar: a compact group header, comfortable 13px `label` tab rows, and
 /// a matching "+ New tab" action.
 const PAD_TOP: f32 = 10.0;
-/// Height of the group-header block (a `micro` uppercase label + breathing room).
-const HEADER_H: f32 = 24.0;
+/// Height of the command-input well (design §08 #3), matching the guide's 30px search field.
+const CMD_H: f32 = 30.0;
+/// Gap below the command well before the tab list (the guide's `padding: … 12px`).
+const CMD_GAP: f32 = 12.0;
+/// Horizontal inset of the command well from the sidebar edges (content pad).
+const CMD_INSET: f32 = 12.0;
+/// Command-well corner radius (the guide's `md` 8px).
+const CMD_RADIUS: f32 = 8.0;
+/// The command well's search glyph + placeholder (design §08 #3).
+const CMD_ICON: &str = "\u{2315}";
+const CMD_PLACEHOLDER: &str = "Search or run\u{2026}";
 /// Height of an overflow indicator row (`↑ N more` / `↓ N more`).
 const IND_H: f32 = 16.0;
 /// Height of a tab row (and the "+ New tab" action).
@@ -44,6 +54,8 @@ const PILL_RADIUS: f32 = 6.0;
 /// What a click on a sidebar row targets.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Hit {
+    /// Open the command palette (the command-input well, design §08 #3).
+    CommandInput,
     /// Switch to the tab at this 0-based index.
     Tab(usize),
     /// Open a new tab.
@@ -158,8 +170,8 @@ fn visible_or(mode: SidebarMode, fallback: SidebarMode) -> SidebarMode {
 /// What one laid-out row is, so [`build`] and [`hit`] agree on where every tab sits.
 #[derive(Clone, Copy)]
 enum RowKind {
-    /// The group / brand header (the guide's group label).
-    Header,
+    /// The command-input well (design §08 #3), which opens the palette.
+    Command,
     /// A tab at this 0-based index.
     Tab(usize),
     /// The "N tabs hidden above" indicator (drawn only when `> 0`).
@@ -196,10 +208,10 @@ fn rows_layout(count: usize, active: usize, panel_h: f32) -> Vec<Row> {
     let mut y = PAD_TOP;
     rows.push(Row {
         top: y,
-        height: HEADER_H,
-        kind: RowKind::Header,
+        height: CMD_H,
+        kind: RowKind::Command,
     });
-    y += HEADER_H;
+    y += CMD_H + CMD_GAP;
 
     // Capacity for tab rows, reserving both overflow-indicator slots + the new-tab action.
     let reserved_below = IND_H + TAB_H + PAD_BOTTOM;
@@ -270,6 +282,7 @@ pub(crate) fn hit(
     for row in rows_layout(count, active, panel.h / scale) {
         if y_logical >= row.top && y_logical < row.top + row.height {
             return match row.kind {
+                RowKind::Command => Some(Hit::CommandInput),
                 RowKind::Tab(index) => Some(Hit::Tab(index)),
                 RowKind::NewTab => Some(Hit::NewTab),
                 _ => None,
@@ -400,12 +413,7 @@ fn push_row(
         );
     };
     match row.kind {
-        RowKind::Header => {
-            // A micro group label (uppercase, per the guide's §08 group header); the real
-            // "cwd · branch" title arrives with per-tab shell tracking.
-            let text = if ctx.rail { "SK" } else { "SKELLY" };
-            place(labels, measure, text, FontRole::Micro, ctx.theme.fg_muted);
-        }
+        RowKind::Command => push_command_well(quads, labels, top, height, ctx, measure),
         RowKind::Tab(index) => {
             let is_active = index == ctx.active;
             if is_active {
@@ -447,6 +455,74 @@ fn push_row(
             let text = if ctx.rail { "+" } else { "+ New tab" };
             place(labels, measure, text, FontRole::Label, ctx.theme.fg_muted);
         }
+    }
+}
+
+/// The command-input well (design §08 #3): a rounded `bg.surface` field with a `border.subtle`
+/// ring, holding a `⌕` glyph + a "Search or run…" placeholder (both `fg.muted`), that opens the
+/// palette. The rail is too narrow for the field, so it shows just a centered `⌕` button.
+fn push_command_well(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    top: f32,
+    height: f32,
+    ctx: &RowCtx,
+    measure: &mut TextMeasure,
+) {
+    let cy = top + (height - measure.line_height(FontRole::Caption)) * 0.5;
+    if ctx.rail {
+        // A centered search glyph standing in for the field.
+        let w = measure.width(CMD_ICON, FontRole::Caption, None);
+        labels.push(ProseLabel {
+            text: CMD_ICON.to_owned(),
+            x: ctx.panel.x + (ctx.panel.w - w) * 0.5,
+            y: cy,
+            role: FontRole::Caption,
+            color: ctx.theme.fg_muted,
+            weight: None,
+            max_w: f32::MAX,
+        });
+        return;
+    }
+    let inset = CMD_INSET * ctx.scale;
+    let well = PxRect {
+        x: ctx.panel.x + inset,
+        y: top,
+        w: (ctx.panel.w - 2.0 * inset).max(0.0),
+        h: height,
+    };
+    // A `border.subtle` ring drawn behind the `bg.surface` fill (inset by the 1px stroke).
+    let stroke = ctx.scale.max(1.0);
+    quads.push(ChromeQuad::rounded(
+        well,
+        ctx.theme.border_subtle,
+        CMD_RADIUS * ctx.scale,
+    ));
+    quads.push(ChromeQuad::rounded(
+        PxRect {
+            x: well.x + stroke,
+            y: well.y + stroke,
+            w: (well.w - 2.0 * stroke).max(0.0),
+            h: (well.h - 2.0 * stroke).max(0.0),
+        },
+        ctx.theme.bg_surface,
+        (CMD_RADIUS * ctx.scale - stroke).max(0.0),
+    ));
+    // The search glyph + placeholder, left-aligned inside the field (guide `padding:0 10px;
+    // gap:8px`).
+    let pad = 10.0 * ctx.scale;
+    let mut x = well.x + pad;
+    for (text, gap) in [(CMD_ICON, 8.0), (CMD_PLACEHOLDER, 0.0)] {
+        labels.push(ProseLabel {
+            text: text.to_owned(),
+            x,
+            y: cy,
+            role: FontRole::Caption,
+            color: ctx.theme.fg_muted,
+            weight: None,
+            max_w: (well.x + well.w - pad - x).max(1.0),
+        });
+        x += measure.width(text, FontRole::Caption, None) + gap * ctx.scale;
     }
 }
 
@@ -623,13 +699,18 @@ mod tests {
         // only matters for the utility bar).
         let p = panel();
         let x = 20.0 * 2.0;
-        // A y inside the header maps to nothing.
-        assert_eq!(hit(3, 0, p, false, 2.0, x, 12.0 * 2.0), None);
-        // The first tab band sits just below the header + overflow slot: PAD_TOP(10) +
-        // HEADER_H(24) + IND_H(16) = 50 logical, first tab spans 50..78. Center ~64 logical.
-        assert_eq!(hit(3, 0, p, false, 2.0, x, 64.0 * 2.0), Some(Hit::Tab(0)));
+        // A y inside the command well (PAD_TOP 10 .. 40) opens the palette.
         assert_eq!(
-            hit(3, 0, p, false, 2.0, x, (64.0 + 28.0) * 2.0),
+            hit(3, 0, p, false, 2.0, x, 20.0 * 2.0),
+            Some(Hit::CommandInput)
+        );
+        // The gap below the well (40 .. 52) maps to nothing.
+        assert_eq!(hit(3, 0, p, false, 2.0, x, 46.0 * 2.0), None);
+        // The first tab band sits below the well + gap + overflow slot: PAD_TOP(10) + CMD_H(30)
+        // + CMD_GAP(12) + IND_H(16) = 68 logical, first tab spans 68..96. Center ~82 logical.
+        assert_eq!(hit(3, 0, p, false, 2.0, x, 82.0 * 2.0), Some(Hit::Tab(0)));
+        assert_eq!(
+            hit(3, 0, p, false, 2.0, x, (82.0 + 28.0) * 2.0),
             Some(Hit::Tab(1))
         );
     }
@@ -682,6 +763,20 @@ mod tests {
         // The active tab contributes an accent-subtle pill + an accent bar (2 extra quads
         // over the surface fill + right divider).
         assert!(paint.quads.len() >= 4);
+    }
+
+    #[test]
+    fn build_draws_the_command_well() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
+        // Full panel: the search glyph + the placeholder text.
+        let full = build(2, 0, panel(), false, 2.0, &theme, &mut m);
+        assert!(full.labels.iter().any(|l| l.text == "\u{2315}"));
+        assert!(full.labels.iter().any(|l| l.text.contains("Search or run")));
+        // Rail: just the centered glyph, no placeholder text.
+        let rail = build(2, 0, panel(), true, 2.0, &theme, &mut m);
+        assert!(rail.labels.iter().any(|l| l.text == "\u{2315}"));
+        assert!(rail.labels.iter().all(|l| !l.text.contains("Search")));
     }
 
     #[test]
