@@ -55,6 +55,30 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-12 - **Design-fidelity: rounded corners + drop shadows (campaign slice 2).**
+  The guide renders every chrome surface as a rounded, shadowed card, but the two
+  surface *kinds* are treated differently (mockup §07 hero vs the palette/modal
+  frames), so decided here how each maps to the renderer: (a) **floating overlays** -
+  the command palette and the process-close confirm modal - are centered *cards*: they
+  get rounded `lg` (10px) corners, a soft `e4` drop shadow, a 1px rounded `border.strong`
+  ring, and rounded `md` (8px) `accent.subtle` selected-row pills (guide's rounded list
+  rows). (b) **Right docks** (git diff, timeline) are **flush slide-overs**, not floating
+  cards: they stay pinned to the right/top/bottom window edges with **square** corners
+  (matching the §07 hero, where the dock is `right:0; top:0; bottom:0` with a thin left
+  divider + a `transparent->surface` handle gradient), and get a soft shadow cast
+  **leftward onto the terminal** from their left edge - the "slides over the terminal"
+  depth - implemented as a short quadratic-falloff gradient strip, not the box `e*`
+  shadow (which would need an opaque full-dock fill; the dock is a composite of
+  sub-surfaces, not one flat `bg.surface`). Renderer mechanism: the shared instanced quad
+  gained a `[radius, blur]` param driving an SDF rounded-box + soft-shadow in the shader,
+  with a zero-param flat fast-path so every existing sharp fill (cells, dividers, cursor,
+  sidebar, settings, dock rows) is byte-identical. The full-window **settings** view is
+  *not* a floating card (it fills the content area, Hard rule 4) - its inner control
+  cards/rows are a later slice. On dark themes a black shadow over the near-black terminal
+  is honestly faint; the 1px divider carries dock separation there and the shadow reads on
+  light. Deferred: proportional chrome (slice 3), the vertebra logo (slice 4), motion
+  (slice 5), tooltip/chip `e2`/`e1` elevation, and routing `bg.surface`/`bg.inset` per
+  dock sub-region.
 - 2026-07-12 - **Empty state + never-quit close cascade (M5 edge states "Close last
   pane" + guide §10.2).** Two settled behaviors. **(1) Close cascade:** closing the only
   pane in a tab (`⌥w`) closes the whole tab; closing the only tab does **not** quit the app

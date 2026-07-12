@@ -6,7 +6,8 @@
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
-    reason = "surface dimensions and instance counts are small; casts are exact"
+    clippy::cast_sign_loss,
+    reason = "surface dimensions and instance/step counts are small, non-negative, exact"
 )]
 
 /// One instanced quad: a pixel rectangle, a linear RGBA fill, and shape params.
@@ -420,6 +421,10 @@ pub(crate) fn gitdock_quads(
     };
     let mut quads = Vec::new();
 
+    // The soft shadow the dock casts leftward onto the terminal as it slides over it
+    // (drawn first, in the terminal region just left of the dock's edge).
+    push_left_edge_shadow(&mut quads, panel.x, panel.y, panel.h, scale);
+
     // Diff-line backgrounds first (beneath the glyphs, which load over this pass).
     for &row in view.hunk_rows {
         quads.push(Quad::new(
@@ -516,6 +521,9 @@ pub(crate) fn timeline_quads(
     let row_y = |row: usize| view.text_origin.1 + row as f32 * cell_h;
     let mut quads = Vec::new();
 
+    // The soft shadow the dock casts leftward onto the terminal as it slides over it.
+    push_left_edge_shadow(&mut quads, panel.x, panel.y, panel.h, scale);
+
     // The selected event's row fill (a subtle accent tint, like the git dock's selection).
     if let Some(row) = view.selected_row {
         quads.push(Quad::new(
@@ -548,6 +556,34 @@ pub(crate) fn timeline_quads(
         theme.border.to_linear(),
     ));
     quads
+}
+
+/// Width (logical px) of a right-dock's left-edge shadow, matching the guide's ~6px
+/// slide-over handle gradient (§07 hero).
+const DOCK_EDGE_SHADOW: f32 = 8.0;
+/// Peak alpha of the dock edge shadow, at the dock's edge (fading to 0 outward).
+const DOCK_EDGE_SHADOW_ALPHA: f32 = 0.34;
+
+/// Append a soft shadow cast *leftward* onto the terminal from a right-dock's left edge
+/// at `edge_x` (the guide's dock "slides over the terminal" handle, §07). Unlike the SDF
+/// [`Quad::shadow`] - which needs an opaque panel drawn over its interior - this is a thin
+/// stack of 1px translucent-black steps sitting entirely in the terminal region just left
+/// of the dock, with a quadratic falloff, so the dock itself needs no opaque fill. Drawn
+/// first (beneath the dock's row fills and divider).
+fn push_left_edge_shadow(quads: &mut Vec<Quad>, edge_x: f32, top: f32, height: f32, scale: f32) {
+    let steps = (DOCK_EDGE_SHADOW * scale).round().max(1.0) as usize;
+    for i in 0..steps {
+        // i = 0 sits against the edge (darkest); farther left fades to nothing.
+        let t = 1.0 - (i as f32 + 0.5) / steps as f32;
+        let alpha = DOCK_EDGE_SHADOW_ALPHA * t * t;
+        quads.push(Quad::new(
+            edge_x - (i as f32 + 1.0),
+            top,
+            1.0,
+            height,
+            [0.0, 0.0, 0.0, alpha],
+        ));
+    }
 }
 
 /// Append a rectangular outline (four `thickness`-px bars) around the pixel rect
