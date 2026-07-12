@@ -55,6 +55,25 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Sidebar utility bar + per-pane status line (design-fidelity slices 12-13,
+  §08 anatomy #7, #9).** Two of the guide's window-anatomy pieces were still missing; decided
+  how each maps to real Skelly capabilities rather than fabricated UI (Hard rule 5): (a) the
+  **utility bar** (§08 #7 - the ⚙ ◐ ⟲ ⑂ footer) is a *second entry point* to existing commands,
+  not new behavior - ⚙ opens settings, ◐ toggles Ossein Dark<->Light, ⟲ toggles the timeline
+  dock, ⑂ toggles the git dock. Rendered as the same unicode glyphs the mockup itself uses (no
+  bespoke icon subsystem yet), left-clustered per the guide (`padding:0 15px; gap:16px`), full
+  panel only - the 56px rail has no room, so it omits the bar (actions stay reachable via keys /
+  palette). (b) the **per-pane status line** (§08 #9) shows the data Skelly actually has -
+  `cwd · ⑂ branch · shell … Ln, Col`; the guide's editor `mode` (NORMAL/INSERT) + `filetype`
+  segments are omitted, not faked, until shell/editor integration exists, and `shell` fills the
+  slot they'd occupy. It resolves the canonical `bg.inset`/`Mono` tokens, not the mockup's
+  one-off inline `#1A1826`/10.5px (Hard rule 2). Still deferred as genuinely blocked on absent
+  features (would be fabrication): the workspace switcher (#2), pinned grid (#4), collapsible
+  groups (#5), per-tab cwd titling, and editor mode/filetype - each needs a real feature first.
+  The macOS control strip (#1, traffic lights via CSD/`fullSizeContentView`) is buildable but
+  a windowing change that can't be verified from the headless render captures, so it is left as
+  the next windowing item.
+
 - 2026-07-12 - **Design-fidelity: rounded corners + drop shadows (campaign slice 2).**
   The guide renders every chrome surface as a rounded, shadowed card, but the two
   surface *kinds* are treated differently (mockup §07 hero vs the palette/modal

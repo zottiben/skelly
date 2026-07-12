@@ -618,6 +618,12 @@ const SB_LABEL_INSET: f32 = 12.0;
 const SB_PILL_INSET: f32 = 6.0;
 const SB_BAR_W: f32 = 2.0;
 const SB_PILL_RADIUS: f32 = 6.0;
+/// Utility-bar footer height + glyphs - mirror the binary's `sidebar` module (§08 #7).
+const SB_UTIL_H: f32 = 40.0;
+const SB_UTIL_ICONS: [&str; 4] = ["\u{2699}", "\u{25D0}", "\u{27F2}", "\u{2442}"];
+/// Left cluster of the utility row (the guide's `padding:0 15px; gap:16px`).
+const SB_UTIL_PAD_X: f32 = 15.0;
+const SB_UTIL_STEP: f32 = 34.0;
 
 /// Build a representative left sidebar as a proportional display list, mirroring the
 /// binary's `sidebar` module layout (§08) so the capture verifies the tab-list chrome.
@@ -668,6 +674,34 @@ fn sidebar_panel(
         theme,
     );
 
+    // The bottom-anchored utility bar (§08 #7): a border.subtle top hairline + four
+    // left-clustered glyphs. Full panel only (the rail has no room for it).
+    if !rail {
+        let util_top = panel.y + panel.h - SB_UTIL_H * scale;
+        quads.push(ChromeQuad::fill(
+            PxRect {
+                x: panel.x,
+                y: util_top,
+                w: panel.w,
+                h: scale.max(1.0),
+            },
+            theme.border_subtle,
+        ));
+        for (i, glyph) in SB_UTIL_ICONS.iter().enumerate() {
+            push_pl(
+                &mut labels,
+                &mut measure,
+                glyph,
+                FontRole::Body,
+                theme.fg_muted,
+                panel.x + (SB_UTIL_PAD_X + i as f32 * SB_UTIL_STEP) * scale,
+                util_top,
+                SB_UTIL_H,
+                scale,
+            );
+        }
+    }
+
     // Right-edge divider.
     let stroke = scale.max(1.0);
     quads.push(ChromeQuad::fill(
@@ -702,7 +736,7 @@ fn push_sb_body(
 ) {
     let (count, active) = tabs;
     let reserved_below = SB_IND_H + SB_TAB_H + SB_PAD_BOTTOM;
-    let avail = panel.h / scale - SB_PAD_TOP - SB_HEADER_H - SB_IND_H - reserved_below;
+    let avail = panel.h / scale - SB_UTIL_H - SB_PAD_TOP - SB_HEADER_H - SB_IND_H - reserved_below;
     let capacity = (avail / SB_TAB_H).floor().max(1.0) as usize;
     let visible = count.min(capacity);
     let first = if count <= visible {

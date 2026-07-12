@@ -9,9 +9,10 @@
 //! Two display modes (design §08 "Sidebar modes"): the full-width panel listing tabs
 //! (active highlighted) with a "+ New tab" action, and the slim 56px icon rail with
 //! compact centered tab numbers. `⌘B` shows/hides; `⇧⌘B` cycles full <-> rail. The
-//! chosen mode persists to `config.sidebar.mode` (Hard rule 1). Deferred to later slices:
-//! the workspace switcher, command input, pinned grid, collapsible groups, and the
-//! utility bar; per-tab cwd/branch titling (tabs are numbered today).
+//! chosen mode persists to `config.sidebar.mode` (Hard rule 1). The bottom-anchored utility
+//! bar (§08 #7 - the ⚙ settings / ◐ theme / ⟲ timeline / ⑂ git toggles) is built here too.
+//! Deferred to later slices: the workspace switcher, command input, pinned grid, and
+//! collapsible groups; per-tab cwd/branch titling (tabs are numbered today).
 
 use skelly_config::SidebarMode;
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
@@ -28,6 +29,9 @@ const IND_H: f32 = 16.0;
 const TAB_H: f32 = 28.0;
 /// Bottom padding beneath the new-tab action.
 const PAD_BOTTOM: f32 = 10.0;
+/// Height of the bottom-anchored utility bar (design §08 #7 - the icon-only settings /
+/// theme / timeline / git toggles), matching the guide's 40px footer.
+const UTIL_H: f32 = 40.0;
 /// Horizontal inset (logical px) of a full-panel label from the sidebar edge (content pad).
 const LABEL_INSET: f32 = 12.0;
 /// Horizontal inset of the active-tab pill from the sidebar edges.
@@ -44,7 +48,39 @@ pub(crate) enum Hit {
     Tab(usize),
     /// Open a new tab.
     NewTab,
+    /// Trigger a utility-bar toggle (design §08 #7).
+    Util(UtilAction),
 }
+
+/// A utility-bar icon's action (design §08 #7: "Settings, theme, session timeline, git diff
+/// toggles"). Each maps 1:1 to an existing command the binary already exposes, so the bar is
+/// a second entry point, not new behavior. Left-to-right order matches the guide (⚙ ◐ ⟲ ⑂).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum UtilAction {
+    /// Open the settings view (`⌘,`).
+    Settings,
+    /// Toggle the UI theme (Ossein Dark <-> Light).
+    Theme,
+    /// Toggle the session-timeline dock.
+    Timeline,
+    /// Toggle the git-diff dock.
+    Git,
+}
+
+/// The utility-bar actions in the guide's left-to-right order, paired with their glyphs
+/// (⚙ settings · ◐ theme · ⟲ timeline · ⑂ git). Rendered as glyph labels - the same unicode
+/// the mockup itself uses - so no bespoke icon subsystem is needed yet.
+const UTIL_ICONS: [(UtilAction, &str); 4] = [
+    (UtilAction::Settings, "\u{2699}"),
+    (UtilAction::Theme, "\u{25D0}"),
+    (UtilAction::Timeline, "\u{27F2}"),
+    (UtilAction::Git, "\u{2442}"),
+];
+/// Left padding of the full-panel utility row (the guide's `padding:0 15px`).
+const UTIL_PAD_X: f32 = 15.0;
+/// Per-icon step in the full-panel utility row (icon box + the guide's `gap:16px`); also the
+/// icon's click box, so draw and hit coincide.
+const UTIL_STEP: f32 = 34.0;
 
 /// The persistent left sidebar's state: its display mode (a mirror of
 /// `config.sidebar.mode`, the source of truth per Hard rule 1) plus the visible mode to
@@ -154,6 +190,8 @@ struct Row {
     reason = "the tab-row capacity is a small, non-negative count"
 )]
 fn rows_layout(count: usize, active: usize, panel_h: f32) -> Vec<Row> {
+    // Reserve the bottom-anchored utility bar so the top-down flow stops above it.
+    let flow_h = panel_h - UTIL_H;
     let mut rows = Vec::new();
     let mut y = PAD_TOP;
     rows.push(Row {
@@ -165,7 +203,7 @@ fn rows_layout(count: usize, active: usize, panel_h: f32) -> Vec<Row> {
 
     // Capacity for tab rows, reserving both overflow-indicator slots + the new-tab action.
     let reserved_below = IND_H + TAB_H + PAD_BOTTOM;
-    let avail = panel_h - y - IND_H - reserved_below;
+    let avail = flow_h - y - IND_H - reserved_below;
     let capacity = (avail / TAB_H).floor().max(1.0) as usize;
     let visible = count.min(capacity);
     let first = if count <= visible {
@@ -204,14 +242,32 @@ fn rows_layout(count: usize, active: usize, panel_h: f32) -> Vec<Row> {
     rows
 }
 
-/// Map a click at physical `py` (relative to the surface top) to a sidebar action, for
-/// `count` tabs with `active` selected in a panel `panel_h` tall (physical px) at DPI
-/// `scale`. Only tab rows and the new-tab action are hittable; the header, spacers, and
-/// overflow indicators map to nothing. Shares [`rows_layout`] with [`build`] so a click
-/// lands on exactly the tab drawn there, scroll offset included.
-pub(crate) fn hit(count: usize, active: usize, panel_h: f32, scale: f32, py: f32) -> Option<Hit> {
-    let y_logical = py / scale;
-    for row in rows_layout(count, active, panel_h / scale) {
+/// Map a click at physical `(px, py)` (relative to the surface top-left) to a sidebar
+/// action, for `count` tabs with `active` selected filling `panel` (physical px) at DPI
+/// `scale`. The bottom-anchored utility bar is tested first (its icon under `px`), then the
+/// tab rows + new-tab action; the header, spacers, and overflow indicators map to nothing.
+/// Shares [`rows_layout`] + [`utility_slots`] with [`build`] so a click lands on exactly the
+/// row/icon drawn there, scroll offset included.
+pub(crate) fn hit(
+    count: usize,
+    active: usize,
+    panel: PxRect,
+    rail: bool,
+    scale: f32,
+    px: f32,
+    py: f32,
+) -> Option<Hit> {
+    // The utility bar occupies the bottom `UTIL_H` band (full panel only); find the icon whose
+    // slot holds `px`.
+    let util_top = panel.y + panel.h - UTIL_H * scale;
+    if !rail && py >= util_top {
+        return utility_slots(panel, scale)
+            .into_iter()
+            .find(|(_, slot)| px >= slot.x && px < slot.x + slot.w)
+            .map(|(action, _)| Hit::Util(action));
+    }
+    let y_logical = (py - panel.y) / scale;
+    for row in rows_layout(count, active, panel.h / scale) {
         if y_logical >= row.top && y_logical < row.top + row.height {
             return match row.kind {
                 RowKind::Tab(index) => Some(Hit::Tab(index)),
@@ -221,6 +277,34 @@ pub(crate) fn hit(count: usize, active: usize, panel_h: f32, scale: f32, py: f32
         }
     }
     None
+}
+
+/// The full-panel utility bar's per-icon hit slots (physical px), each returning its action +
+/// click box: the icons left-cluster (the guide's `padding:0 15px; gap:16px`) in fixed
+/// `UTIL_STEP` boxes from `UTIL_PAD_X`. Shared by [`hit`] and [`build`] so the drawn glyph and
+/// its click target coincide.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the icon index is a tiny fixed range (0..4)"
+)]
+fn utility_slots(panel: PxRect, scale: f32) -> Vec<(UtilAction, PxRect)> {
+    let top = panel.y + panel.h - UTIL_H * scale;
+    let h = UTIL_H * scale;
+    UTIL_ICONS
+        .iter()
+        .enumerate()
+        .map(|(i, (action, _))| {
+            (
+                *action,
+                PxRect {
+                    x: panel.x + (UTIL_PAD_X + i as f32 * UTIL_STEP) * scale,
+                    y: top,
+                    w: UTIL_STEP * scale,
+                    h,
+                },
+            )
+        })
+        .collect()
 }
 
 /// The sidebar's finished proportional display list plus the panel it clips to.
@@ -259,6 +343,12 @@ pub(crate) fn build(
     };
     for row in rows_layout(count, active, panel.h / scale) {
         push_row(&mut quads, &mut labels, row, &ctx, measure);
+    }
+
+    // The bottom-anchored utility bar (design §08 #7) - full panel only; the slim rail has no
+    // room for it (its actions stay reachable via keys / the palette).
+    if !rail {
+        push_utility_bar(&mut quads, &mut labels, panel, scale, theme, measure);
     }
 
     // The right-edge divider separating the sidebar from the pane area (drawn last).
@@ -394,6 +484,44 @@ fn push_active_marks(
     ));
 }
 
+/// The bottom-anchored utility bar (design §08 #7): a `border.subtle` top hairline over the
+/// sidebar surface, then the four toggle glyphs (⚙ ◐ ⟲ ⑂) in `fg.muted`, left-clustered per
+/// the guide. Full panel only. Icon-only; the tooltip-on-hover is a follow-up (no tooltip
+/// layer yet).
+fn push_utility_bar(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    panel: PxRect,
+    scale: f32,
+    theme: &Theme,
+    measure: &mut TextMeasure,
+) {
+    let top = panel.y + panel.h - UTIL_H * scale;
+    // Top hairline separating the footer from the tab list.
+    quads.push(ChromeQuad::fill(
+        PxRect {
+            x: panel.x,
+            y: top,
+            w: panel.w,
+            h: scale.max(1.0),
+        },
+        theme.border_subtle,
+    ));
+    let line_h = measure.line_height(FontRole::Body);
+    let cy = top + (UTIL_H * scale - line_h) * 0.5;
+    for ((_, glyph), (_, slot)) in UTIL_ICONS.iter().zip(utility_slots(panel, scale)) {
+        labels.push(ProseLabel {
+            text: (*glyph).to_owned(),
+            x: slot.x,
+            y: cy,
+            role: FontRole::Body,
+            color: theme.fg_muted,
+            weight: None,
+            max_w: f32::MAX,
+        });
+    }
+}
+
 /// Place one label vertically centered in its row: left-inset for the full panel, or
 /// horizontally centered for the rail (measuring the glyph run's width). `top`/`height` are
 /// the row's physical box; the label's line box is centered within it.
@@ -432,7 +560,7 @@ fn push_label(
 
 #[cfg(test)]
 mod tests {
-    use super::{build, hit, Hit, Sidebar};
+    use super::{build, hit, Hit, Sidebar, UtilAction, UTIL_ICONS};
     use skelly_config::SidebarMode;
     use skelly_render::{PxRect, TextMeasure, Theme};
 
@@ -491,14 +619,45 @@ mod tests {
     #[test]
     fn hit_maps_a_click_in_a_tab_band_to_that_tab() {
         // Three tabs, ample height, 2x DPI. Probe the vertical center of each row band by
-        // rebuilding the same layout the renderer uses.
+        // rebuilding the same layout the renderer uses. `px` is in the panel's left area (it
+        // only matters for the utility bar).
         let p = panel();
+        let x = 20.0 * 2.0;
         // A y inside the header maps to nothing.
-        assert_eq!(hit(3, 0, p.h, 2.0, 12.0 * 2.0), None);
+        assert_eq!(hit(3, 0, p, false, 2.0, x, 12.0 * 2.0), None);
         // The first tab band sits just below the header + overflow slot: PAD_TOP(10) +
         // HEADER_H(24) + IND_H(16) = 50 logical, first tab spans 50..78. Center ~64 logical.
-        assert_eq!(hit(3, 0, p.h, 2.0, 64.0 * 2.0), Some(Hit::Tab(0)));
-        assert_eq!(hit(3, 0, p.h, 2.0, (64.0 + 28.0) * 2.0), Some(Hit::Tab(1)));
+        assert_eq!(hit(3, 0, p, false, 2.0, x, 64.0 * 2.0), Some(Hit::Tab(0)));
+        assert_eq!(
+            hit(3, 0, p, false, 2.0, x, (64.0 + 28.0) * 2.0),
+            Some(Hit::Tab(1))
+        );
+    }
+
+    #[test]
+    fn hit_maps_the_footer_icons_to_their_utility_actions() {
+        // The full-panel footer left-clusters four fixed UTIL_STEP(34) boxes from
+        // UTIL_PAD_X(15): icon i spans [15 + i·34, +34] logical. Probe each box center at a y
+        // inside the 40px footer.
+        let p = panel();
+        let y = p.h - 20.0 * 2.0; // 20 logical up from the bottom
+        let center = |i: f32| (15.0 + i * 34.0 + 17.0) * 2.0;
+        assert_eq!(
+            hit(3, 0, p, false, 2.0, center(0.0), y),
+            Some(Hit::Util(UtilAction::Settings))
+        );
+        assert_eq!(
+            hit(3, 0, p, false, 2.0, center(1.0), y),
+            Some(Hit::Util(UtilAction::Theme))
+        );
+        assert_eq!(
+            hit(3, 0, p, false, 2.0, center(2.0), y),
+            Some(Hit::Util(UtilAction::Timeline))
+        );
+        assert_eq!(
+            hit(3, 0, p, false, 2.0, center(3.0), y),
+            Some(Hit::Util(UtilAction::Git))
+        );
     }
 
     #[test]
@@ -523,6 +682,28 @@ mod tests {
         // The active tab contributes an accent-subtle pill + an accent bar (2 extra quads
         // over the surface fill + right divider).
         assert!(paint.quads.len() >= 4);
+    }
+
+    #[test]
+    fn build_draws_the_utility_bar_glyphs() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
+        let paint = build(2, 0, panel(), false, 2.0, &theme, &mut m);
+        // Each utility glyph is drawn once, in the footer (below the tab list).
+        for (_, glyph) in UTIL_ICONS {
+            assert!(
+                paint.labels.iter().any(|l| l.text == glyph),
+                "utility glyph {glyph:?} should be drawn"
+            );
+        }
+        // The slim rail has no room for the footer, so it omits the glyphs entirely.
+        let rail = build(2, 0, panel(), true, 2.0, &theme, &mut m);
+        for (_, glyph) in UTIL_ICONS {
+            assert!(
+                rail.labels.iter().all(|l| l.text != glyph),
+                "rail should omit utility glyph {glyph:?}"
+            );
+        }
     }
 
     #[test]

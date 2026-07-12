@@ -1077,14 +1077,39 @@ impl App {
         if px >= self.sidebar_width_px() {
             return None;
         }
-        let panel_h = dim_f32(self.size.1);
+        let panel = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: self.sidebar_width_px(),
+            h: dim_f32(self.size.1),
+        };
         sidebar::hit(
             self.tabs.len(),
             self.active,
-            panel_h,
+            panel,
+            self.sidebar.is_rail(),
             scale32(self.scale),
+            px,
             py,
         )
+    }
+
+    /// Run a sidebar utility-bar toggle (design §08 #7). Each is a second entry point to an
+    /// existing command; the theme icon flips between Ossein Dark and Light.
+    fn on_util_action(&mut self, action: sidebar::UtilAction) {
+        match action {
+            sidebar::UtilAction::Settings => self.open_settings(),
+            sidebar::UtilAction::Theme => {
+                let next = if self.config.appearance.theme == "ossein-light" {
+                    "ossein-dark"
+                } else {
+                    "ossein-light"
+                };
+                self.apply_theme(next);
+            }
+            sidebar::UtilAction::Timeline => self.toggle_timeline(),
+            sidebar::UtilAction::Git => self.toggle_git_dock(),
+        }
     }
 
     /// Copy the current selection to the clipboard.
@@ -1979,6 +2004,7 @@ impl App {
                     match hit {
                         sidebar::Hit::Tab(index) => self.goto_tab(index),
                         sidebar::Hit::NewTab => self.new_tab(),
+                        sidebar::Hit::Util(action) => self.on_util_action(action),
                     }
                 } else if let Some((id, rect)) = self.pane_at_pointer() {
                     self.active_tab_mut().tree.set_focus(id);
