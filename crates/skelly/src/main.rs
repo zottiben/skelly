@@ -313,6 +313,9 @@ struct App {
     dock_width: f32,
     /// Whether the right dock's left edge is being dragged to resize it.
     dock_resizing: bool,
+    /// The tab index currently being drag-reordered in the sidebar (updated as it moves), or
+    /// `None` when no tab drag is in progress.
+    dragging_tab: Option<usize>,
     /// The command palette's open / close animation (design §03 motion), live only while it
     /// plays. While any animation is set the event loop polls + redraws each frame; it clears
     /// itself when done (finalizing the close), returning the loop to its idle `Wait`.
@@ -389,6 +392,7 @@ impl App {
             selecting: false,
             dock_width: GIT_DOCK_WIDTH,
             dock_resizing: false,
+            dragging_tab: None,
             palette_anim: None,
             confirm_anim: None,
         }
@@ -1995,6 +1999,18 @@ impl App {
         self.request_redraw();
     }
 
+    /// Move the tab at `from` to index `to` (a sidebar drag-reorder), keeping the moved tab
+    /// active. No-op when the indices are equal or out of range.
+    fn move_tab(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        self.active = to;
+        self.request_redraw();
+    }
+
     /// Cycle to the next (`forward`) or previous tab, wrapping around.
     fn cycle_tab(&mut self, forward: bool) {
         let next = cycle_index(self.active, self.tabs.len(), forward);
@@ -2920,6 +2936,17 @@ impl App {
             self.resize_dock_to_pointer();
             return;
         }
+        // Dragging a sidebar tab over another reorders the tab list.
+        if let Some(from) = self.dragging_tab {
+            if let Some(sidebar::Hit::Tab(target)) = self.sidebar_hit() {
+                if target != from {
+                    self.move_tab(from, target);
+                    self.dragging_tab = Some(target);
+                    self.request_redraw();
+                }
+            }
+            return;
+        }
         // Show a horizontal-resize cursor when hovering the dock's draggable edge.
         if let Some(window) = self.window.as_ref() {
             window.set_cursor(if self.on_dock_edge() {
@@ -2973,9 +3000,11 @@ impl App {
                         sidebar::Hit::AddWorkspace => self.add_workspace(),
                         sidebar::Hit::CommandInput => self.open_palette(),
                         // `sidebar_hit` maps a pinned-tile hit to `Tab`, so `Pinned` is
-                        // unreachable here; both just activate the tab defensively.
+                        // unreachable here; both just activate the tab defensively. A press also
+                        // arms a drag so moving the pointer reorders the tab.
                         sidebar::Hit::Tab(index) | sidebar::Hit::Pinned(index) => {
                             self.goto_tab(index);
+                            self.dragging_tab = Some(index);
                         }
                         sidebar::Hit::NewTab => self.new_tab(),
                         sidebar::Hit::Util(action) => self.on_util_action(action),
@@ -2998,6 +3027,7 @@ impl App {
             ElementState::Released => {
                 self.selecting = false;
                 self.dock_resizing = false;
+                self.dragging_tab = None;
                 // A click with no drag clears the (single-cell) selection.
                 if self
                     .active_tab()
