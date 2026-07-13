@@ -733,6 +733,7 @@ impl App {
         let viewport = self.viewport_rect();
         let proxy = self.proxy.clone();
         let shell = self.config.shell.program.clone();
+        let cursor = config_cursor_shape(self.config.appearance.cursor);
         let layout = self.active_tab().tree.layout(viewport);
 
         let ws = self.active_tab_mut();
@@ -756,6 +757,9 @@ impl App {
                     let _ = proxy.send_event(Wakeup);
                 }) {
                     Ok(term) => {
+                        // Apply the configured default cursor shape (appearance.cursor) to the
+                        // fresh shell; a program's DECSCUSR still overrides it live.
+                        term.set_default_cursor_shape(cursor);
                         ws.panes.insert(id, term);
                         ws.dims.insert(id, target);
                     }
@@ -791,7 +795,13 @@ impl App {
                     .iter()
                     .map(|row| {
                         row.iter()
-                            .map(|c| resolve_cell(c, &self.ansi_palette))
+                            .map(|c| {
+                                resolve_cell(
+                                    c,
+                                    &self.ansi_palette,
+                                    self.config.appearance.bold_is_bright,
+                                )
+                            })
                             .collect()
                     })
                     .collect();
@@ -1338,12 +1348,14 @@ impl App {
     }
 
     /// The tab indices split into `(unpinned, pinned)` - the unpinned show in the tab list, the
-    /// pinned in the 3-up grid (design §08 #4).
+    /// pinned in the 3-up grid (design §08 #4). When `sidebar.show_pinned` is off, the grid is
+    /// hidden and pinned tabs fall back into the list (their pinned state is preserved).
     fn split_pinned(&self) -> (Vec<usize>, Vec<usize>) {
+        let show_pinned = self.config.sidebar.show_pinned;
         let mut unpinned = Vec::new();
         let mut pinned = Vec::new();
         for (i, tab) in self.tabs.iter().enumerate() {
-            if tab.pinned {
+            if tab.pinned && show_pinned {
                 pinned.push(i);
             } else {
                 unpinned.push(i);
@@ -1539,6 +1551,16 @@ impl App {
                 self.sidebar.set_mode(self.config.sidebar.mode);
                 self.rail_expanded = false;
                 self.sync_layout();
+            }
+            // The default cursor shape (what the shell shows when no program overrides it) - apply
+            // live to every open pane.
+            "appearance.cursor" => {
+                let cursor = config_cursor_shape(self.config.appearance.cursor);
+                for tab in &self.tabs {
+                    for term in tab.panes.values() {
+                        term.set_default_cursor_shape(cursor);
+                    }
+                }
             }
             // Layout-affecting toggles: re-fit the grids. Hiding the status line reclaims its
             // rows; the sidebar width shifts the pane viewport.
@@ -3898,6 +3920,16 @@ fn editor_mode(job: Option<&str>, shape: skelly_term::CursorShape) -> Option<&'s
     })
 }
 
+/// Map the configured default cursor style (`appearance.cursor`) to the terminal's cursor shape,
+/// applied as each pane's resting cursor (a program's `DECSCUSR` still overrides it).
+fn config_cursor_shape(cursor: skelly_config::CursorStyle) -> skelly_term::CursorShape {
+    match cursor {
+        skelly_config::CursorStyle::Block => skelly_term::CursorShape::Block,
+        skelly_config::CursorStyle::Bar => skelly_term::CursorShape::Bar,
+        skelly_config::CursorStyle::Underline => skelly_term::CursorShape::Underline,
+    }
+}
+
 /// Map the terminal's requested cursor shape to the renderer's, so the drawn cursor honors what
 /// the running program set via `DECSCUSR` (e.g. vim's block/bar/underline per mode).
 fn render_cursor_shape(shape: skelly_term::CursorShape) -> CursorShape {
@@ -4027,8 +4059,15 @@ fn process_name(pid: u32) -> Option<String> {
 /// intensity and *reverse video* swaps foreground and background (using the
 /// palette's default background when the cell has none). Bold/italic/underline pass
 /// through for the renderer to apply.
-fn resolve_cell(cell: &TermCell, palette: &AnsiPalette) -> GridCell {
-    let mut fg = resolve_fg(cell.fg, palette);
+fn resolve_cell(cell: &TermCell, palette: &AnsiPalette, bold_bright: bool) -> GridCell {
+    let bold = cell.attrs.contains(CellAttrs::BOLD);
+    // With `bold_is_bright`, bold text in a normal ANSI color (0-7) renders in that color's
+    // bright variant (8-15) - the common terminal convention.
+    let fg_color = match cell.fg {
+        CellColor::Indexed(i) if bold && bold_bright && i < 8 => CellColor::Indexed(i + 8),
+        other => other,
+    };
+    let mut fg = resolve_fg(fg_color, palette);
     let mut bg = resolve_bg(cell.bg, palette);
     if cell.attrs.contains(CellAttrs::DIM) {
         fg = dim(fg);
@@ -4042,7 +4081,7 @@ fn resolve_cell(cell: &TermCell, palette: &AnsiPalette) -> GridCell {
         c: cell.c,
         fg,
         bg,
-        bold: cell.attrs.contains(CellAttrs::BOLD),
+        bold,
         italic: cell.attrs.contains(CellAttrs::ITALIC),
         underline: cell.attrs.contains(CellAttrs::UNDERLINE),
     }
@@ -5116,7 +5155,7 @@ mod tests {
         let mut cell = plain('x');
         cell.fg = CellColor::Indexed(1); // red
         cell.attrs.insert(CellAttrs::INVERSE);
-        let resolved = resolve_cell(&cell, &palette);
+        let resolved = resolve_cell(&cell, &palette, false);
         // The red foreground becomes the fill; the (defaulted) background becomes the
         // glyph color, drawn as the palette's default background.
         assert_eq!(resolved.bg, Some(palette.indexed(1)));
@@ -5130,7 +5169,7 @@ mod tests {
         cell.fg = CellColor::Indexed(2); // green
         cell.bg = CellColor::Indexed(4); // blue
         cell.attrs.insert(CellAttrs::INVERSE);
-        let resolved = resolve_cell(&cell, &palette);
+        let resolved = resolve_cell(&cell, &palette, false);
         assert_eq!(resolved.fg, palette.indexed(4));
         assert_eq!(resolved.bg, Some(palette.indexed(2)));
     }
@@ -5160,7 +5199,7 @@ mod tests {
         let mut cell = plain('b');
         cell.attrs
             .insert(CellAttrs::BOLD | CellAttrs::ITALIC | CellAttrs::UNDERLINE);
-        let resolved = resolve_cell(&cell, &palette);
+        let resolved = resolve_cell(&cell, &palette, false);
         assert!(resolved.bold && resolved.italic && resolved.underline);
     }
 

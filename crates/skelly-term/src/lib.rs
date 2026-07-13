@@ -27,7 +27,9 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape as VteCursorShape, Processor};
+use alacritty_terminal::vte::ansi::{
+    Color as AnsiColor, CursorShape as VteCursorShape, CursorStyle as VteCursorStyle, Processor,
+};
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
 type SharedTerm = Arc<Mutex<Term<TitleListener>>>;
@@ -422,6 +424,27 @@ impl Terminal {
             VteCursorShape::Hidden => CursorShape::Hidden,
             // Block / HollowBlock both read as a block cursor for mode purposes.
             VteCursorShape::Block | VteCursorShape::HollowBlock => CursorShape::Block,
+        }
+    }
+
+    /// Set the *default* cursor shape (the config `appearance.cursor`) - what the cursor is when a
+    /// program hasn't overridden it via `DECSCUSR`. A program's per-mode cursor (vim) still wins;
+    /// this just changes the resting shape at the shell. Applies live to this terminal.
+    pub fn set_default_cursor_shape(&self, shape: CursorShape) {
+        let vte_shape = match shape {
+            CursorShape::Block => VteCursorShape::Block,
+            CursorShape::Bar => VteCursorShape::Beam,
+            CursorShape::Underline => VteCursorShape::Underline,
+            CursorShape::Hidden => VteCursorShape::Hidden,
+        };
+        if let Ok(mut term) = self.term.lock() {
+            term.set_options(Config {
+                default_cursor_style: VteCursorStyle {
+                    shape: vte_shape,
+                    blinking: false,
+                },
+                ..Config::default()
+            });
         }
     }
 
