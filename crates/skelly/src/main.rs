@@ -1028,6 +1028,7 @@ impl App {
     /// Repaint every visible pane from its terminal grid, resolving cell colors and
     /// overlaying the selection and the focused-pane ring.
     fn redraw(&mut self) {
+        let redraw_start = Instant::now();
         let frames = self.pane_frames();
 
         let views: Vec<PaneView> = frames.iter().map(PaneFrame::view).collect();
@@ -1141,6 +1142,7 @@ impl App {
                 tracing::error!(%err, "frame render failed");
             }
         }
+        tracing::debug!(micros = redraw_start.elapsed().as_micros(), "redraw");
     }
 
     /// Lay out the command palette as a centered floating card, sized to its proportional

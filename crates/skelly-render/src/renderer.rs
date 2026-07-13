@@ -208,6 +208,10 @@ impl Renderer {
         let mut config = surface
             .get_default_config(&adapter, width.max(1), height.max(1))
             .expect("surface not supported by the selected adapter");
+        // Minimize input-to-display latency: a single queued frame instead of the default two,
+        // so a keystroke's echo reaches the screen a frame sooner. This is the standard
+        // low-latency choice for a terminal (still Fifo/vsync, so no tearing).
+        config.desired_maximum_frame_latency = 1;
         // Prefer an sRGB swapchain format so the linear clear color displays correctly.
         let caps = surface.get_capabilities(&adapter);
         if let Some(srgb) = caps
