@@ -66,6 +66,10 @@ const PANE_INSET: f32 = 6.0;
 /// (the standard native-terminal look), so app content reserves this band at the top; it is
 /// zero where the platform keeps native decorations.
 const TITLE_STRIP: f32 = 38.0;
+/// Logical width (px) spanned by the macOS traffic lights at the top-left. When the sidebar is
+/// at least this wide it covers them; when it is narrower (hidden, or the slim rail) the pane
+/// viewport must reserve the title strip so the top-left pane never sits under the lights.
+const TRAFFIC_LIGHT_WIDTH: f32 = 80.0;
 /// One keyboard resize step, as a fraction of the enclosing split's extent.
 const RESIZE_STEP: f32 = 0.04;
 /// Logical width (px) of the slim icon rail (`⇧⌘B`), per design §08 ("Icon rail 56px").
@@ -511,20 +515,27 @@ impl App {
 
     /// The pane area within the window: the surface inset by the window margin, by the
     /// sidebar's width on the left when it is shown, and by the git dock's width on the right
-    /// when it is open. The pane zone fills to the window top (the guide's content zone is a
-    /// sibling of the sidebar, not below the control strip); only the sidebar reserves the
-    /// macOS traffic-light strip, since that is where the lights sit (top-left).
+    /// when it is open. When a wide sidebar covers the macOS traffic lights the panes fill to
+    /// the window top; when the sidebar is hidden or the slim rail (narrower than the lights),
+    /// the panes reserve the title strip so the top-left pane never sits under the lights.
     fn viewport_rect(&self) -> Rect {
-        let pad = WINDOW_PAD * scale32(self.scale);
+        let scale = scale32(self.scale);
+        let pad = WINDOW_PAD * scale;
         let sidebar = self.sidebar_footprint_px();
         let dock = self.right_dock_width_px();
         let w = dim_f32(self.size.0);
         let h = dim_f32(self.size.1);
+        // Reserve the traffic-light strip at the top only when the sidebar doesn't cover it.
+        let top = if sidebar < TRAFFIC_LIGHT_WIDTH * scale {
+            pad.max(self.content_top())
+        } else {
+            pad
+        };
         Rect::new(
             sidebar + pad,
-            pad,
+            top,
             (w - sidebar - dock - 2.0 * pad).max(1.0),
-            (h - 2.0 * pad).max(1.0),
+            (h - top - pad).max(1.0),
         )
     }
 
@@ -1415,17 +1426,30 @@ impl App {
     fn build_settings_frame(&mut self) -> SettingsFrame {
         let scale = scale32(self.scale);
         let top = self.content_top();
-        let panel = PxRect {
+        let (w, h) = (dim_f32(self.size.0), dim_f32(self.size.1));
+        // The background fills the whole window (so it reads full-height), but the content is
+        // laid out below the title strip so the heading + nav clear the macOS traffic lights.
+        let bg_panel = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w,
+            h,
+        };
+        let content_panel = PxRect {
             x: 0.0,
             y: top,
-            w: dim_f32(self.size.0),
-            h: (dim_f32(self.size.1) - top).max(1.0),
+            w,
+            h: (h - top).max(1.0),
         };
-        let paint = self
-            .settings
-            .build(panel, scale, &self.config, &self.theme, &mut self.measure);
+        let paint = self.settings.build(
+            content_panel,
+            scale,
+            &self.config,
+            &self.theme,
+            &mut self.measure,
+        );
         SettingsFrame {
-            panel,
+            panel: bg_panel,
             nav_divider_x: paint.nav_divider_x,
             quads: paint.quads,
             labels: paint.labels,
