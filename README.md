@@ -5,11 +5,6 @@ design, for vim / neovim / LazyVim development: multi-pane splits, per-repo git
 diff, and a rewindable session timeline. Ghostty-grade minimalism with a Zen-style
 tab sidebar. Targets macOS and Linux.
 
-> **Status: design-driven, delivered in milestones.** M0-M4 are complete (foundation,
-> walking skeleton, core terminal, the Skelly shell UX, and the signature git diff
-> dock + session timeline). M5 (hardening & release) is in progress. See
-> [`ROADMAP.md`](ROADMAP.md).
-
 ## Install
 
 **macOS & Linux:**
@@ -48,25 +43,6 @@ Right now the binary loads `~/.config/skelly/config.toml` (or spec defaults when
 there is no file) and reports the resolved settings - proving the config slice
 end-to-end. Configuration is the single source of truth: every setting maps 1:1 to
 a `config.toml` key.
-
-## Layout
-
-Cargo workspace, one crate per concern, dependencies flowing one way (nothing
-depends on the binary):
-
-- [`crates/skelly`](crates/skelly) - the binary: window, sidebar, pane tree,
-  command palette, wiring.
-- [`crates/skelly-render`](crates/skelly-render) - GPU cell-grid renderer, fonts,
-  semantic theme-token resolution.
-- [`crates/skelly-term`](crates/skelly-term) - PTY, shell I/O, ANSI/VT parsing,
-  grid, scrollback.
-- [`crates/skelly-session`](crates/skelly-session) - session timeline,
-  non-destructive rewind (shadow worktree), git diff.
-- [`crates/skelly-config`](crates/skelly-config) - `config.toml` load / validate /
-  schema (the source of truth).
-
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) for the crate map and data flow, and
-[`design/`](design/) for the binding design spec.
 
 ## Contributing
 
