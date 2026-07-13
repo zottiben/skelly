@@ -200,7 +200,8 @@ impl Terminal {
 
     /// Spawn a specific shell `program` (e.g. `zsh`) in a `cols` x `rows` PTY, or the login
     /// shell when `program` is `None` or empty. Backs the `[shell] program` config key set by
-    /// the settings view / first-run onboarding (design §10.1). `wakeup` behaves as in [`spawn`].
+    /// the settings view / first-run onboarding (design §10.1). `wakeup` behaves as in
+    /// [`spawn`](Terminal::spawn).
     ///
     /// # Errors
     /// Returns an error if the PTY cannot be opened or the shell cannot be spawned.

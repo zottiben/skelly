@@ -139,7 +139,7 @@ pub struct Theme {
     /// `accent.hover` - the brighter accent for hover / pressed states (sRGB).
     pub accent_hover: Srgb,
     /// `accent.subtle` alpha (§03: 0.14 dark / 0.12 light) - the accent tint weight for
-    /// selected-row / active-chip fills, composited over their surface by [`accent_subtle_on`].
+    /// selected-row / active-chip fills, composited over their surface by [`Theme::accent_subtle_on`].
     pub accent_subtle_alpha: f32,
     /// `border.subtle` - hairline dividers and inner separators (sRGB).
     pub border_subtle: Srgb,

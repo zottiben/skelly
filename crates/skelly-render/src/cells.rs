@@ -308,8 +308,8 @@ pub(crate) fn logo_quads(
     ]
 }
 
-/// The vertebra brand mark (§02) as [`ChromeQuad`]s, so an overlay (the first-run modal, §10.1)
-/// can draw it in its display list. Same geometry as [`logo_quads`]: a faint accent spine pill
+/// The vertebra brand mark (§02) as [`ChromeQuad`](crate::ChromeQuad)s, so an overlay (the
+/// first-run modal, §10.1) can draw it in its display list. Same geometry as `logo_quads`: a spine
 /// threading three rounded-diamond discs (two `fg.primary`, one `accent`), `mark` px square,
 /// its top-left at `(x, y)`, every layer scaled by `opacity`.
 #[must_use]

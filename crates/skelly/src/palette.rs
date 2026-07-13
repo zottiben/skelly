@@ -647,7 +647,8 @@ impl Palette {
     }
 }
 
-/// A matched, renderable palette row: what it runs plus everything [`build`] needs to draw it.
+/// A matched, renderable palette row: what it runs plus everything [`Palette::build`] needs to
+/// draw it.
 struct Row {
     entry: Entry,
     category: &'static str,
