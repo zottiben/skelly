@@ -156,6 +156,24 @@ impl Node {
         }
     }
 
+    /// Exchange the leaves holding `a` and `b` (swapping their positions in the tiling). Each
+    /// id occupies exactly one leaf, so a single traversal suffices.
+    fn swap_leaves(&mut self, a: PaneId, b: PaneId) {
+        match self {
+            Node::Leaf(p) => {
+                if *p == a {
+                    *p = b;
+                } else if *p == b {
+                    *p = a;
+                }
+            }
+            Node::Split { first, second, .. } => {
+                first.swap_leaves(a, b);
+                second.swap_leaves(a, b);
+            }
+        }
+    }
+
     /// Replace the leaf `target` with `replacement` (taken on the first match).
     /// Returns whether the target was found.
     fn replace_leaf(&mut self, target: PaneId, replacement: &mut Option<Node>) -> bool {
@@ -373,25 +391,41 @@ impl PaneTree {
         }
     }
 
-    /// Move focus to the nearest pane in `dir`. Returns whether focus moved (it will
-    /// not at the edge of the layout). Cancels zoom.
-    pub fn focus(&mut self, dir: Dir) -> bool {
+    /// The nearest pane to the focused one in `dir` (by the tiled layout), or `None` at the
+    /// edge of the layout. Shared by [`focus`](Self::focus) and [`swap`](Self::swap).
+    fn neighbor(&self, dir: Dir) -> Option<PaneId> {
         // Adjacency is defined by the tiled layout, even when zoomed.
         let layout = self.tiled_layout(Rect::new(0.0, 0.0, 1.0, 1.0));
-        let Some(cur) = layout
+        let cur = layout
             .iter()
             .find(|(id, _)| *id == self.focused)
-            .map(|&(_, r)| r)
-        else {
-            return false;
-        };
-        let best = layout
+            .map(|&(_, r)| r)?;
+        layout
             .iter()
             .filter(|(id, _)| *id != self.focused)
             .filter_map(|&(id, r)| candidate_score(cur, r, dir).map(|score| (score, id)))
-            .min_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        if let Some((_, id)) = best {
+            .min_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(_, id)| id)
+    }
+
+    /// Move focus to the nearest pane in `dir`. Returns whether focus moved (it will
+    /// not at the edge of the layout). Cancels zoom.
+    pub fn focus(&mut self, dir: Dir) -> bool {
+        if let Some(id) = self.neighbor(dir) {
             self.focused = id;
+            self.zoomed = false;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Swap the focused pane with its nearest neighbor in `dir` (exchanging their positions in
+    /// the tiling); focus follows the moved pane. Returns whether a neighbor existed to swap
+    /// with (the guide's §11 "Swap pane", `⌥⇧arrows`). Cancels zoom.
+    pub fn swap(&mut self, dir: Dir) -> bool {
+        if let Some(neighbor) = self.neighbor(dir) {
+            self.root.swap_leaves(self.focused, neighbor);
             self.zoomed = false;
             true
         } else {
@@ -620,6 +654,28 @@ mod tests {
         assert!(!t.focus(Dir::Left), "already at the left edge");
         assert!(t.focus(Dir::Right));
         assert_eq!(t.focused(), right);
+    }
+
+    #[test]
+    fn swap_exchanges_the_focused_pane_with_its_neighbor() {
+        let mut t = PaneTree::new();
+        let first = t.focused();
+        let second = t.split(Dir::Right).unwrap(); // focus on `second` (the right half)
+        assert!(
+            rect_of(&t, second).x > rect_of(&t, first).x,
+            "second starts on the right"
+        );
+
+        // Swapping the focused (right) pane left exchanges the two panes' positions; focus
+        // follows the moved pane, which now sits on the left.
+        assert!(t.swap(Dir::Left));
+        assert_eq!(t.focused(), second, "focus follows the moved pane");
+        assert!(
+            rect_of(&t, second).x < rect_of(&t, first).x,
+            "second is now on the left"
+        );
+        // At the edge there is no neighbor to swap with.
+        assert!(!t.swap(Dir::Left), "no neighbor further left");
     }
 
     #[test]

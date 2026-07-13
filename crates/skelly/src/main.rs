@@ -119,6 +119,8 @@ enum PaneAction {
     Zoom,
     /// Nudge the focused pane's enclosing divider in this direction.
     Resize(Dir),
+    /// Swap the focused pane with its neighbor in this direction.
+    Swap(Dir),
     /// Reset every split to an even 50/50.
     EvenOut,
 }
@@ -1411,6 +1413,7 @@ impl App {
                 true
             }
             PaneAction::Resize(dir) => ws.tree.resize(dir, RESIZE_STEP),
+            PaneAction::Swap(dir) => ws.tree.swap(dir),
             PaneAction::EvenOut => {
                 ws.tree.even_out();
                 true
@@ -2961,20 +2964,33 @@ fn pane_action(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
         return None;
     }
     let shift = mods.shift_key();
+    let ctrl = mods.control_key();
     Some(match code {
         KeyCode::Backslash => PaneAction::Split(Dir::Right),
         KeyCode::Minus => PaneAction::Split(Dir::Down),
         KeyCode::Equal => PaneAction::EvenOut,
         KeyCode::KeyZ => PaneAction::Zoom,
         KeyCode::KeyW => PaneAction::Close,
+        // Arrow keys are the guide's §11 primary pane nav: ⌥arrows move focus, ⌃⌥arrows resize,
+        // ⌥⇧arrows swap (`hjkl` remain as the vim-style aliases below / the leader chords).
+        KeyCode::ArrowLeft if ctrl => PaneAction::Resize(Dir::Left),
+        KeyCode::ArrowDown if ctrl => PaneAction::Resize(Dir::Down),
+        KeyCode::ArrowUp if ctrl => PaneAction::Resize(Dir::Up),
+        KeyCode::ArrowRight if ctrl => PaneAction::Resize(Dir::Right),
+        KeyCode::ArrowLeft if shift => PaneAction::Swap(Dir::Left),
+        KeyCode::ArrowDown if shift => PaneAction::Swap(Dir::Down),
+        KeyCode::ArrowUp if shift => PaneAction::Swap(Dir::Up),
+        KeyCode::ArrowRight if shift => PaneAction::Swap(Dir::Right),
+        // `⇧hjkl` resize (the vim aliases, also the leader chords); plain `hjkl` and plain arrows
+        // both move focus.
         KeyCode::KeyH if shift => PaneAction::Resize(Dir::Left),
         KeyCode::KeyJ if shift => PaneAction::Resize(Dir::Down),
         KeyCode::KeyK if shift => PaneAction::Resize(Dir::Up),
         KeyCode::KeyL if shift => PaneAction::Resize(Dir::Right),
-        KeyCode::KeyH => PaneAction::Focus(Dir::Left),
-        KeyCode::KeyJ => PaneAction::Focus(Dir::Down),
-        KeyCode::KeyK => PaneAction::Focus(Dir::Up),
-        KeyCode::KeyL => PaneAction::Focus(Dir::Right),
+        KeyCode::ArrowLeft | KeyCode::KeyH => PaneAction::Focus(Dir::Left),
+        KeyCode::ArrowDown | KeyCode::KeyJ => PaneAction::Focus(Dir::Down),
+        KeyCode::ArrowUp | KeyCode::KeyK => PaneAction::Focus(Dir::Up),
+        KeyCode::ArrowRight | KeyCode::KeyL => PaneAction::Focus(Dir::Right),
         KeyCode::Digit1 => PaneAction::FocusIndex(0),
         KeyCode::Digit2 => PaneAction::FocusIndex(1),
         KeyCode::Digit3 => PaneAction::FocusIndex(2),
@@ -3702,6 +3718,31 @@ mod tests {
         assert_eq!(
             pane_action(KeyCode::Digit3, alt),
             Some(PaneAction::FocusIndex(2))
+        );
+    }
+
+    #[test]
+    fn alt_arrow_chords_are_the_primary_pane_nav() {
+        // The guide's §11 primary pane nav: ⌥arrows focus, ⌃⌥arrows resize, ⌥⇧arrows swap.
+        let alt = ModifiersState::ALT;
+        let ctrl_alt = ModifiersState::ALT | ModifiersState::CONTROL;
+        let alt_shift = ModifiersState::ALT | ModifiersState::SHIFT;
+        assert_eq!(
+            pane_action(KeyCode::ArrowLeft, alt),
+            Some(PaneAction::Focus(Dir::Left))
+        );
+        assert_eq!(
+            pane_action(KeyCode::ArrowRight, ctrl_alt),
+            Some(PaneAction::Resize(Dir::Right))
+        );
+        assert_eq!(
+            pane_action(KeyCode::ArrowUp, alt_shift),
+            Some(PaneAction::Swap(Dir::Up))
+        );
+        // Arrows without Alt are the shell's own (escape sequences), not a pane action.
+        assert_eq!(
+            pane_action(KeyCode::ArrowLeft, ModifiersState::empty()),
+            None
         );
     }
 
