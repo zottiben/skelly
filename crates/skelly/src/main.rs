@@ -70,6 +70,12 @@ const TITLE_STRIP: f32 = 38.0;
 /// at least this wide it covers them; when it is narrower (hidden, or the slim rail) the pane
 /// viewport must reserve the title strip so the top-left pane never sits under the lights.
 const TRAFFIC_LIGHT_WIDTH: f32 = 80.0;
+/// The workspace-chip icons (design §08 #2), a curated set of distinct geometric marks assigned
+/// to workspaces by position - a stable, recognizable icon per workspace instead of an initial
+/// derived from its name (the guide's `P`/`W` were only illustrative).
+const WORKSPACE_ICONS: [char; 8] = [
+    '\u{25C6}', '\u{25CF}', '\u{25B2}', '\u{25A0}', '\u{2605}', '\u{25C7}', '\u{25CB}', '\u{25A1}',
+];
 /// One keyboard resize step, as a fraction of the enclosing split's extent.
 const RESIZE_STEP: f32 = 0.04;
 /// Logical width (px) of the slim icon rail (`⇧⌘B`), per design §08 ("Icon rail 56px").
@@ -1339,11 +1345,14 @@ impl App {
             .collect()
     }
 
-    /// The workspace chip glyphs (each workspace's name's first letter, uppercased).
+    /// The workspace chip glyphs: a curated set of distinct geometric marks assigned by position
+    /// (the guide's `P`/`W` initials were only illustrative). Each workspace gets a stable,
+    /// recognizable icon rather than a letter derived from its name.
     fn workspace_chips(&self) -> Vec<char> {
         self.workspaces
             .iter()
-            .map(|w| w.name.chars().next().unwrap_or('?').to_ascii_uppercase())
+            .enumerate()
+            .map(|(i, _)| WORKSPACE_ICONS[i % WORKSPACE_ICONS.len()])
             .collect()
     }
 

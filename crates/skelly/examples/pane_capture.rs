@@ -801,7 +801,7 @@ fn sidebar_panel(
         let radius = SB_CHIP_RADIUS * scale;
         let stroke = scale.max(1.0);
         let line = measure.line_height(FontRole::Mono);
-        for (i, glyph) in ["P", "W", "+"].iter().enumerate() {
+        for (i, glyph) in ["\u{25C6}", "\u{25CF}", "+"].iter().enumerate() {
             let x = x0 + i as f32 * step;
             let active_ws = i == 0;
             if active_ws {
