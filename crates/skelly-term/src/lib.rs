@@ -27,7 +27,7 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, Processor};
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape as VteCursorShape, Processor};
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
 type SharedTerm = Arc<Mutex<Term<VoidListener>>>;
@@ -78,6 +78,21 @@ bitflags::bitflags! {
         /// Dim / faint (`ESC[2m`): reduce the foreground intensity.
         const DIM = 1 << 4;
     }
+}
+
+/// The cursor shape a running program has requested (via `DECSCUSR`), reported by
+/// [`Terminal::cursor_shape`]. Modal editors set it per mode, which the status line maps to an
+/// editor-mode label (design §10.4).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CursorShape {
+    /// A full-cell block (editors: normal mode; also the default at a shell prompt).
+    Block,
+    /// A thin vertical bar (editors: insert mode).
+    Bar,
+    /// A thin underline (editors: replace mode).
+    Underline,
+    /// An invisible cursor.
+    Hidden,
 }
 
 /// How the shell ended, reported once the child process has exited.
@@ -324,6 +339,24 @@ impl Terminal {
     pub fn cursor(&self) -> (usize, usize) {
         let term = self.term.lock().expect("terminal mutex poisoned");
         grid_cursor(&term)
+    }
+
+    /// The cursor shape the running program has set (via `DECSCUSR`). Modal editors change it
+    /// per mode - block in normal, bar in insert, underline in replace - so the status line can
+    /// report the editor mode (design §10.4) from a real terminal signal rather than guessing.
+    ///
+    /// # Panics
+    /// Panics if the terminal mutex is poisoned.
+    #[must_use]
+    pub fn cursor_shape(&self) -> CursorShape {
+        let term = self.term.lock().expect("terminal mutex poisoned");
+        match term.cursor_style().shape {
+            VteCursorShape::Beam => CursorShape::Bar,
+            VteCursorShape::Underline => CursorShape::Underline,
+            VteCursorShape::Hidden => CursorShape::Hidden,
+            // Block / HollowBlock both read as a block cursor for mode purposes.
+            VteCursorShape::Block | VteCursorShape::HollowBlock => CursorShape::Block,
+        }
     }
 
     /// Scroll the view by `delta` lines (positive scrolls up into history).

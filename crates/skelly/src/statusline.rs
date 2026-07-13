@@ -25,6 +25,10 @@ pub(crate) struct Info<'a> {
     /// The working-tree diff `(added, removed)` lines, shown as `●+A −R` in accent after the
     /// branch (design §10.3); `None` when clean or outside a repo.
     pub(crate) dirty: Option<(u32, u32)>,
+    /// The focused editor's mode (`NORMAL` / `INSERT` / `REPLACE`), shown after the branch
+    /// (design §10.4); `None` unless a modal editor is the focused pane's foreground process.
+    /// Derived from the real cursor shape the editor sets, so it is not a guess.
+    pub(crate) mode: Option<&'a str>,
     pub(crate) shell: &'a str,
     pub(crate) cursor: (usize, usize),
 }
@@ -120,6 +124,14 @@ pub(crate) fn paint(
             x += w + gap;
         }
     }
+    if let Some(mode) = info.mode {
+        // The editor mode (design §10.4), right after the branch, in a neutral segment color.
+        let w = measure.width(mode, FontRole::Mono, None);
+        if x + w <= left_limit {
+            labels.push(label(mode.to_owned(), x, theme.fg_secondary));
+            x += w + gap;
+        }
+    }
     if let Some((added, removed)) = info.dirty {
         // The dirty indicator `●+A −R` (design §10.3), the whole segment in accent.
         let seg = format!("\u{25cf}+{added} \u{2212}{removed}");
@@ -174,6 +186,7 @@ mod tests {
             cwd: "~/skelly",
             branch: Some("main"),
             dirty: Some((2, 1)),
+            mode: None,
             shell: "zsh",
             cursor: (2, 3),
         };
@@ -204,6 +217,7 @@ mod tests {
             cwd: "~/tmp",
             branch: None,
             dirty: None,
+            mode: None,
             shell: "bash",
             cursor: (0, 0),
         };
@@ -212,6 +226,30 @@ mod tests {
             labels.iter().all(|l| !l.text.contains('\u{2442}')),
             "no branch glyph"
         );
+    }
+
+    #[test]
+    fn editor_mode_renders_after_the_branch_when_set() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
+        let info = Info {
+            cwd: "~/skelly",
+            branch: Some("main"),
+            dirty: None,
+            mode: Some("INSERT"),
+            shell: "zsh",
+            cursor: (0, 0),
+        };
+        let (_, labels) = paint(&info, rect(), 2.0, &theme, &mut m);
+        // The mode segment is present, in the neutral fg.secondary color, positioned after the
+        // branch (design §10.4).
+        let mode = labels
+            .iter()
+            .find(|l| l.text == "INSERT")
+            .expect("mode segment present");
+        assert_eq!(mode.color, theme.fg_secondary);
+        let branch = labels.iter().find(|l| l.text.contains('\u{2442}')).unwrap();
+        assert!(mode.x > branch.x, "mode follows the branch");
     }
 
     #[test]
@@ -224,6 +262,7 @@ mod tests {
             cwd: "~/work/skelly/crates/skelly-render",
             branch: Some("feat/m5-hardening"),
             dirty: None,
+            mode: None,
             shell: "zsh",
             cursor: (12, 340),
         };

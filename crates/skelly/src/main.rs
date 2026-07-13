@@ -579,6 +579,10 @@ impl App {
     /// scrim + centered "shell exited" message for each pane whose shell ended, and - on a
     /// pristine single-pane tab - the empty-state hint chips beneath the vertebra mark. Empty
     /// while every pane is a live shell (the common case), so it costs nothing then.
+    #[allow(
+        clippy::type_complexity,
+        reason = "a local per-pane (rect, exit, cursor, editor-mode) collection"
+    )]
     fn pane_overlay_paint(
         &mut self,
     ) -> (Vec<PxRect>, Vec<skelly_render::ChromeQuad>, Vec<ProseLabel>) {
@@ -586,9 +590,19 @@ impl App {
         let viewport = self.viewport_rect();
         let ws = &self.tabs[self.active];
         let empty_state = ws.is_empty_state();
-        // Collect the pane rects + exit statuses + cursor position first, so the tab borrow ends
-        // before the measurer's mutable borrow.
-        let panes: Vec<(PxRect, Option<ExitStatus>, (usize, usize))> = ws
+        let focused_id = ws.tree.focused();
+        // The editor mode for the focused pane (design §10.4), when its foreground process is a
+        // modal editor. `job_name` is the cached focused-pane process (refreshed each redraw);
+        // the shape is the real DECSCUSR signal the editor sets, so this is not a guess.
+        let job = ws.job_name.as_deref();
+        // Collect the pane rects + exit statuses + cursor position/shape + focus first, so the
+        // tab borrow ends before the measurer's mutable borrow.
+        let panes: Vec<(
+            PxRect,
+            Option<ExitStatus>,
+            (usize, usize),
+            Option<&'static str>,
+        )> = ws
             .tree
             .layout(viewport)
             .into_iter()
@@ -600,14 +614,18 @@ impl App {
                     w: rect.w,
                     h: rect.h,
                 };
-                Some((px, term.exit_status(), term.cursor()))
+                // Only the focused pane surfaces an editor mode (its job is the tracked one).
+                let mode = (id == focused_id)
+                    .then(|| editor_mode(job, term.cursor_shape()))
+                    .flatten();
+                Some((px, term.exit_status(), term.cursor(), mode))
             })
             .collect();
 
         let mut scrims = Vec::new();
         let mut quads = Vec::new();
         let mut labels = Vec::new();
-        for (rect, status, cursor) in &panes {
+        for (rect, status, cursor, mode) in &panes {
             if let Some(status) = status {
                 scrims.push(*rect);
                 labels.extend(deadpane::message_labels(
@@ -625,6 +643,7 @@ impl App {
                         cwd: &self.status_cwd,
                         branch: self.status_branch.as_deref(),
                         dirty: self.status_dirty,
+                        mode: *mode,
                         shell: &self.status_shell,
                         cursor: *cursor,
                     },
@@ -639,7 +658,7 @@ impl App {
         }
         // The empty state (a pristine single-pane tab, no exited panes): the hint chips.
         if empty_state && scrims.is_empty() {
-            if let Some((rect, None, _)) = panes.first() {
+            if let Some((rect, None, _, _)) = panes.first() {
                 if let Some(logo) = emptystate::logo_bounds(*rect, scale) {
                     let (q, l) =
                         emptystate::chips_paint(logo, *rect, scale, &self.theme, &mut self.measure);
@@ -2571,6 +2590,29 @@ fn shell_name() -> String {
         .unwrap_or_else(|| "sh".to_owned())
 }
 
+/// Modal editors whose terminal cursor shape signals their edit mode (block = normal, bar =
+/// insert, underline = replace). Gating the status-line mode on a known modal editor (design
+/// §10.4) avoids showing a bogus "mode" at an ordinary shell prompt.
+const MODAL_EDITORS: &[&str] = &[
+    "nvim", "vim", "vi", "nvi", "hx", "helix", "kak", "vis", "amp",
+];
+
+/// The editor mode to show in the focused pane's status line (design §10.4): `None` unless the
+/// foreground process `job` is a known modal editor, else its mode derived from the real cursor
+/// `shape` the editor set. This reports the editor's actual mode (from `DECSCUSR`), not a guess -
+/// the filetype segment the guide also shows stays out (it needs editor RPC Skelly lacks).
+fn editor_mode(job: Option<&str>, shape: skelly_term::CursorShape) -> Option<&'static str> {
+    let name = job?;
+    if !MODAL_EDITORS.iter().any(|e| name.eq_ignore_ascii_case(e)) {
+        return None;
+    }
+    Some(match shape {
+        skelly_term::CursorShape::Bar => "INSERT",
+        skelly_term::CursorShape::Underline => "REPLACE",
+        skelly_term::CursorShape::Block | skelly_term::CursorShape::Hidden => "NORMAL",
+    })
+}
+
 /// The command name of process `pid`, for the "process running on close" confirm. Shells
 /// `ps -o comm= -p <pid>` (portable across macOS and Linux) and returns just the basename;
 /// `None` if the lookup fails. Best-effort - the caller falls back to a generic label.
@@ -3244,13 +3286,14 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cycle_index, dim, index_after_close, order, overlay_panel_top, overlay_rise_offset,
-        pane_action, pane_dims, panic_message, pointer_cell_in, process_name, resolve_cell,
-        selection_cells, selection_text, tab_action, PaneAction, Selection, TabAction,
+        cycle_index, dim, editor_mode, index_after_close, order, overlay_panel_top,
+        overlay_rise_offset, pane_action, pane_dims, panic_message, pointer_cell_in, process_name,
+        resolve_cell, selection_cells, selection_text, tab_action, PaneAction, Selection,
+        TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
-    use skelly_term::{CellAttrs, CellColor, TermCell};
+    use skelly_term::{CellAttrs, CellColor, CursorShape, TermCell};
     use winit::keyboard::{KeyCode, ModifiersState};
 
     fn plain(c: char) -> TermCell {
@@ -3332,6 +3375,25 @@ mod tests {
         let name = process_name(std::process::id()).expect("own process has a name");
         assert!(!name.is_empty());
         assert!(!name.contains('/'), "name is the basename, not a full path");
+    }
+
+    #[test]
+    fn editor_mode_maps_cursor_shape_only_for_modal_editors() {
+        // A modal editor's cursor shape becomes its mode (a real DECSCUSR signal, not a guess).
+        assert_eq!(
+            editor_mode(Some("nvim"), CursorShape::Block),
+            Some("NORMAL")
+        );
+        assert_eq!(editor_mode(Some("nvim"), CursorShape::Bar), Some("INSERT"));
+        assert_eq!(
+            editor_mode(Some("vim"), CursorShape::Underline),
+            Some("REPLACE")
+        );
+        // A non-editor foreground process (or none) shows no mode - a shell prompt's block
+        // cursor must not read as "NORMAL".
+        assert_eq!(editor_mode(Some("zsh"), CursorShape::Block), None);
+        assert_eq!(editor_mode(Some("cargo"), CursorShape::Bar), None);
+        assert_eq!(editor_mode(None, CursorShape::Bar), None);
     }
 
     #[test]

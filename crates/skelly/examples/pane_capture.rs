@@ -161,11 +161,14 @@ fn main() {
     // `pane_overlay_paint`: the same process cwd/branch/shell, each pane's own cursor.
     let mut measure = TextMeasure::new(sc);
     let mut pane_overlay = PaneOverlay::default();
-    for pane in &panes {
+    for (i, pane) in panes.iter().enumerate() {
+        // The left ("editor") pane shows an editor mode (design §10.4); the others don't.
+        let mode = (i == 0).then_some("NORMAL");
         let (q, l) = status_line(
             pane.rect,
             "~/skelly",
             Some("main"),
+            mode,
             "zsh",
             pane.cursor,
             sc,
@@ -214,6 +217,7 @@ fn status_line(
     rect: PxRect,
     cwd: &str,
     branch: Option<&str>,
+    mode: Option<&str>,
     shell: &str,
     cursor: (usize, usize),
     scale: f32,
@@ -282,6 +286,14 @@ fn status_line(
         let w = m.width(&seg, FontRole::Mono, None);
         if x + w <= left_limit {
             labels.push(label(seg, x, theme.diff_hunk));
+            x += w + gap;
+        }
+    }
+    // The editor mode (design §10.4), after the branch - mirrors the binary's `mode` segment.
+    if let Some(mode) = mode {
+        let w = m.width(mode, FontRole::Mono, None);
+        if x + w <= left_limit {
+            labels.push(label(mode.to_owned(), x, theme.fg_secondary));
             x += w + gap;
         }
     }
