@@ -12,10 +12,8 @@ cmd=$(json_field tool_input command)
 
 block() { echo "BLOCKED by guard-irreversible hook: $1" >&2; exit 2; }
 
-# Release tags / pushing tags — often triggers a BILLED release build (e.g. EAS).
-# Opt-in per repo: delete this check where release tags are routine.
-echo "$cmd" | grep -qiE 'git[[:space:]]+tag([[:space:]].*)?v[0-9]|git[[:space:]]+push([[:space:]].*)?(--tags|v[0-9])' \
-  && block "pushing a v* tag can trigger a billed release build — get an explicit release request first."
+# (The v* release-tag check was removed: this repo is public, so its release build
+# runs on free GitHub Actions minutes - the billed-build guard applies elsewhere.)
 
 # Force push (rewrites history).
 echo "$cmd" | grep -qiE 'git[[:space:]]+push([[:space:]].*)?(--force([[:space:]]|=|$)|-f([[:space:]]|$)|--force-with-lease)' \
