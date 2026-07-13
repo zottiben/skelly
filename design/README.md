@@ -55,15 +55,21 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
-- 2026-07-13 - **Status-line editor MODE built from the real cursor signal (§10.4).** The guide's
-  §10.4 status line shows an editor mode (NORMAL/INSERT). Modal editors set the terminal cursor
-  shape per mode via DECSCUSR (block=normal, bar=insert, underline=replace), which alacritty already
-  parses - so `Terminal::cursor_shape()` + `editor_mode(job, shape)` report the editor's ACTUAL mode
-  (not a guess), gated on the focused pane's foreground process being a known modal editor (so a
-  shell's block cursor never reads as "NORMAL"). The companion `rust` FILETYPE segment stays OUT: it
-  needs editor RPC (an nvim plugin/channel) Skelly doesn't have; inventing one would be fabrication
-  (Hard rule 5). This is the honest capability boundary - Skelly shows every status-line segment it
-  can source from real signals (cwd, branch, dirty, mode, shell, Ln/Col) and never a fabricated one.
+- 2026-07-13 - **§10.4 status line COMPLETE - editor MODE + FILETYPE, both from real signals.**
+  The guide's §10.4 status line is `cwd · ⑂ branch · MODE · filetype · ●+A −R · shell … Ln, Col`;
+  Skelly now shows every segment, each from a real signal (never fabricated):
+  - **MODE** (NORMAL/INSERT/REPLACE): modal editors set the terminal cursor shape per mode via
+    `DECSCUSR` (block/bar/underline), which alacritty parses - `Terminal::cursor_shape()` +
+    `editor_mode(job, shape)`, gated on a known modal-editor foreground process (so a shell's block
+    cursor never reads as "NORMAL").
+  - **FILETYPE** (rust, python, …): editors name the open file in the OS window title (`OSC 0/2`,
+    e.g. `main.rs (…) - NVIM`), which Skelly captured by replacing `VoidListener` with a
+    `TitleListener` (`Terminal::title()`); `editor_filetype(job, title)` parses the title for a
+    `name.ext` with a known code extension - the editor's ACTUAL file, gated on a modal editor, so
+    an unrelated title never shows a bogus filetype. (Config-dependent: the editor must set a title
+    with the filename; absent otherwise - honest, not faked.)
+  This settles the earlier "filetype needs editor RPC" note: the title is a real, sufficient signal
+  for the common case, so no fabrication and no RPC dependency.
 - 2026-07-13 - **First-run onboarding (§10.1) BUILT** (was: deferred as a schema+flow slice).
   Shown once on a fresh install (no config file). New `[shell] program` config key (empty = login
   shell) backs the shell picker 1:1 (Hard rule 1); `skelly-term::spawn_shell` honors it;
