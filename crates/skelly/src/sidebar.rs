@@ -16,12 +16,18 @@
 //! (§08 #7 - the ⚙ settings / ◐ theme / ⟲ timeline / ⑂ git toggles).
 
 use skelly_config::SidebarMode;
-use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
+use skelly_render::{
+    logo_chrome_quads, ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme,
+};
 
 /// Layout constants in **logical** px (multiplied by the DPI scale when placed). Tuned to
 /// the guide's §08 sidebar: a compact group header, comfortable 13px `label` tab rows, and
 /// a matching "+ New tab" action.
 const PAD_TOP: f32 = 10.0;
+/// Left inset (logical px) of the brand lockup in the title strip - clears the traffic lights.
+const LOGO_INSET: f32 = 84.0;
+/// Gap between the vertebra mark and the "skelly" wordmark.
+const LOGO_GAP: f32 = 8.0;
 /// Workspace-switcher chips (design §08 #2): 26px rounded tiles, `gap:7px`, inset `13px`.
 const CHIP_SIZE: f32 = 26.0;
 const CHIP_GAP: f32 = 7.0;
@@ -522,6 +528,27 @@ pub(crate) fn build(
 ) -> Paint {
     let mut quads = vec![ChromeQuad::fill(panel, theme.bg_sidebar)];
     let mut labels = Vec::new();
+
+    // The brand lockup (design §02): the vertebra mark + "skelly" wordmark, seated in the title
+    // strip to the right of the macOS traffic lights. Full panel only, and only where a strip is
+    // reserved (macOS) - the slim rail and non-macOS builds have no room for it.
+    if !view.rail && view.top_inset > 1.0 {
+        let strip_h = view.top_inset * scale;
+        let mark = (view.top_inset - 16.0).clamp(14.0, 22.0) * scale;
+        let mark_x = panel.x + LOGO_INSET * scale;
+        let mark_y = panel.y + (strip_h - mark) * 0.5;
+        quads.extend(logo_chrome_quads(mark_x, mark_y, mark, theme, 1.0));
+        let line = measure.line_height(FontRole::Mono);
+        labels.push(ProseLabel {
+            text: "skelly".to_owned(),
+            x: mark_x + mark + LOGO_GAP * scale,
+            y: panel.y + (strip_h - line) * 0.5,
+            role: FontRole::Mono,
+            color: theme.fg_primary,
+            weight: None,
+            max_w: f32::MAX,
+        });
+    }
 
     // The workspace chips sit below the control strip; the tab flow starts below them.
     let chips_block = chips_block_h(view);
