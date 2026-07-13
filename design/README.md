@@ -55,6 +55,25 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Accent tints composite in sRGB space (§03 `accent.subtle`).** The guide's CSS
+  `rgba()` tints (selected-row / active-chip / active-tab / diff washes) composite in **sRGB
+  (gamma)** space, but the GPU alpha-blends chrome quads in **linear** space, which over a dark
+  surface read noticeably brighter/more saturated than the guide. Decision: chrome tints on a
+  known solid background pre-composite on the CPU (`Srgb::over` / `Theme::accent_subtle_on`,
+  §03 alpha 0.14 dark / 0.12 light) and fill **opaque**, exactly matching the guide. Applied to
+  the workspace chips, active-tab pill, palette selected-row, settings nav/control rows, timeline
+  selected row, and the git-dock selection + diff-line washes (all over their `bg.base`/`bg.sidebar`/
+  `bg.elevated` backing). `Rgba::to_srgb` recovers `bg.base`'s hex as a composite base. Terminal
+  selection keeps GPU alpha (dynamic per-cell background).
+- 2026-07-13 - **Pinned-tab grid (§08 #4) + `⇧⌘P`.** Tabs split into the unpinned list + a pinned
+  3-up capsule grid (glyph = title's first letter); pin/unpin via the palette "Pin / unpin tab"
+  command and `⇧⌘P` (the guide's binding). Grid inset corrected to the sidebar's 13px content
+  inset, `gap:6px`, `radius:8px` per the guide markup.
+- 2026-07-13 - **Palette footer + empty-state chips.** Palette footer uses key glyphs
+  (`↕ navigate  ⏎ run`) with `esc close` right-anchored (§10.8); the "run in new pane" hint is
+  omitted (unimplemented, not fabricated). Empty-state hint chips match §10.2 verbatim -
+  `⌘K commands · ⌥| split right · ⇧⌘G git diff · ⌘, settings` as capsule pills that flex-wrap
+  (was: palette / new tab / split as rounded rects).
 - 2026-07-13 - **Tab prompt glyph + running dot (§09/§10.3).** Each sidebar tab now shows a `❯`
   shell-prompt glyph before its label, or a green `●` running dot when the tab has a live
   foreground job (real - from `Terminal::foreground_job_pid`, one flag per tab via the new
