@@ -6,10 +6,10 @@
 //! The binary owns opening it, routing keys, and executing the chosen command.
 //!
 //! A leading mode prefix narrows the results (design §10.8): `>` restricts to commands, `?`
-//! shows the keybinding help, `/` is file search (deferred), and no prefix is the universal
-//! mode that also surfaces the open tabs (themes are already commands). The built-in
-//! [`COMMANDS`] set is the seed of the keybinding registry; merging user `[keys]` overrides +
-//! file search + scrollback search are later slices.
+//! shows the keybinding help, `/` fuzzy-finds working-directory files (selecting one types its
+//! path into the focused pane), and no prefix is the universal mode that also surfaces the open
+//! tabs (themes are already commands). The built-in [`COMMANDS`] set is the seed of the
+//! keybinding registry; merging user `[keys]` overrides is a later slice.
 
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
 
@@ -282,7 +282,7 @@ enum Mode {
     Commands,
     /// `?`: the keybinding help (the command list as a reference).
     Help,
-    /// `/`: file search - deferred (shows an empty hint).
+    /// `/`: fuzzy file search over the working directory.
     Files,
 }
 
@@ -303,6 +303,8 @@ enum Entry {
     Command(usize),
     /// Switch to the open tab at this 0-based index.
     Tab(usize),
+    /// A file in the working directory (its index into the snapshot), the `/` files mode.
+    File(usize),
 }
 
 /// Palette state: whether it is open, the query, the selected match, and a snapshot of the
@@ -313,6 +315,8 @@ pub(crate) struct Palette {
     query: String,
     selected: usize,
     tabs: Vec<String>,
+    /// Working-directory files, snapshotted at open, for the `/` files mode (design §10.8).
+    files: Vec<String>,
 }
 
 impl Palette {
@@ -323,16 +327,18 @@ impl Palette {
             query: String::new(),
             selected: 0,
             tabs: Vec::new(),
+            files: Vec::new(),
         }
     }
 
     /// Open the palette fresh (empty query, first match selected), snapshotting the open tab
-    /// titles so they can be surfaced as entries.
-    pub(crate) fn open(&mut self, tabs: Vec<String>) {
+    /// titles + the working-directory `files` so both can be surfaced as entries.
+    pub(crate) fn open(&mut self, tabs: Vec<String>, files: Vec<String>) {
         self.open = true;
         self.query.clear();
         self.selected = 0;
         self.tabs = tabs;
+        self.files = files;
     }
 
     /// The active mode + the search term (the query minus any leading mode prefix).
@@ -358,7 +364,24 @@ impl Palette {
     fn rows(&self) -> Vec<Row> {
         let (mode, term) = self.mode_and_term();
         if mode == Mode::Files {
-            return Vec::new();
+            // Fuzzy-match the working-directory files; an empty term lists them all (capped by
+            // the snapshot). Selecting one types its path into the focused pane.
+            return self
+                .files
+                .iter()
+                .enumerate()
+                .filter_map(|(index, path)| {
+                    fuzzy_match(term, path).map(|(_, positions)| Row {
+                        entry: Entry::File(index),
+                        category: "Files",
+                        icon: "\u{25b8}", // ▸
+                        label: path.clone(),
+                        hint: "",
+                        positions,
+                    })
+                })
+                .take(MAX_FILE_ROWS)
+                .collect();
         }
         let mut rows: Vec<Row> = COMMANDS
             .iter()
@@ -419,10 +442,21 @@ impl Palette {
 
     /// The action of the currently selected row, if any (run a command, or switch to a tab).
     pub(crate) fn selected_action(&self) -> Option<Action> {
-        self.rows().get(self.selected).map(|row| match row.entry {
-            Entry::Command(index) => COMMANDS[index].action,
-            Entry::Tab(index) => Action::GotoTab(index),
-        })
+        match self.rows().get(self.selected)?.entry {
+            Entry::Command(index) => Some(COMMANDS[index].action),
+            Entry::Tab(index) => Some(Action::GotoTab(index)),
+            // A file entry is handled by the binary via `selected_file` (it types the path).
+            Entry::File(_) => None,
+        }
+    }
+
+    /// The selected row's file path, if it is a `/` files-mode entry (design §10.8). The binary
+    /// types it into the focused pane so the user can complete a command with it.
+    pub(crate) fn selected_file(&self) -> Option<String> {
+        match self.rows().get(self.selected)?.entry {
+            Entry::File(index) => self.files.get(index).cloned(),
+            _ => None,
+        }
     }
 
     /// The palette's natural panel size in **physical** px (including the card padding),
@@ -492,11 +526,11 @@ impl Palette {
         self.push_input(&mut quads, &mut labels, prompt_x, y, scale, theme, measure);
         y += INPUT_H * scale;
 
-        // Result count (or the deferred-file-search hint).
+        // Result count.
         let (mode, _) = self.mode_and_term();
         let rows = self.rows();
-        let count = if mode == Mode::Files {
-            "file search is coming soon".to_owned()
+        let count = if mode == Mode::Files && self.files.is_empty() {
+            "no files here".to_owned()
         } else if rows.len() == 1 {
             "1 result".to_owned()
         } else {
@@ -693,6 +727,8 @@ const FOOTER_CLOSE: &str = "esc close";
 const FOOTER_GAP: f32 = 24.0;
 /// The empty-input placeholder.
 const PLACEHOLDER: &str = "search commands";
+/// The most file rows the `/` files mode shows (keeps the list snappy for a big tree).
+const MAX_FILE_ROWS: usize = 200;
 
 impl Default for Palette {
     fn default() -> Self {
@@ -818,9 +854,10 @@ mod tests {
         fn match_actions(&self) -> Vec<Action> {
             self.rows()
                 .iter()
-                .map(|r| match r.entry {
-                    Entry::Command(i) => COMMANDS[i].action,
-                    Entry::Tab(i) => Action::GotoTab(i),
+                .filter_map(|r| match r.entry {
+                    Entry::Command(i) => Some(COMMANDS[i].action),
+                    Entry::Tab(i) => Some(Action::GotoTab(i)),
+                    Entry::File(_) => None,
                 })
                 .collect()
         }
@@ -844,7 +881,7 @@ mod tests {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
         let mut p = Palette::new();
-        p.open(Vec::new());
+        p.open(Vec::new(), Vec::new());
         for c in "zm".chars() {
             p.push_char(c);
         }
@@ -871,7 +908,7 @@ mod tests {
     #[test]
     fn query_filters_by_label_substring_case_insensitively() {
         let mut p = Palette::new();
-        p.open(Vec::new());
+        p.open(Vec::new(), Vec::new());
         for c in "zoom".chars() {
             p.push_char(c);
         }
@@ -882,7 +919,7 @@ mod tests {
     #[test]
     fn selection_clamps_within_matches() {
         let mut p = Palette::new();
-        p.open(Vec::new());
+        p.open(Vec::new(), Vec::new());
         p.move_selection(-1); // cannot go below 0
         assert_eq!(p.selected_action(), Some(COMMANDS[0].action));
         p.move_selection(1000); // clamps to the last match
@@ -895,7 +932,7 @@ mod tests {
     #[test]
     fn filtering_resets_selection_and_narrows() {
         let mut p = Palette::new();
-        p.open(Vec::new());
+        p.open(Vec::new(), Vec::new());
         p.move_selection(3);
         for c in "focus".chars() {
             p.push_char(c);
@@ -908,7 +945,7 @@ mod tests {
     #[test]
     fn a_no_match_query_has_no_action() {
         let mut p = Palette::new();
-        p.open(Vec::new());
+        p.open(Vec::new(), Vec::new());
         for c in "zzzz".chars() {
             p.push_char(c);
         }
@@ -919,7 +956,7 @@ mod tests {
     #[test]
     fn fuzzy_matches_a_subsequence_and_records_matched_positions() {
         let mut p = Palette::new();
-        p.open(Vec::new());
+        p.open(Vec::new(), Vec::new());
         for c in "zm".chars() {
             p.push_char(c);
         }
@@ -933,7 +970,7 @@ mod tests {
     #[test]
     fn theme_query_surfaces_both_theme_commands() {
         let mut p = Palette::new();
-        p.open(Vec::new());
+        p.open(Vec::new(), Vec::new());
         for c in "theme".chars() {
             p.push_char(c);
         }
@@ -944,9 +981,36 @@ mod tests {
     }
 
     #[test]
+    fn files_mode_fuzzy_matches_and_selects_a_path() {
+        let mut p = Palette::new();
+        p.open(
+            Vec::new(),
+            vec![
+                "src/main.rs".to_owned(),
+                "src/palette.rs".to_owned(),
+                "README.md".to_owned(),
+            ],
+        );
+        // `/` enters files mode; an empty term lists every file.
+        p.push_char('/');
+        assert_eq!(p.rows().len(), 3, "files mode lists all files");
+        assert!(
+            p.selected_action().is_none(),
+            "a file entry has no command action"
+        );
+        // Narrow to the palette source and select it.
+        for c in "palette".chars() {
+            p.push_char(c);
+        }
+        let rows = p.rows();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(p.selected_file().as_deref(), Some("src/palette.rs"));
+    }
+
+    #[test]
     fn backspace_widens_the_match_set_again() {
         let mut p = Palette::new();
-        p.open(Vec::new());
+        p.open(Vec::new(), Vec::new());
         for c in "zoomx".chars() {
             p.push_char(c);
         }
@@ -958,7 +1022,7 @@ mod tests {
     #[test]
     fn universal_mode_surfaces_open_tabs_and_the_prefix_filters_them_out() {
         let mut p = Palette::new();
-        p.open(vec!["Tab 1".to_owned(), "Tab 2".to_owned()]);
+        p.open(vec!["Tab 1".to_owned(), "Tab 2".to_owned()], Vec::new());
         // No prefix: commands + the two tabs.
         assert_eq!(p.match_actions().len(), COMMANDS.len() + 2);
         // A tab entry runs GotoTab.
@@ -972,7 +1036,7 @@ mod tests {
     #[test]
     fn the_commands_prefix_restricts_to_commands_and_hides_tabs() {
         let mut p = Palette::new();
-        p.open(vec!["Tab 1".to_owned()]);
+        p.open(vec!["Tab 1".to_owned()], Vec::new());
         p.push_char('>'); // commands-only mode
                           // Every match is a command, never a tab.
         assert_eq!(p.match_actions().len(), COMMANDS.len());
@@ -985,7 +1049,7 @@ mod tests {
     #[test]
     fn the_files_prefix_is_deferred_and_yields_nothing() {
         let mut p = Palette::new();
-        p.open(Vec::new());
+        p.open(Vec::new(), Vec::new());
         p.push_char('/');
         assert!(p.match_actions().is_empty());
         assert_eq!(p.selected_action(), None);

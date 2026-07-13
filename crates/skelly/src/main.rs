@@ -1588,6 +1588,16 @@ impl App {
         }
     }
 
+    /// Type `text` into the focused pane's shell (the palette's `/` file-entry insert, §10.8):
+    /// the user picks a file and its path lands at the prompt to complete a command.
+    fn type_into_focused(&mut self, text: &str) {
+        if let Some(term) = self.focused_term() {
+            term.scroll_to_bottom();
+            term.write(text.as_bytes());
+        }
+        self.request_redraw();
+    }
+
     /// Apply a pane-tree operation, then reconcile terminals and request a repaint.
     fn apply_pane_action(&mut self, action: PaneAction) {
         // Closing the only pane closes the whole tab (design edge state "Close last pane":
@@ -2157,10 +2167,15 @@ impl App {
             // so the command's result (which may itself be an overlay) takes over at once.
             Key::Named(NamedKey::Escape) => self.close_palette(),
             Key::Named(NamedKey::Enter) => {
+                // A file entry (files mode) types its path into the focused pane; otherwise run
+                // the selected command / tab action.
+                let file = self.palette.selected_file();
                 let action = self.palette.selected_action();
                 self.palette.close();
                 self.palette_anim = None;
-                if let Some(action) = action {
+                if let Some(path) = file {
+                    self.type_into_focused(&format!("{path} "));
+                } else if let Some(action) = action {
                     self.run_palette_action(event_loop, action);
                 }
             }
@@ -3162,6 +3177,52 @@ fn filetype_for_ext(ext: &str) -> Option<&'static str> {
     })
 }
 
+/// The cap on files the palette's `/` mode gathers (keeps the walk fast on a huge tree).
+const MAX_WALK_FILES: usize = 4000;
+/// The deepest directory level the file walk descends.
+const MAX_WALK_DEPTH: usize = 8;
+
+/// The working-directory files for the palette's `/` files mode (design §10.8): a bounded walk
+/// of the process cwd returning paths relative to it, skipping hidden entries and heavy vendor /
+/// vcs directories. Best-effort - unreadable directories are silently skipped.
+fn gather_files() -> Vec<String> {
+    let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let mut out = Vec::new();
+    walk_files(&root, &root, &mut out, 0);
+    out
+}
+
+fn walk_files(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>, depth: usize) {
+    if out.len() >= MAX_WALK_FILES || depth > MAX_WALK_DEPTH {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if out.len() >= MAX_WALK_FILES {
+            return;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // Skip hidden entries + notoriously large vendor / build / vcs trees.
+        if name.starts_with('.') || matches!(name.as_ref(), "node_modules" | "target" | "vendor") {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let path = entry.path();
+        if file_type.is_dir() {
+            walk_files(root, &path, out, depth + 1);
+        } else if file_type.is_file() {
+            if let Ok(rel) = path.strip_prefix(root) {
+                out.push(rel.to_string_lossy().into_owned());
+            }
+        }
+    }
+}
+
 /// The command name of process `pid`, for the "process running on close" confirm. Shells
 /// `ps -o comm= -p <pid>` (portable across macOS and Linux) and returns just the basename;
 /// `None` if the lookup fails. Best-effort - the caller falls back to a generic label.
@@ -3365,10 +3426,10 @@ impl App {
     /// polls until it settles.
     fn open_palette(&mut self) {
         let from = overlay_offset_logical(self.palette_anim).unwrap_or(OVERLAY_RISE);
-        // Surface the open tabs in the palette (§10.8). Tabs are numbered today; per-tab cwd
-        // titling is a later slice.
-        let tabs = (1..=self.tabs.len()).map(|n| format!("Tab {n}")).collect();
-        self.palette.open(tabs);
+        // Surface the open tabs (by their real titles) + the working-directory files (§10.8).
+        let tabs = self.tab_titles();
+        let files = gather_files();
+        self.palette.open(tabs, files);
         self.palette_anim = Some(OverlayAnim {
             anim: motion::Anim::start(Instant::now(), motion::BASE),
             from,
