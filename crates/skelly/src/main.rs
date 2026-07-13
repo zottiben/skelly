@@ -4618,17 +4618,27 @@ fn selection_text(sel: Selection, cells: &[Vec<TermCell>]) -> String {
 }
 
 /// Translate a key press into the bytes a terminal expects, or `None` if it has no
-/// terminal representation.
+/// terminal representation. Cursor/edit keys carry an xterm modifier parameter so a program
+/// (vim, readline) can distinguish e.g. Shift+Arrow from a bare arrow.
 fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> {
+    let m = xterm_modifier_code(modifiers);
+    let csi_final = |final_byte: u8| Some(csi_cursor(final_byte, m));
+    let csi_tilde = |num: u8| Some(csi_edit(num, m));
     match &event.logical_key {
         Key::Named(NamedKey::Enter) => Some(vec![b'\r']),
         Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
         Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
         Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
-        Key::Named(NamedKey::ArrowUp) => Some(b"\x1b[A".to_vec()),
-        Key::Named(NamedKey::ArrowDown) => Some(b"\x1b[B".to_vec()),
-        Key::Named(NamedKey::ArrowRight) => Some(b"\x1b[C".to_vec()),
-        Key::Named(NamedKey::ArrowLeft) => Some(b"\x1b[D".to_vec()),
+        Key::Named(NamedKey::ArrowUp) => csi_final(b'A'),
+        Key::Named(NamedKey::ArrowDown) => csi_final(b'B'),
+        Key::Named(NamedKey::ArrowRight) => csi_final(b'C'),
+        Key::Named(NamedKey::ArrowLeft) => csi_final(b'D'),
+        Key::Named(NamedKey::Home) => csi_final(b'H'),
+        Key::Named(NamedKey::End) => csi_final(b'F'),
+        Key::Named(NamedKey::PageUp) => csi_tilde(5),
+        Key::Named(NamedKey::PageDown) => csi_tilde(6),
+        Key::Named(NamedKey::Insert) => csi_tilde(2),
+        Key::Named(NamedKey::Delete) => csi_tilde(3),
         // Ctrl + letter -> the corresponding control byte (Ctrl+A = 0x01, etc.).
         Key::Character(ch) if modifiers.control_key() => {
             let upper = ch.chars().next()?.to_ascii_uppercase();
@@ -4639,6 +4649,35 @@ fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> 
             }
         }
         _ => event.text.as_ref().map(|text| text.as_bytes().to_vec()),
+    }
+}
+
+/// The xterm modifier parameter: `1 + Shift + (Alt<<1) + (Ctrl<<2)`. `Super`/`⌘` is an
+/// application modifier (the menu + Skelly's own chords), never encoded into a terminal sequence.
+fn xterm_modifier_code(modifiers: ModifiersState) -> u8 {
+    1 + u8::from(modifiers.shift_key())
+        + (u8::from(modifiers.alt_key()) << 1)
+        + (u8::from(modifiers.control_key()) << 2)
+}
+
+/// A cursor key CSI sequence (`ESC[<final>`). Unmodified uses the short form; a modifier `m > 1`
+/// inserts the `1;<m>` parameters (the xterm convention), so a program can tell Shift+Arrow etc.
+/// from a bare arrow.
+fn csi_cursor(final_byte: u8, m: u8) -> Vec<u8> {
+    if m == 1 {
+        vec![0x1b, b'[', final_byte]
+    } else {
+        format!("\x1b[1;{m}{}", char::from(final_byte)).into_bytes()
+    }
+}
+
+/// An edit key CSI sequence (`ESC[<num>~`, e.g. `PageUp` = 5). Unmodified uses the short form; a
+/// modifier `m > 1` inserts the `<num>;<m>` parameters.
+fn csi_edit(num: u8, m: u8) -> Vec<u8> {
+    if m == 1 {
+        format!("\x1b[{num}~").into_bytes()
+    } else {
+        format!("\x1b[{num};{m}~").into_bytes()
     }
 }
 
@@ -4750,15 +4789,36 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cycle_index, dim, editor_filetype, editor_mode, index_after_close, leader_chord, order,
-        overlay_panel_top, overlay_rise_offset, pane_action, pane_dims, panic_message,
-        parse_leader, pointer_cell_in, process_name, resolve_cell, selection_cells, selection_text,
-        tab_action, PaneAction, Selection, TabAction,
+        csi_cursor, csi_edit, cycle_index, dim, editor_filetype, editor_mode, index_after_close,
+        leader_chord, order, overlay_panel_top, overlay_rise_offset, pane_action, pane_dims,
+        panic_message, parse_leader, pointer_cell_in, process_name, resolve_cell, selection_cells,
+        selection_text, tab_action, xterm_modifier_code, PaneAction, Selection, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
     use skelly_term::{CellAttrs, CellColor, CursorShape, TermCell};
     use winit::keyboard::{KeyCode, ModifiersState};
+
+    #[test]
+    fn modified_keys_encode_xterm_modifier_sequences() {
+        // Bare arrow: the short form; Super is ignored (an app modifier).
+        assert_eq!(xterm_modifier_code(ModifiersState::empty()), 1);
+        assert_eq!(xterm_modifier_code(ModifiersState::SUPER), 1);
+        assert_eq!(csi_cursor(b'A', 1), b"\x1b[A");
+        // Shift+Up -> ESC[1;2A, so vim can distinguish it from a bare up-arrow.
+        assert_eq!(xterm_modifier_code(ModifiersState::SHIFT), 2);
+        assert_eq!(csi_cursor(b'A', 2), b"\x1b[1;2A");
+        // Ctrl (code 5) and Ctrl+Shift (6) on a cursor key.
+        assert_eq!(xterm_modifier_code(ModifiersState::CONTROL), 5);
+        assert_eq!(csi_cursor(b'D', 5), b"\x1b[1;5D");
+        assert_eq!(
+            xterm_modifier_code(ModifiersState::CONTROL | ModifiersState::SHIFT),
+            6
+        );
+        // Edit keys (PageDown = 6) use the `~` form, modified inserts `;<mod>`.
+        assert_eq!(csi_edit(6, 1), b"\x1b[6~");
+        assert_eq!(csi_edit(6, 2), b"\x1b[6;2~");
+    }
 
     fn plain(c: char) -> TermCell {
         TermCell {
