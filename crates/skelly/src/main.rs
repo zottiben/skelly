@@ -23,10 +23,11 @@ mod settings;
 mod sidebar;
 mod statusline;
 mod timeline;
+mod toast;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
 use skelly_config::Config;
@@ -45,6 +46,7 @@ use palette::Palette;
 use settings::Settings;
 use sidebar::Sidebar;
 use timeline::TimelineDock;
+use toast::{Toast, ToastKind};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
@@ -65,6 +67,8 @@ const TITLE_STRIP: f32 = 38.0;
 const RESIZE_STEP: f32 = 0.04;
 /// Logical width (px) of the slim icon rail (`⇧⌘B`), per design §08 ("Icon rail 56px").
 const RAIL_WIDTH: f32 = 56.0;
+/// How long a transient toast stays up before it auto-dismisses (design §12).
+const TOAST_DURATION: Duration = Duration::from_secs(4);
 /// Logical width (px) of the git diff dock - the guide's default (resizable 360-560 is a
 /// later slice, so it is fixed for now).
 const GIT_DOCK_WIDTH: f32 = 420.0;
@@ -365,6 +369,11 @@ struct App {
     /// The open right-click tab action menu (design §08), or `None` when closed. Reuses the
     /// shared overlay card, anchored at the click; captures keys + clicks while up.
     context_menu: Option<ContextMenu>,
+    /// The current transient toast (design §12), or `None`. Non-modal: it auto-dismisses at
+    /// `toast_expires` (the loop wakes at that deadline) and never captures input.
+    toast: Option<Toast>,
+    /// When the current toast disappears (only meaningful while `toast` is `Some`).
+    toast_expires: Instant,
     /// The command palette's open / close animation (design §03 motion), live only while it
     /// plays. While any animation is set the event loop polls + redraws each frame; it clears
     /// itself when done (finalizing the close), returning the loop to its idle `Wait`.
@@ -445,6 +454,8 @@ impl App {
             dragging_tab: None,
             rail_expanded: false,
             context_menu: None,
+            toast: None,
+            toast_expires: Instant::now(),
             palette_anim: None,
             confirm_anim: None,
         }
@@ -964,6 +975,12 @@ impl App {
             .is_some()
             .then(|| self.build_context_menu_frame())
             .flatten();
+        // A transient toast (design §12) reuses the overlay card at the lowest priority.
+        let toast = self
+            .toast
+            .is_some()
+            .then(|| self.build_toast_frame())
+            .flatten();
         let show_overlay = onboarding.is_none() && cheatsheet.is_none();
         let overlay = (show_overlay && self.palette.open).then(|| self.build_palette_frame());
         // The confirm modal reuses the overlay pass; it never coexists with the palette.
@@ -1015,7 +1032,8 @@ impl App {
                         .map(|f| (f.panel, &f.quads, &f.labels))
                 })
                 .or_else(|| overlay.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
-                .or_else(|| confirm.as_ref().map(|f| (f.panel, &f.quads, &f.labels)));
+                .or_else(|| confirm.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
+                .or_else(|| toast.as_ref().map(|f| (f.panel, &f.quads, &f.labels)));
             match overlay_frame {
                 Some((panel, quads, labels)) => renderer.set_overlay(Some(&OverlayView {
                     panel,
@@ -1776,6 +1794,11 @@ impl App {
             return;
         }
         let cap = usize::from(self.config.panes.max).min(skelly_pane::MAX_PANES);
+        // A split at the pane cap no-ops; surface why with a toast (design §12 flow 1).
+        if matches!(action, PaneAction::Split(_)) && self.active_tab().tree.count() >= cap {
+            self.show_toast(format!("Pane limit reached ({cap} max)"), ToastKind::Info);
+            return;
+        }
         let ws = self.active_tab_mut();
         let changed = match action {
             PaneAction::Split(dir) => ws.tree.count() < cap && ws.tree.split(dir).is_some(),
@@ -2154,6 +2177,29 @@ impl App {
         if self.context_menu.take().is_some() {
             self.request_redraw();
         }
+    }
+
+    /// Show a transient toast (design §12) for `TOAST_DURATION`; the event loop wakes at the
+    /// deadline to dismiss it. A new toast replaces any current one.
+    fn show_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
+        self.toast = Some(Toast::new(message, kind));
+        self.toast_expires = Instant::now() + TOAST_DURATION;
+        self.request_redraw();
+    }
+
+    /// Lay out the current toast (design §12) as a bottom-anchored overlay card, or `None`.
+    fn build_toast_frame(&mut self) -> Option<OnboardingFrame> {
+        let scale = scale32(self.scale);
+        let surface = (dim_f32(self.size.0), dim_f32(self.size.1));
+        let toast = self.toast.as_ref()?;
+        let size = toast.natural_size(scale, &mut self.measure);
+        let panel = toast::place(size, surface, scale);
+        let (quads, labels) = toast.build(panel, scale, &self.theme, &mut self.measure);
+        Some(OnboardingFrame {
+            panel,
+            quads,
+            labels,
+        })
     }
 
     /// The entry index under the pointer in the open menu, if any (shared placed panel).
@@ -2837,6 +2883,11 @@ impl App {
                     format!("{sha} - {branch}"),
                     (!sha.is_empty()).then(|| sha.clone()),
                 );
+                // A transient success toast confirms the commit (design §12 flow 3: "a toast
+                // shows the short SHA"); the git dock's inline hint keeps the ⌘U Undo affordance.
+                if !sha.is_empty() {
+                    self.show_toast(format!("Committed {sha}"), ToastKind::Success);
+                }
                 self.git_dock.set_committed(sha);
                 self.reload_git_status();
             }
@@ -3918,12 +3969,20 @@ impl ApplicationHandler<Wakeup> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // While any animation is live, poll and repaint each frame so it advances; otherwise
-        // idle in `Wait` until the next real event (shell output, input, resize) - a terminal
-        // stays silent when nothing is moving.
-        if self.animating(Instant::now()) {
+        let now = Instant::now();
+        // Dismiss an expired toast (design §12) and repaint without it.
+        if self.toast.is_some() && now >= self.toast_expires {
+            self.toast = None;
+            self.request_redraw();
+        }
+        // While any animation is live, poll and repaint each frame so it advances; otherwise idle
+        // in `Wait` until the next real event (shell output, input, resize) - or, when a toast is
+        // up, sleep only until its deadline so the loop wakes to dismiss it.
+        if self.animating(now) {
             event_loop.set_control_flow(ControlFlow::Poll);
             self.request_redraw();
+        } else if self.toast.is_some() {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(self.toast_expires));
         } else {
             event_loop.set_control_flow(ControlFlow::Wait);
         }

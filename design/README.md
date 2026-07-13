@@ -68,6 +68,15 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Transient toasts (§09 primitive / §12 flows).** The guide's toast primitive (a
+  bottom-anchored `bg.elevated` card - status dot + message) is built and auto-dismisses after
+  4s (the loop sleeps to the deadline via `ControlFlow::WaitUntil`, so it costs nothing idle).
+  Two triggers wired: (1) **pane cap** - a split at the 8-pane limit was a *silent* no-op; it now
+  shows "Pane limit reached (8 max)" (design §12 flow 1). (2) **commit success** - an accent/green
+  `Success` toast "Committed <sha>" (design §12 flow 3), complementing the git dock's existing
+  inline `⌘U` Undo affordance (soft reset), which stays the Undo entry point. Non-modal: the toast
+  reuses the overlay card at the lowest priority and never captures input. An action-bearing toast
+  (a clickable Undo on the card itself) is a later addition; today Undo lives on the dock.
 - 2026-07-13 - **Right-click tab action menu (§08).** The guide's "Right-click any tab for the
   full action menu" is built: right-clicking a sidebar tab focuses it and opens an anchored menu
   (reusing the shared overlay card - `bg.elevated` + shadow + `border.strong` ring), with
