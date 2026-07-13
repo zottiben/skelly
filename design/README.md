@@ -55,15 +55,15 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
-- 2026-07-13 - **First-run onboarding (§10.1) deferred - needs a schema + flow, not a visual
-  tweak.** The modal is a real feature slice, not a paint job: (1) it needs first-run detection
-  (config-file absence via `Config::default_path().exists()`), (2) its SHELL picker (zsh/bash/fish)
-  has **no config key today** - `[appearance]` has `theme` but there is no `[terminal] shell`, and
-  Hard rule 1 requires every control to map 1:1 to a config key, so this needs a new schema key +
-  wiring `skelly-term`'s spawn to honor it, and (3) the guide's THEME card shows `kana / + 8 presets`
-  which Skelly does not have - build it with only the two real Ossein themes (don't fabricate, Hard
-  rule 5). Live theme preview is free (`apply_theme` already exists). Scope it as its own slice with
-  the schema question settled first; don't half-build it into the visual pass.
+- 2026-07-13 - **First-run onboarding (§10.1) BUILT** (was: deferred as a schema+flow slice).
+  Shown once on a fresh install (no config file). New `[shell] program` config key (empty = login
+  shell) backs the shell picker 1:1 (Hard rule 1); `skelly-term::spawn_shell` honors it;
+  `Config::is_first_run()` detects the fresh install. New `ChromeQuad::diamond` + `logo_chrome_quads`
+  let the overlay path draw the vertebra mark. The theme picker shows only the two real Ossein
+  themes - the guide's third `kana / + 8 presets` card is omitted, not fabricated (Hard rule 5).
+  Skip = defaults, Start = apply picks; both write config + respawn the first pane under the chosen
+  shell; theme selection previews live via `apply_theme`. Modal bg uses `bg.elevated` (the shared
+  overlay-card surface) rather than the mockup's one-off `#232338`.
 - 2026-07-13 - **Accent tints composite in sRGB space (§03 `accent.subtle`).** The guide's CSS
   `rgba()` tints (selected-row / active-chip / active-tab / diff washes) composite in **sRGB
   (gamma)** space, but the GPU alpha-blends chrome quads in **linear** space, which over a dark
