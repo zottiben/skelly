@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Info.plist for Skelly.app. `__VERSION__` is substituted by bundle.sh with the
+     release version (e.g. 0.1.0). Kept deliberately small - a native Rust/winit app
+     needs only the bundle identity, icon, versions, and the high-DPI + category hints. -->
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key>
+  <string>Skelly</string>
+  <key>CFBundleDisplayName</key>
+  <string>Skelly</string>
+  <key>CFBundleExecutable</key>
+  <string>skelly</string>
+  <key>CFBundleIdentifier</key>
+  <string>me.benzotti.skelly</string>
+  <key>CFBundleIconFile</key>
+  <string>skelly</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>__VERSION__</string>
+  <key>CFBundleVersion</key>
+  <string>__VERSION__</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>11.0</string>
+  <key>LSApplicationCategoryType</key>
+  <string>public.app-category.developer-tools</string>
+  <key>NSHighResolutionCapable</key>
+  <true/>
+  <key>NSSupportsAutomaticGraphicsSwitching</key>
+  <true/>
+  <key>NSHumanReadableCopyright</key>
+  <string>Skelly is MIT OR Apache-2.0 licensed.</string>
+</dict>
+</plist>

@@ -298,7 +298,13 @@ follow-ups, finished opportunistically.
     leak). criterion is lean (no plotters/rayon); soft budgets are documented in each bench
     (a CI regression gate is a follow-up). (Surfaced a future optimization: the busy-grid
     `grid_quads` spends ~60us mostly in per-cell sRGB->linear conversion.)
-  - [ ] Packaging (`cargo-dist` + `cargo-release`) and the first tagged release.
+  - [x] Packaging + distribution. A curl installer served from GitHub Pages
+    (`curl -fsSL https://zottiben.github.io/skelly/install.sh | sh`) and a
+    tag-triggered release workflow (`.github/workflows/release.yml`) that builds a
+    universal macOS `Skelly.app` (ad-hoc signed by default; Developer ID +
+    notarization wired behind repo secrets) plus Linux `x86_64`/`aarch64` binaries,
+    with SHA-256 `checksums.txt`. The `.app` bundle + icon are built from
+    `packaging/`. First tagged release: `v0.1.0`.
 
 ## Open product decisions
 

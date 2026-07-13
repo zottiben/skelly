@@ -1,0 +1,45 @@
+name: Pages
+
+# Publishes the install script and a small landing page to GitHub Pages at
+# https://zottiben.github.io/skelly/ so it can be curl'd from a clean URL:
+#   curl -fsSL https://zottiben.github.io/skelly/install.sh | sh
+on:
+  push:
+    branches: [main]
+    paths:
+      - "install.sh"
+      - "docs/**"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp install.sh _site/
+          cp docs/index.html _site/index.html
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4

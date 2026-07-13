@@ -5,10 +5,34 @@ design, for vim / neovim / LazyVim development: multi-pane splits, per-repo git
 diff, and a rewindable session timeline. Ghostty-grade minimalism with a Zen-style
 tab sidebar. Targets macOS and Linux.
 
-> **Status: greenfield, design-driven.** The M0 foundation is in place (workspace,
-> quality gates, CI, docs) and the configuration layer is implemented. The GPU
-> window, PTY, and cell renderer land with the M1 walking skeleton. See
+> **Status: design-driven, delivered in milestones.** M0-M4 are complete (foundation,
+> walking skeleton, core terminal, the Skelly shell UX, and the signature git diff
+> dock + session timeline). M5 (hardening & release) is in progress. See
 > [`ROADMAP.md`](ROADMAP.md).
+
+## Install
+
+**macOS & Linux:**
+
+```sh
+curl -fsSL https://zottiben.github.io/skelly/install.sh | sh
+```
+
+On macOS this installs a universal (Apple Silicon + Intel) `Skelly.app` into
+Applications plus a `skelly` command on your PATH; on Linux it installs the `skelly`
+binary and a desktop entry. You can also grab a build from the
+[releases page](https://github.com/zottiben/skelly/releases/latest).
+
+<details>
+<summary>Build from source</summary>
+
+Requires the pinned toolchain (installed automatically by `rustup` from
+[`rust-toolchain.toml`](rust-toolchain.toml)).
+
+```sh
+cargo build --release -p skelly    # binary at target/release/skelly
+```
+</details>
 
 ## Quickstart
 

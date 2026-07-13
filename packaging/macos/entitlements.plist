@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Entitlements for the *notarized* Developer ID path only (bundle.sh applies these
+     with `codesign --options runtime` when a real identity is passed; the default
+     ad-hoc build ignores this file). Skelly is a self-contained Rust binary that
+     loads no third-party plugins and JITs nothing, so it needs no code-signing
+     exceptions - the child shells it spawns via the PTY run under their own Apple
+     signatures, unaffected by these. An empty grant set = hardened runtime, no extra
+     capabilities. Add keys here only if a concrete notarization failure demands one. -->
+<plist version="1.0">
+<dict>
+</dict>
+</plist>
