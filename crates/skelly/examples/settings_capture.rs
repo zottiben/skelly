@@ -46,6 +46,7 @@ const S_SLIDER_VALUE_GAP: f32 = 12.0;
 /// A representative control widget for the capture (mirrors the binary's `Kind` render).
 enum Widget {
     Segmented(&'static [&'static str], usize),
+    Cycle(&'static str),
     Toggle(bool),
     Slider(&'static str, f32),
 }
@@ -109,10 +110,7 @@ fn build_settings(theme: &Theme, width: u32, height: u32, scale: f32) -> Capture
         ('%', "Git"),
     ];
     let controls = [
-        (
-            "Theme",
-            Widget::Segmented(&["Ossein Dark", "Ossein Light"], 0),
-        ),
+        ("Theme", Widget::Cycle("Tokyo Night")),
         ("Font size", Widget::Slider("14px", 0.25)),
         ("Line height", Widget::Slider("1.2", 0.18)),
         (
@@ -241,6 +239,20 @@ fn build_settings(theme: &Theme, width: u32, height: u32, scale: f32) -> Capture
                 scale,
                 theme,
             ),
+            Widget::Cycle(value) => {
+                let text = format!("\u{2039} {value} \u{203A}");
+                let w = m.width(&text, FontRole::Label, None);
+                let line = m.line_height(FontRole::Label);
+                labels.push(ProseLabel {
+                    text,
+                    x: content_right - w,
+                    y: cy + (S_CTRL_ROW_H * scale - line) * 0.5,
+                    role: FontRole::Label,
+                    color: theme.accent,
+                    weight: None,
+                    max_w: f32::MAX,
+                });
+            }
             Widget::Slider(value, fraction) => s_slider(
                 &mut quads,
                 &mut labels,

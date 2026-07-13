@@ -11,11 +11,11 @@
 //!
 //! Keyboard-driven: a left category nav, a right control list, `↑/↓` to move between
 //! controls, `←/→` (and Enter) to change a value. Each control renders its §09 widget - a
-//! toggle switch, a segmented control, or a slider (see [`push_control`]) - so the view
-//! matches the guide's §10.9 controls. Deferred: mouse hit-testing on those widgets (the
-//! keyboard model still drives edits); the guide's 4-up theme *cards* (a `Choice` shows as a
-//! segmented control instead - cards need per-theme swatch colors); and the keybindings /
-//! shell / advanced categories (they need config keys or the `[keys]` registry we lack).
+//! toggle switch, a segmented control, a compact `‹ value ›` cycler, or a slider (see
+//! [`push_control`]) - so the view matches the guide's §10.9 controls. The theme picker cycles
+//! (it has too many / too-long options to fit a segmented control; the guide's swatch *cards*
+//! remain a visual follow-up). Deferred: mouse hit-testing on the widgets (the keyboard model
+//! still drives edits); the keybindings / advanced categories (they need the `[keys]` registry).
 
 use skelly_config::{Config, CursorStyle, DiffView, SidebarMode, TabTitle};
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
@@ -84,6 +84,10 @@ enum Kind {
         get: fn(&Config) -> usize,
         /// Write the chosen option index (already clamped to `options`).
         set: fn(&mut Config, usize),
+        /// Render as a compact `‹ value ›` cycler rather than an all-options segmented control -
+        /// for choices with many / long options (the theme picker) that would otherwise overflow
+        /// the row. `←/→` still cycles either way.
+        cycle: bool,
     },
     /// An integer (or scaled-fraction) value stepped between `min..=max`.
     Range {
@@ -218,6 +222,8 @@ static CATEGORIES: &[Category] = &[
                         };
                         name.clone_into(&mut c.appearance.theme);
                     },
+                    // Many, long options - render compactly so it never overflows the row.
+                    cycle: true,
                 },
             },
             Control {
@@ -263,6 +269,7 @@ static CATEGORIES: &[Category] = &[
                             _ => CursorStyle::Block,
                         };
                     },
+                    cycle: false,
                 },
             },
             Control {
@@ -338,6 +345,7 @@ static CATEGORIES: &[Category] = &[
                             _ => SidebarMode::Fixed,
                         };
                     },
+                    cycle: false,
                 },
             },
             Control {
@@ -384,6 +392,7 @@ static CATEGORIES: &[Category] = &[
                             _ => TabTitle::Cwd,
                         };
                     },
+                    cycle: false,
                 },
             },
             Control {
@@ -447,6 +456,7 @@ static CATEGORIES: &[Category] = &[
                     };
                     program.clone_into(&mut c.shell.program);
                 },
+                cycle: false,
             },
         }],
     },
@@ -499,6 +509,7 @@ static CATEGORIES: &[Category] = &[
                         DiffView::Unified
                     };
                 },
+                cycle: false,
             },
         }],
     },
@@ -847,19 +858,38 @@ fn push_control(
         Kind::Toggle { get, .. } => {
             push_toggle(quads, get(config), content_right, top, scale, theme);
         }
-        Kind::Choice { options, get, .. } => {
+        Kind::Choice {
+            options,
+            get,
+            cycle,
+            ..
+        } => {
             let selected = get(config).min(options.len().saturating_sub(1));
-            push_segmented(
-                quads,
-                labels,
-                measure,
-                options,
-                selected,
-                content_right,
-                top,
-                scale,
-                theme,
-            );
+            if *cycle {
+                push_cycle(
+                    quads,
+                    labels,
+                    measure,
+                    options.get(selected).copied().unwrap_or(""),
+                    content_right,
+                    top,
+                    scale,
+                    theme,
+                    focused,
+                );
+            } else {
+                push_segmented(
+                    quads,
+                    labels,
+                    measure,
+                    options,
+                    selected,
+                    content_right,
+                    top,
+                    scale,
+                    theme,
+                );
+            }
         }
         Kind::Range { min, max, get, .. } => {
             let fraction = if max > min {
@@ -913,6 +943,40 @@ fn push_toggle(
         knob_color,
         knob * 0.5,
     ));
+}
+
+/// A compact cycler, right-anchored: the current option in `‹ value ›` guillemets - for choices
+/// with many / long options that would overflow a segmented control. `←/→` cycles the value.
+#[allow(clippy::too_many_arguments, reason = "one focused cycler builder")]
+fn push_cycle(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    value: &str,
+    content_right: f32,
+    top: f32,
+    scale: f32,
+    theme: &Theme,
+    focused: bool,
+) {
+    let _ = quads;
+    let color = if focused {
+        theme.accent
+    } else {
+        theme.fg_primary
+    };
+    let text = format!("\u{2039} {value} \u{203A}");
+    let w = measure.width(&text, FontRole::Label, None);
+    let line = measure.line_height(FontRole::Label);
+    labels.push(ProseLabel {
+        text,
+        x: content_right - w,
+        y: top + (CTRL_ROW_H * scale - line) * 0.5,
+        role: FontRole::Label,
+        color,
+        weight: None,
+        max_w: f32::MAX,
+    });
 }
 
 /// A §09 segmented control, right-anchored: a `bg.inset` container (with a `border.subtle`
