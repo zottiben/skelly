@@ -38,7 +38,9 @@ with the decision + date.
   pinned on launch), never re-run processes, per the guide's own `[session]
   persist` comment. The launch-time restore itself is a follow-up, separate from
   the in-session timeline._
-- [ ] **Scrollback search scope** - active pane only, or all panes?
+- [x] **Scrollback search scope** - _Resolved 2026-07-13: **active pane only** (`⌘F` searches the
+  focused pane's scrollback via `Terminal::find`). An all-panes / cross-pane search is a later
+  additive option._
 
 Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 
@@ -55,6 +57,17 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **§11 keybindings implemented end-to-end** (feature-completeness pass). Every §11
+  chord now works: pane nav on `⌥arrows` (focus) / `⌃⌥arrows` (resize) / `⌥⇧arrows` (swap - new
+  `PaneTree::swap`), `⌥Space` cycle-layout (new `PaneTree::cycle_layout` - even cols/rows/main-
+  vertical), the tmux **leader** (`[panes] leader`, default `ctrl+a`, previously inert), timeline
+  `⌥⌘←/→/0` now global (open the dock so the rewind is visible), terminal `⌘=/-/0` **live font
+  size** (new `Renderer::set_font_size`) + `⌘L` clear scrollback, tab `⇧⌘N` new group / `F2` rename
+  (inline, `Tab.custom_title`) / `⇧⌘T` reopen (closed-title stack), `⌘/` **cheatsheet** overlay, and
+  `⌘F` **find in scrollback** (alacritty `RegexSearch` + `scroll_to_point`, accent-highlighted, a
+  bottom find bar). **`⌘↵` run-in-new-pane DEFERRED:** Skelly's palette runs app actions, not shell
+  commands, so "run in new pane" has no clean mapping - it needs a shell-command palette mode
+  (separate feature), and inventing a bogus behavior would violate Hard rule 5.
 - 2026-07-13 - **§10.4 status line COMPLETE - editor MODE + FILETYPE, both from real signals.**
   The guide's §10.4 status line is `cwd · ⑂ branch · MODE · filetype · ●+A −R · shell … Ln, Col`;
   Skelly now shows every segment, each from a real signal (never fabricated):
