@@ -69,6 +69,8 @@ pub struct Config {
     pub session: Session,
     /// `[git]` - git diff presentation.
     pub git: Git,
+    /// `[shell]` - the shell program launched in each pane (the guide's "Shell & env").
+    pub shell: Shell,
     /// `[keys]` - user keybinding overrides, `chord -> action`. Merged over the
     /// built-in bindings; empty by default (built-ins live in the binding registry).
     pub keys: BTreeMap<String, String>,
@@ -194,6 +196,15 @@ pub struct Git {
     pub diff_view: DiffView,
 }
 
+/// `[shell]`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct Shell {
+    /// The shell program to launch (e.g. `zsh`, `bash`, `fish`). Empty = the login shell
+    /// (`$SHELL`, else `/bin/bash`), which is also what the first-run "Skip" accepts.
+    pub program: String,
+}
+
 /// Git diff layout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -314,6 +325,16 @@ impl Config {
             Some(path) if path.exists() => Self::load(&path),
             _ => Ok(Self::default()),
         }
+    }
+
+    /// Whether this is a first run: no config file exists yet at the default path. The
+    /// binary shows the first-run onboarding (design §10.1) when true; writing the config
+    /// (its Skip/Start both `save_default`) clears it for next launch. A path that cannot
+    /// be resolved (no `HOME`/`XDG_CONFIG_HOME`) is treated as not-first-run (no place to
+    /// persist a choice, so onboarding would recur every launch).
+    #[must_use]
+    pub fn is_first_run() -> bool {
+        Self::default_path().is_some_and(|p| !p.exists())
     }
 
     /// The default config path: `$XDG_CONFIG_HOME/skelly/config.toml`, falling back
@@ -469,6 +490,24 @@ mod tests {
         let text = original.to_toml_string().expect("serialize");
         let parsed = Config::from_toml_str(&text).expect("reparse");
         assert_eq!(original, parsed);
+    }
+
+    #[test]
+    fn shell_program_maps_to_a_config_key() {
+        // The first-run onboarding / "Shell & env" settings map 1:1 to `[shell] program`.
+        assert_eq!(
+            Config::default().shell.program,
+            "",
+            "empty = the login shell"
+        );
+        let c = Config::from_toml_str("[shell]\nprogram = \"zsh\"\n").expect("parse");
+        assert_eq!(c.shell.program, "zsh");
+        // It round-trips (the settings write path, Hard rule 1).
+        let text = c.to_toml_string().expect("serialize");
+        assert_eq!(
+            Config::from_toml_str(&text).expect("reparse").shell.program,
+            "zsh"
+        );
     }
 
     #[test]

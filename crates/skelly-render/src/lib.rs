@@ -32,6 +32,7 @@ pub use capture::{
     CaptureOverlay, CapturePane, CaptureSettings, CaptureSidebar, CaptureTimeline, Chrome,
     PaneOverlay,
 };
+pub use cells::logo_chrome_quads;
 pub use error::RenderError;
 pub use fonts::FontRole;
 pub use prose::{ProseLabel, TextMeasure};
@@ -59,7 +60,8 @@ pub struct PxRect {
 /// paints where told (the same split as [`ProseLabel`] for text).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ChromeQuad {
-    /// The rectangle to fill, physical px.
+    /// The rectangle to fill, physical px. For a `diamond`, this is the disc's square
+    /// bounding box (side = the disc's size) centered where the disc sits.
     pub rect: PxRect,
     /// The fill color (a resolved UI token; theme-correct).
     pub color: Srgb,
@@ -67,6 +69,9 @@ pub struct ChromeQuad {
     pub alpha: f32,
     /// Corner radius in physical px (`0.0` = sharp corners).
     pub radius: f32,
+    /// When true, the quad is a rounded square rotated 45° (a vertebra-logo "diamond" disc,
+    /// §02) rather than an axis-aligned rect - so overlays can draw the brand mark.
+    pub diamond: bool,
 }
 
 impl ChromeQuad {
@@ -78,6 +83,7 @@ impl ChromeQuad {
             color,
             alpha: 1.0,
             radius: 0.0,
+            diamond: false,
         }
     }
 
@@ -89,6 +95,7 @@ impl ChromeQuad {
             color,
             alpha: 1.0,
             radius,
+            diamond: false,
         }
     }
 
@@ -101,6 +108,26 @@ impl ChromeQuad {
             color,
             alpha,
             radius,
+            diamond: false,
+        }
+    }
+
+    /// A rounded-square "diamond" disc of the vertebra brand mark (§02): a square of side
+    /// `size` centered at `(cx, cy)` (physical px), rotated 45°, corners rounded by `radius`,
+    /// at `alpha`. Lets overlays (the first-run modal, §10.1) draw the mark.
+    #[must_use]
+    pub fn diamond(cx: f32, cy: f32, size: f32, color: Srgb, alpha: f32, radius: f32) -> Self {
+        Self {
+            rect: PxRect {
+                x: cx - size * 0.5,
+                y: cy - size * 0.5,
+                w: size,
+                h: size,
+            },
+            color,
+            alpha,
+            radius,
+            diamond: true,
         }
     }
 }

@@ -156,6 +156,24 @@ impl Terminal {
     where
         W: Fn() + Send + 'static,
     {
+        Self::spawn_shell(cols, rows, None, wakeup)
+    }
+
+    /// Spawn a specific shell `program` (e.g. `zsh`) in a `cols` x `rows` PTY, or the login
+    /// shell when `program` is `None` or empty. Backs the `[shell] program` config key set by
+    /// the settings view / first-run onboarding (design §10.1). `wakeup` behaves as in [`spawn`].
+    ///
+    /// # Errors
+    /// Returns an error if the PTY cannot be opened or the shell cannot be spawned.
+    pub fn spawn_shell<W>(
+        cols: u16,
+        rows: u16,
+        program: Option<&str>,
+        wakeup: W,
+    ) -> std::io::Result<Self>
+    where
+        W: Fn() + Send + 'static,
+    {
         let (cols, rows) = clamp_dims(cols, rows);
         let pty = native_pty_system();
         let pair = pty
@@ -167,7 +185,14 @@ impl Terminal {
             })
             .map_err(to_io)?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_owned());
+        // A configured, non-empty program wins; otherwise the login shell ($SHELL, else bash).
+        let shell = program
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map_or_else(
+                || std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_owned()),
+                ToOwned::to_owned,
+            );
         let mut cmd = CommandBuilder::new(shell);
         cmd.env("TERM", "xterm-256color");
         if let Ok(cwd) = std::env::current_dir() {

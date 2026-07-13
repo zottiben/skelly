@@ -120,7 +120,11 @@ pub(crate) fn chrome_quad(q: &crate::ChromeQuad) -> Quad {
     let mut color = q.color.to_linear();
     color[3] = q.alpha;
     let r = q.rect;
-    if q.radius > 0.0 {
+    if q.diamond {
+        // The rect is the disc's square bounding box; recover its center + side for the
+        // rotated-square SDF (the vertebra-logo disc path).
+        Quad::diamond(r.x + r.w * 0.5, r.y + r.h * 0.5, r.w, color, q.radius)
+    } else if q.radius > 0.0 {
         Quad::rounded(r.x, r.y, r.w, r.h, color, q.radius)
     } else {
         Quad::new(r.x, r.y, r.w, r.h, color)
@@ -301,6 +305,50 @@ pub(crate) fn logo_quads(
         disc(0.16, 0.26, 0.26, tint(theme.fg_primary, opacity)),
         disc(0.50, 0.42, 0.22, tint(theme.accent, opacity)),
         disc(0.84, 0.26, 0.26, tint(theme.fg_primary, opacity)),
+    ]
+}
+
+/// The vertebra brand mark (§02) as [`ChromeQuad`]s, so an overlay (the first-run modal, §10.1)
+/// can draw it in its display list. Same geometry as [`logo_quads`]: a faint accent spine pill
+/// threading three rounded-diamond discs (two `fg.primary`, one `accent`), `mark` px square,
+/// its top-left at `(x, y)`, every layer scaled by `opacity`.
+#[must_use]
+pub fn logo_chrome_quads(
+    x: f32,
+    y: f32,
+    mark: f32,
+    theme: &crate::theme::Theme,
+    opacity: f32,
+) -> Vec<crate::ChromeQuad> {
+    use crate::ChromeQuad;
+    let cx = x + mark * 0.5;
+    let disc = |cy_frac: f32, size_frac: f32, radius_frac: f32, color, alpha: f32| {
+        let size = size_frac * mark;
+        ChromeQuad::diamond(
+            cx,
+            y + cy_frac * mark,
+            size,
+            color,
+            alpha,
+            radius_frac * size,
+        )
+    };
+    let spine_w = 0.06 * mark;
+    vec![
+        ChromeQuad::tint(
+            crate::PxRect {
+                x: cx - spine_w * 0.5,
+                y: y + 0.09 * mark,
+                w: spine_w,
+                h: 0.82 * mark,
+            },
+            theme.accent,
+            LOGO_SPINE_ALPHA * opacity,
+            spine_w * 0.5,
+        ),
+        disc(0.16, 0.26, 0.26, theme.fg_primary, opacity),
+        disc(0.50, 0.42, 0.22, theme.accent, opacity),
+        disc(0.84, 0.26, 0.26, theme.fg_primary, opacity),
     ]
 }
 

@@ -15,6 +15,7 @@ mod deadpane;
 mod emptystate;
 mod gitdock;
 mod motion;
+mod onboarding;
 mod palette;
 mod settings;
 mod sidebar;
@@ -235,6 +236,9 @@ struct App {
     /// A pending "close with a running job" confirm modal (design §12), if any. While set,
     /// it captures input; `Enter` / a second close-press confirms, `Esc` cancels.
     confirm: Option<Confirm>,
+    /// The first-run onboarding modal (design §10.1), shown once on a fresh install (no config
+    /// file yet). While set, it captures input; Skip/Start write the config and dismiss it.
+    onboarding: Option<onboarding::Onboarding>,
     /// The live shadow worktree while rewound to a past state (`None` = at HEAD/now). Its
     /// drop removes the worktree, so returning to now / closing just clears it.
     shadow: Option<ShadowWorktree>,
@@ -314,6 +318,8 @@ impl App {
             git_dock: GitDock::new(),
             timeline: TimelineDock::new(),
             confirm: None,
+            // Fresh install (no config file yet) -> show the first-run onboarding (design §10.1).
+            onboarding: Config::is_first_run().then(onboarding::Onboarding::new),
             shadow: None,
             session_start: Instant::now(),
             session_started: false,
@@ -474,6 +480,7 @@ impl App {
         let status_h = statusline::HEIGHT * scale32(self.scale);
         let viewport = self.viewport_rect();
         let proxy = self.proxy.clone();
+        let shell = self.config.shell.program.clone();
         let layout = self.active_tab().tree.layout(viewport);
 
         let ws = self.active_tab_mut();
@@ -493,7 +500,7 @@ impl App {
                 }
             } else {
                 let proxy = proxy.clone();
-                match Terminal::spawn(target.0, target.1, move || {
+                match Terminal::spawn_shell(target.0, target.1, Some(shell.as_str()), move || {
                     let _ = proxy.send_event(Wakeup);
                 }) {
                     Ok(term) => {
@@ -657,9 +664,17 @@ impl App {
         let sidebar = self.sidebar.visible().then(|| self.build_sidebar_frame());
         let git_dock = self.git_dock.open.then(|| self.build_git_dock_frame());
         let timeline = self.timeline.open.then(|| self.build_timeline_frame());
-        let overlay = self.palette.open.then(|| self.build_palette_frame());
+        // The first-run onboarding modal (design §10.1) reuses the overlay pass and takes
+        // precedence over everything else while it is up.
+        let onboarding = self
+            .onboarding
+            .is_some()
+            .then(|| self.build_onboarding_frame())
+            .flatten();
+        let overlay =
+            (onboarding.is_none() && self.palette.open).then(|| self.build_palette_frame());
         // The confirm modal reuses the overlay pass; it never coexists with the palette.
-        let confirm = (!self.palette.open)
+        let confirm = (onboarding.is_none() && !self.palette.open)
             .then(|| self.build_confirm_frame())
             .flatten();
         let settings = self.settings.open.then(|| self.build_settings_frame());
@@ -695,18 +710,19 @@ impl App {
                 })),
                 None => renderer.set_timeline(None),
             }
-            match (&overlay, &confirm) {
-                (Some(frame), _) => renderer.set_overlay(Some(&OverlayView {
-                    panel: frame.panel,
-                    quads: &frame.quads,
-                    labels: &frame.labels,
+            // Overlay precedence: onboarding (first run) > palette > confirm.
+            let overlay_frame = onboarding
+                .as_ref()
+                .map(|f| (f.panel, &f.quads, &f.labels))
+                .or_else(|| overlay.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
+                .or_else(|| confirm.as_ref().map(|f| (f.panel, &f.quads, &f.labels)));
+            match overlay_frame {
+                Some((panel, quads, labels)) => renderer.set_overlay(Some(&OverlayView {
+                    panel,
+                    quads,
+                    labels,
                 })),
-                (None, Some(frame)) => renderer.set_overlay(Some(&OverlayView {
-                    panel: frame.panel,
-                    quads: &frame.quads,
-                    labels: &frame.labels,
-                })),
-                (None, None) => renderer.set_overlay(None),
+                None => renderer.set_overlay(None),
             }
             match &settings {
                 Some(frame) => renderer.set_settings(Some(&SettingsView {
@@ -775,6 +791,21 @@ impl App {
         Some(ConfirmFrame {
             panel,
             quads: Vec::new(),
+            labels,
+        })
+    }
+
+    /// Lay out the first-run onboarding modal (design §10.1) as a centered card and build its
+    /// content display list (the vertebra mark, shell/theme pickers, hints, Skip/Start).
+    fn build_onboarding_frame(&mut self) -> Option<OnboardingFrame> {
+        self.onboarding.as_ref()?;
+        let panel = self.onboarding_panel();
+        let scale = scale32(self.scale);
+        let onb = self.onboarding.as_ref()?;
+        let (quads, labels) = onboarding::build(onb, panel, scale, &self.theme, &mut self.measure);
+        Some(OnboardingFrame {
+            panel,
+            quads,
             labels,
         })
     }
@@ -1635,6 +1666,107 @@ impl App {
         }
     }
 
+    /// Keys while the first-run onboarding modal is up (design §10.1): Tab / ↑↓ move focus,
+    /// ←→ change the shell/theme (theme previews live), Enter runs Start (Skip when focused on
+    /// it), Esc skips. Everything else is swallowed (the modal is captured).
+    fn on_onboarding_key(&mut self, key_event: &KeyEvent) {
+        let Some(onb) = self.onboarding.as_mut() else {
+            return;
+        };
+        match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape) => {
+                self.finish_onboarding(false);
+                return;
+            }
+            Key::Named(NamedKey::Enter) => {
+                let start = onb.enter_is_start();
+                self.finish_onboarding(start);
+                return;
+            }
+            Key::Named(NamedKey::Tab) => onb.cycle_focus(!self.modifiers.shift_key()),
+            Key::Named(NamedKey::ArrowDown) => onb.cycle_focus(true),
+            Key::Named(NamedKey::ArrowUp) => onb.cycle_focus(false),
+            Key::Named(dir @ (NamedKey::ArrowRight | NamedKey::ArrowLeft)) => {
+                // `horizontal` always changes the shell/theme selection; a theme change also
+                // asks for a live preview (applied after the `onb` borrow ends).
+                let theme_changed = onb.horizontal(dir == NamedKey::ArrowRight);
+                if theme_changed {
+                    let theme = onb.theme_name();
+                    self.apply_theme(theme);
+                }
+            }
+            _ => {}
+        }
+        self.request_redraw();
+    }
+
+    /// Dismiss the onboarding modal: on `start`, apply the picked shell + theme; on Skip, revert
+    /// to the defaults (login shell + Ossein Dark). Either way the config is written (so next
+    /// launch skips onboarding, Hard rule 1) and the active tab's shells respawn under the
+    /// chosen shell.
+    fn finish_onboarding(&mut self, start: bool) {
+        let Some(onb) = self.onboarding.take() else {
+            return;
+        };
+        if start {
+            onb.shell_program()
+                .clone_into(&mut self.config.shell.program);
+            self.apply_theme(onb.theme_name()); // already previewed; idempotent
+        } else {
+            self.config.shell.program.clear();
+            self.apply_theme("ossein-dark");
+        }
+        if let Err(err) = self.config.save_default() {
+            tracing::warn!(%err, "failed to write config after onboarding");
+        }
+        // Respawn the active tab's shells so the chosen shell takes effect on the first pane
+        // (it was spawned with the login shell before onboarding was dismissed).
+        let ws = self.active_tab_mut();
+        ws.panes.clear();
+        ws.dims.clear();
+        self.sync_layout();
+        self.request_redraw();
+    }
+
+    /// The onboarding card's centered rectangle (physical px), shared by its frame builder and
+    /// hit-test so a click lands on exactly what is drawn.
+    fn onboarding_panel(&self) -> PxRect {
+        let scale = scale32(self.scale);
+        let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
+        let (panel_w, panel_h) = onboarding::Onboarding::card_size(scale);
+        let panel_w = panel_w.min(surface_w * 0.9);
+        PxRect {
+            x: ((surface_w - panel_w) / 2.0).max(0.0),
+            y: ((surface_h - panel_h) / 2.0).max(0.0),
+            w: panel_w,
+            h: panel_h,
+        }
+    }
+
+    /// Handle a click while the onboarding modal is up: select a shell/theme (theme previews
+    /// live) or activate Skip / Start.
+    fn on_onboarding_click(&mut self) {
+        let panel = self.onboarding_panel();
+        let (px, py) = point_f32(self.pointer);
+        let Some(hit) = onboarding::hit(panel, scale32(self.scale), px, py) else {
+            return;
+        };
+        match hit {
+            onboarding::Hit::Skip => self.finish_onboarding(false),
+            onboarding::Hit::Start => self.finish_onboarding(true),
+            other => {
+                if let Some(onb) = self.onboarding.as_mut() {
+                    onb.click(other);
+                    if matches!(other, onboarding::Hit::Theme(_)) {
+                        let theme = onb.theme_name();
+                        self.apply_theme(theme);
+                    }
+                }
+                self.request_redraw();
+            }
+        }
+    }
+
     /// Handle a key while the command palette is open: it captures all input (typing
     /// filters, arrows navigate, Enter runs, Esc closes). `⌘K` toggles it shut and
     /// `⌘Q` still quits.
@@ -2117,6 +2249,11 @@ impl App {
         if self.key_settles_fading_overlay(key_event) {
             return;
         }
+        // The first-run onboarding modal (design §10.1) captures all input while up.
+        if self.onboarding.is_some() {
+            self.on_onboarding_key(key_event);
+            return;
+        }
         // The "running job" confirm modal captures input while fully up (design §12).
         if self.confirm.is_some() {
             self.on_confirm_key(key_event);
@@ -2238,6 +2375,14 @@ impl App {
     /// sidebar) or focuses a pane and starts a selection; a release ends the drag and
     /// clears a zero-width (click-only) selection.
     fn on_left_click(&mut self, state: ElementState) {
+        // The first-run onboarding modal captures clicks: hit a control (select / focus) or a
+        // button (Skip / Start), and swallow clicks elsewhere so nothing behind it reacts.
+        if self.onboarding.is_some() {
+            if state == ElementState::Pressed {
+                self.on_onboarding_click();
+            }
+            return;
+        }
         // A click during an overlay's fade-out dismisses it (and is consumed) instead of
         // falling through to the panes behind the still-visible palette / confirm modal.
         if self.settle_confirm_close() || self.settle_palette_close() {
@@ -2347,6 +2492,13 @@ struct PaletteFrame {
 /// Owned "running job" confirm-modal frame data the borrowed [`OverlayView`] points at
 /// (like [`PaletteFrame`], but with no content quads - just the centered message).
 struct ConfirmFrame {
+    panel: PxRect,
+    quads: Vec<skelly_render::ChromeQuad>,
+    labels: Vec<skelly_render::ProseLabel>,
+}
+
+/// Owned first-run onboarding frame data the borrowed [`OverlayView`] points at.
+struct OnboardingFrame {
     panel: PxRect,
     quads: Vec<skelly_render::ChromeQuad>,
     labels: Vec<skelly_render::ProseLabel>,
