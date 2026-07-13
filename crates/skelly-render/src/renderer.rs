@@ -288,6 +288,13 @@ impl Renderer {
         self.text.cell_metrics()
     }
 
+    /// Rebuild the terminal cell font at a new `font_size` (px) / `line_height` - the live
+    /// `⌘=/-/0` bindings (design §11). Only the terminal grid layer changes; the proportional
+    /// chrome is unaffected. The binary re-fits the PTY grids to the new [`cell_metrics`] after.
+    pub fn set_font_size(&mut self, font_size: u16, line_height: f32) {
+        self.text.set_font_size(font_size, line_height);
+    }
+
     /// Switch the active UI theme. Re-resolves the semantic tokens and updates the
     /// text layers' fallback color; the next frame repaints every surface in the new
     /// theme (the clear color and all quads read the theme per frame). AGENTS Hard

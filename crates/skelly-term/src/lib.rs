@@ -420,6 +420,17 @@ impl Terminal {
         }
         self.dirty.store(true, Ordering::Relaxed);
     }
+
+    /// Clear the saved scrollback history (the guide's `⌘L` "Clear scrollback"), leaving the
+    /// visible screen and the shell untouched. Snaps the view back to the bottom.
+    pub fn clear_scrollback(&mut self) {
+        use alacritty_terminal::vte::ansi::{ClearMode, Handler};
+        if let Ok(mut term) = self.term.lock() {
+            term.clear_screen(ClearMode::Saved);
+            term.scroll_display(Scroll::Bottom);
+        }
+        self.dirty.store(true, Ordering::Relaxed);
+    }
 }
 
 impl Drop for Terminal {

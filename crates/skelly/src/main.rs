@@ -67,6 +67,11 @@ const RAIL_WIDTH: f32 = 56.0;
 const GIT_DOCK_WIDTH: f32 = 420.0;
 /// Diff lines scrolled per `PageUp`/`PageDown` in the git dock.
 const DIFF_SCROLL_LINES: i32 = 10;
+/// Terminal font-size bounds + reset default (the `⌘=/-/0` bindings, §11), matching the
+/// `[appearance] font_size` valid range (8..=32) and its spec default (14).
+const MIN_FONT_SIZE: u16 = 8;
+const MAX_FONT_SIZE: u16 = 32;
+const DEFAULT_FONT_SIZE: u16 = 14;
 
 /// Event the reader thread sends to wake the UI when a shell produces output.
 #[derive(Debug, Clone, Copy)]
@@ -2287,10 +2292,43 @@ impl App {
             self.toggle_pin();
         } else if ch == "," {
             self.open_settings();
+        } else if ch.eq_ignore_ascii_case("l") {
+            self.clear_focused_scrollback();
+        } else if ch == "=" || ch == "+" {
+            self.adjust_font_size(self.config.appearance.font_size.saturating_add(1));
+        } else if ch == "-" || ch == "_" {
+            self.adjust_font_size(self.config.appearance.font_size.saturating_sub(1));
+        } else if ch == "0" {
+            self.adjust_font_size(DEFAULT_FONT_SIZE);
         } else {
             return false;
         }
         true
+    }
+
+    /// Clear the focused pane's scrollback history (design §11 `⌘L`).
+    fn clear_focused_scrollback(&mut self) {
+        if let Some(term) = self.focused_term() {
+            term.clear_scrollback();
+            self.request_redraw();
+        }
+    }
+
+    /// Set the terminal font size to `size` (clamped to the config's valid 8..=32 range), the
+    /// live `⌘=/-/0` bindings (design §11): update the config (source of truth, Hard rule 1),
+    /// rebuild the renderer's cell metrics, and re-fit the PTY grids to the new cell size.
+    fn adjust_font_size(&mut self, size: u16) {
+        let clamped = size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE);
+        if clamped == self.config.appearance.font_size {
+            return;
+        }
+        self.config.appearance.font_size = clamped;
+        let line_height = self.config.appearance.line_height;
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_font_size(clamped, line_height);
+        }
+        self.sync_layout();
+        self.request_redraw();
     }
 
     /// Handle a key press: the palette (when open), platform combos (quit/copy/paste/
@@ -2339,14 +2377,15 @@ impl App {
                 return;
             }
         }
-        // Platform combos (Cmd/Super + K/Q/C/V/B, and the ⇧-modified dock/pin chords). The
-        // terminal owns every other key - Ctrl+C etc. still reach the shell.
-        if self.on_super_chord(event_loop, key_event) {
+        // Session shortcuts (`⌥⌘←/→` step the rewind, `⌥⌘0` return to now, §11) work globally -
+        // opening the timeline dock so the rewound state is visible. Checked before the plain
+        // super chords so `⌥⌘0` isn't swallowed by `⌘0` (reset font size).
+        if self.on_session_chord(key_event) {
             return;
         }
-        // Session shortcuts (`⌥⌘←/→` step the rewind, `⌥⌘0` return to now, §11) work globally -
-        // opening the timeline dock so the rewound state is visible.
-        if self.on_session_chord(key_event) {
+        // Platform combos (Cmd/Super + K/Q/C/V/B/L, font size, and the ⇧-modified dock/pin
+        // chords). The terminal owns every other key - Ctrl+C etc. still reach the shell.
+        if self.on_super_chord(event_loop, key_event) {
             return;
         }
         // Pane control (the `⌥` leader chords). Matched on the physical key so macOS

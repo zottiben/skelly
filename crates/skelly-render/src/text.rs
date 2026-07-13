@@ -123,6 +123,30 @@ impl TextLayer {
         }
     }
 
+    /// Rebuild the cell metrics for a new `font_size` (px) / `line_height` - the live `⌘=/-/0`
+    /// font-size bindings (design §11). Recomputes the cell width/height + shaping metrics and
+    /// forces every pane to re-shape at the new size (the shape fingerprint keys on the clip
+    /// size, not the font metrics, so it would not otherwise invalidate). The binary re-fits the
+    /// PTY grids to the new cell size afterwards.
+    pub fn set_font_size(&mut self, font_size: u16, line_height: f32) {
+        let font_px = f32::from(font_size) * self.scale;
+        let line_px = font_px * line_height;
+        self.metrics = Metrics::new(font_px, line_px);
+        self.cell_h = line_px;
+        self.cell_w = measure_cell_width(
+            &mut self.font_system,
+            font_px,
+            line_px,
+            family_of(self.family_name.as_deref()),
+        );
+        // Store the new metrics on each buffer and clear its shape cache; the next `set_panes`
+        // re-shapes it (with a fresh `font_system` borrow) at the new size.
+        for pane in &mut self.panes {
+            pane.buffer.set_metrics(self.metrics);
+            pane.shaped = None;
+        }
+    }
+
     /// Cell metrics in physical px: `(width, height, top-left padding)`. Used to
     /// place cell backgrounds and the cursor so they align with the text.
     #[must_use]
