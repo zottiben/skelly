@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
@@ -30,7 +30,28 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, CursorShape as VteCursorShape, Processor};
 use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
-type SharedTerm = Arc<Mutex<Term<VoidListener>>>;
+type SharedTerm = Arc<Mutex<Term<TitleListener>>>;
+/// The latest OS window title the running program set (via `OSC 0/2`), shared between the
+/// reader thread's parser and the UI. Editors set it to the open file's name, which the status
+/// line reads for the filetype (design §10.4).
+type SharedTitle = Arc<Mutex<Option<String>>>;
+
+/// A terminal [`EventListener`] that keeps only the latest title the program set (`OSC 0/2`),
+/// discarding every other event. `send_event` takes `&self`, so the title lives behind a
+/// shared `Mutex` the [`Terminal`] also holds to read it. A default (empty-handle) instance
+/// discards titles - used by the headless [`Parser`], which has no UI to show one.
+#[derive(Clone, Default)]
+struct TitleListener {
+    title: SharedTitle,
+}
+
+impl EventListener for TitleListener {
+    fn send_event(&self, event: Event) {
+        if let Event::Title(title) = event {
+            *self.title.lock().expect("title mutex poisoned") = Some(title);
+        }
+    }
+}
 
 /// The narrowest grid we allow. `alacritty_terminal`'s reflow degenerates into a
 /// pathological (multi-second) loop at exactly one column - a size no usable
@@ -155,6 +176,9 @@ pub struct Terminal {
     /// The shell's own pid, captured at spawn - it is the leader of its process group, so
     /// comparing it to the PTY's foreground process group reveals a running foreground job.
     shell_pid: Option<u32>,
+    /// The latest window title the running program set (`OSC 0/2`); the status line reads it
+    /// for an editor's open-file name / filetype (design §10.4).
+    title: SharedTitle,
     _reader: JoinHandle<()>,
 }
 
@@ -226,10 +250,13 @@ impl Terminal {
         let writer = pair.master.take_writer().map_err(to_io)?;
 
         let dims = GridSize::new(cols, rows);
+        let title: SharedTitle = Arc::new(Mutex::new(None));
         let term: SharedTerm = Arc::new(Mutex::new(Term::new(
             Config::default(),
             &dims,
-            VoidListener,
+            TitleListener {
+                title: Arc::clone(&title),
+            },
         )));
         let dirty = Arc::new(AtomicBool::new(true));
         let exit: SharedExit = Arc::new(Mutex::new(None));
@@ -256,6 +283,7 @@ impl Terminal {
             exit,
             killer,
             shell_pid,
+            title,
             _reader: handle,
         })
     }
@@ -345,6 +373,17 @@ impl Terminal {
     /// per mode - block in normal, bar in insert, underline in replace - so the status line can
     /// report the editor mode (design §10.4) from a real terminal signal rather than guessing.
     ///
+    /// The latest window title the running program set (via `OSC 0/2`), or `None` if it never
+    /// set one. Editors set it to the open file (e.g. `main.rs (…) - NVIM`), which the status
+    /// line parses for the filetype (design §10.4).
+    ///
+    /// # Panics
+    /// Panics if the title mutex is poisoned.
+    #[must_use]
+    pub fn title(&self) -> Option<String> {
+        self.title.lock().expect("title mutex poisoned").clone()
+    }
+
     /// # Panics
     /// Panics if the terminal mutex is poisoned.
     #[must_use]
@@ -408,7 +447,7 @@ impl Drop for Terminal {
 /// read the grid back with the same [`snapshot`](Parser::snapshot),
 /// [`cells`](Parser::cells), and [`cursor`](Parser::cursor) methods.
 pub struct Parser {
-    term: Term<VoidListener>,
+    term: Term<TitleListener>,
     processor: Processor,
 }
 
@@ -420,7 +459,7 @@ impl Parser {
         let (cols, rows) = clamp_dims(cols, rows);
         let dims = GridSize::new(cols, rows);
         Self {
-            term: Term::new(Config::default(), &dims, VoidListener),
+            term: Term::new(Config::default(), &dims, TitleListener::default()),
             processor: Processor::new(),
         }
     }
@@ -463,7 +502,7 @@ impl Parser {
 
 /// Snapshot a grid's visible lines as trimmed text (top to bottom). Shared by the
 /// live [`Terminal`] and the headless [`Parser`] so both read the grid identically.
-fn grid_lines(term: &Term<VoidListener>) -> Vec<String> {
+fn grid_lines(term: &Term<TitleListener>) -> Vec<String> {
     let grid = term.grid();
     let columns = grid.columns();
     let lines = grid.screen_lines();
@@ -483,7 +522,7 @@ fn grid_lines(term: &Term<VoidListener>) -> Vec<String> {
 
 /// Snapshot a grid's visible cells with per-cell color + SGR attributes (top to
 /// bottom, left to right). Shared by [`Terminal`] and [`Parser`].
-fn grid_cells(term: &Term<VoidListener>) -> Vec<Vec<TermCell>> {
+fn grid_cells(term: &Term<TitleListener>) -> Vec<Vec<TermCell>> {
     let grid = term.grid();
     let columns = grid.columns();
     let lines = grid.screen_lines();
@@ -509,7 +548,7 @@ fn grid_cells(term: &Term<VoidListener>) -> Vec<Vec<TermCell>> {
 
 /// The cursor position as `(column, row)` in the visible grid. Shared by
 /// [`Terminal`] and [`Parser`].
-fn grid_cursor(term: &Term<VoidListener>) -> (usize, usize) {
+fn grid_cursor(term: &Term<TitleListener>) -> (usize, usize) {
     let grid = term.grid();
     let offset = i32::try_from(grid.display_offset()).unwrap_or(0);
     let point = grid.cursor.point;
@@ -586,7 +625,7 @@ impl Dimensions for GridSize {
 /// UI repaint and show the exit overlay even though no more output followed.
 fn read_loop<W: Fn()>(
     mut reader: Box<dyn Read + Send>,
-    term: &Mutex<Term<VoidListener>>,
+    term: &Mutex<Term<TitleListener>>,
     dirty: &AtomicBool,
     exit: &Mutex<Option<ExitStatus>>,
     mut child: Box<dyn Child + Send + Sync>,

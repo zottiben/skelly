@@ -5,8 +5,11 @@
 //! the binary draws through the pane-overlay pass. Kept here so the layout is unit-testable
 //! without a GPU.
 //!
-//! v1 shows the data Skelly actually has - `cwd · ⑂ branch · shell … Ln, Col`; the guide's
-//! editor `mode` (NORMAL/INSERT) and `filetype` segments wait on shell/editor integration.
+//! It shows every §10.3/§10.4 segment Skelly can source from a real signal: `cwd · ⑂ branch ·
+//! MODE · filetype · ●+A −R · shell … Ln, Col`. The editor `mode`/`filetype` appear only when a
+//! modal editor is the focused pane's foreground process - the mode from the cursor shape the
+//! editor sets (`DECSCUSR`), the filetype from the open file it names in the window title - so
+//! neither is a guess.
 
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Theme};
 
@@ -29,6 +32,10 @@ pub(crate) struct Info<'a> {
     /// (design §10.4); `None` unless a modal editor is the focused pane's foreground process.
     /// Derived from the real cursor shape the editor sets, so it is not a guess.
     pub(crate) mode: Option<&'a str>,
+    /// The focused editor's filetype (e.g. `rust`), shown after the mode (design §10.4); `None`
+    /// unless a modal editor reported an open file via the window title. Real data (the file the
+    /// editor named), not a guess.
+    pub(crate) filetype: Option<&'a str>,
     pub(crate) shell: &'a str,
     pub(crate) cursor: (usize, usize),
 }
@@ -132,6 +139,14 @@ pub(crate) fn paint(
             x += w + gap;
         }
     }
+    if let Some(filetype) = info.filetype {
+        // The editor filetype (design §10.4), after the mode, in the muted segment color.
+        let w = measure.width(filetype, FontRole::Mono, None);
+        if x + w <= left_limit {
+            labels.push(label(filetype.to_owned(), x, theme.fg_muted));
+            x += w + gap;
+        }
+    }
     if let Some((added, removed)) = info.dirty {
         // The dirty indicator `●+A −R` (design §10.3), the whole segment in accent.
         let seg = format!("\u{25cf}+{added} \u{2212}{removed}");
@@ -187,6 +202,7 @@ mod tests {
             branch: Some("main"),
             dirty: Some((2, 1)),
             mode: None,
+            filetype: None,
             shell: "zsh",
             cursor: (2, 3),
         };
@@ -218,6 +234,7 @@ mod tests {
             branch: None,
             dirty: None,
             mode: None,
+            filetype: None,
             shell: "bash",
             cursor: (0, 0),
         };
@@ -229,7 +246,7 @@ mod tests {
     }
 
     #[test]
-    fn editor_mode_renders_after_the_branch_when_set() {
+    fn editor_mode_and_filetype_render_after_the_branch_when_set() {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
         let info = Info {
@@ -237,19 +254,27 @@ mod tests {
             branch: Some("main"),
             dirty: None,
             mode: Some("INSERT"),
+            filetype: Some("rust"),
             shell: "zsh",
             cursor: (0, 0),
         };
         let (_, labels) = paint(&info, rect(), 2.0, &theme, &mut m);
-        // The mode segment is present, in the neutral fg.secondary color, positioned after the
-        // branch (design §10.4).
-        let mode = labels
+        // The mode (fg.secondary) then the filetype (fg.muted) follow the branch, in order
+        // (design §10.4): cwd · ⑂ branch · MODE · filetype …
+        let find = |t: &str| labels.iter().find(|l| l.text == t).map(|l| (l.x, l.color));
+        let branch = labels
             .iter()
-            .find(|l| l.text == "INSERT")
-            .expect("mode segment present");
-        assert_eq!(mode.color, theme.fg_secondary);
-        let branch = labels.iter().find(|l| l.text.contains('\u{2442}')).unwrap();
-        assert!(mode.x > branch.x, "mode follows the branch");
+            .find(|l| l.text.contains('\u{2442}'))
+            .unwrap()
+            .x;
+        let (mode_x, mode_c) = find("INSERT").expect("mode segment present");
+        let (ft_x, ft_c) = find("rust").expect("filetype segment present");
+        assert_eq!(mode_c, theme.fg_secondary);
+        assert_eq!(ft_c, theme.fg_muted);
+        assert!(
+            mode_x > branch && ft_x > mode_x,
+            "order: branch < mode < filetype"
+        );
     }
 
     #[test]
@@ -263,6 +288,7 @@ mod tests {
             branch: Some("feat/m5-hardening"),
             dirty: None,
             mode: None,
+            filetype: None,
             shell: "zsh",
             cursor: (12, 340),
         };

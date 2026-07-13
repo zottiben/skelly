@@ -602,6 +602,7 @@ impl App {
             Option<ExitStatus>,
             (usize, usize),
             Option<&'static str>,
+            Option<&'static str>,
         )> = ws
             .tree
             .layout(viewport)
@@ -614,18 +615,23 @@ impl App {
                     w: rect.w,
                     h: rect.h,
                 };
-                // Only the focused pane surfaces an editor mode (its job is the tracked one).
-                let mode = (id == focused_id)
-                    .then(|| editor_mode(job, term.cursor_shape()))
-                    .flatten();
-                Some((px, term.exit_status(), term.cursor(), mode))
+                // Only the focused pane surfaces an editor mode + filetype (its job is tracked).
+                let (mode, filetype) = if id == focused_id {
+                    (
+                        editor_mode(job, term.cursor_shape()),
+                        editor_filetype(job, term.title().as_deref()),
+                    )
+                } else {
+                    (None, None)
+                };
+                Some((px, term.exit_status(), term.cursor(), mode, filetype))
             })
             .collect();
 
         let mut scrims = Vec::new();
         let mut quads = Vec::new();
         let mut labels = Vec::new();
-        for (rect, status, cursor, mode) in &panes {
+        for (rect, status, cursor, mode, filetype) in &panes {
             if let Some(status) = status {
                 scrims.push(*rect);
                 labels.extend(deadpane::message_labels(
@@ -644,6 +650,7 @@ impl App {
                         branch: self.status_branch.as_deref(),
                         dirty: self.status_dirty,
                         mode: *mode,
+                        filetype: *filetype,
                         shell: &self.status_shell,
                         cursor: *cursor,
                     },
@@ -658,7 +665,7 @@ impl App {
         }
         // The empty state (a pristine single-pane tab, no exited panes): the hint chips.
         if empty_state && scrims.is_empty() {
-            if let Some((rect, None, _, _)) = panes.first() {
+            if let Some((rect, None, _, _, _)) = panes.first() {
                 if let Some(logo) = emptystate::logo_bounds(*rect, scale) {
                     let (q, l) =
                         emptystate::chips_paint(logo, *rect, scale, &self.theme, &mut self.measure);
@@ -2613,6 +2620,55 @@ fn editor_mode(job: Option<&str>, shape: skelly_term::CursorShape) -> Option<&'s
     })
 }
 
+/// The editor filetype to show in the focused pane's status line (design §10.4): `None` unless
+/// the foreground process `job` is a modal editor that named an open file in the window `title`
+/// (e.g. `main.rs (…) - NVIM`). The filetype is derived from that real filename's extension - not
+/// a guess - and only for a known code extension, so an unrelated title never shows a bogus one.
+fn editor_filetype(job: Option<&str>, title: Option<&str>) -> Option<&'static str> {
+    let name = job?;
+    if !MODAL_EDITORS.iter().any(|e| name.eq_ignore_ascii_case(e)) {
+        return None;
+    }
+    // Scan the title's tokens for the first `name.ext` with a recognized code extension.
+    title?
+        .split(|c: char| c.is_whitespace() || matches!(c, '/' | '\\' | '(' | ')' | '[' | ']'))
+        .filter_map(|tok| tok.rsplit_once('.'))
+        .find_map(|(_, ext)| filetype_for_ext(ext))
+}
+
+/// The editor filetype name for a file extension (nvim's names for the common code types), or
+/// `None` for an unrecognized extension (so a stray dotted token never reads as a filetype).
+fn filetype_for_ext(ext: &str) -> Option<&'static str> {
+    Some(match ext.to_ascii_lowercase().as_str() {
+        "rs" => "rust",
+        "py" => "python",
+        "js" | "cjs" | "mjs" => "javascript",
+        "ts" => "typescript",
+        "jsx" => "javascriptreact",
+        "tsx" => "typescriptreact",
+        "go" => "go",
+        "c" | "h" => "c",
+        "cc" | "cpp" | "cxx" | "hpp" | "hxx" => "cpp",
+        "rb" => "ruby",
+        "java" => "java",
+        "kt" | "kts" => "kotlin",
+        "swift" => "swift",
+        "lua" => "lua",
+        "vim" => "vim",
+        "sh" | "bash" | "zsh" => "sh",
+        "toml" => "toml",
+        "json" => "json",
+        "yaml" | "yml" => "yaml",
+        "md" | "markdown" => "markdown",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "scss" | "sass" => "scss",
+        "sql" => "sql",
+        "zig" => "zig",
+        _ => return None,
+    })
+}
+
 /// The command name of process `pid`, for the "process running on close" confirm. Shells
 /// `ps -o comm= -p <pid>` (portable across macOS and Linux) and returns just the basename;
 /// `None` if the lookup fails. Best-effort - the caller falls back to a generic label.
@@ -3286,10 +3342,10 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cycle_index, dim, editor_mode, index_after_close, order, overlay_panel_top,
-        overlay_rise_offset, pane_action, pane_dims, panic_message, pointer_cell_in, process_name,
-        resolve_cell, selection_cells, selection_text, tab_action, PaneAction, Selection,
-        TabAction,
+        cycle_index, dim, editor_filetype, editor_mode, index_after_close, order,
+        overlay_panel_top, overlay_rise_offset, pane_action, pane_dims, panic_message,
+        pointer_cell_in, process_name, resolve_cell, selection_cells, selection_text, tab_action,
+        PaneAction, Selection, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -3375,6 +3431,27 @@ mod tests {
         let name = process_name(std::process::id()).expect("own process has a name");
         assert!(!name.is_empty());
         assert!(!name.contains('/'), "name is the basename, not a full path");
+    }
+
+    #[test]
+    fn editor_filetype_reads_the_open_file_from_an_editor_title() {
+        // An editor's window title names the open file; its extension gives the filetype.
+        assert_eq!(
+            editor_filetype(Some("nvim"), Some("main.rs (~/proj/src) - NVIM")),
+            Some("rust")
+        );
+        assert_eq!(
+            editor_filetype(Some("vim"), Some("~/app/server.py + (app) - VIM")),
+            Some("python")
+        );
+        // Not an editor -> no filetype even if the title looks like a file.
+        assert_eq!(editor_filetype(Some("zsh"), Some("build.rs")), None);
+        // Editor but no recognizable file in the title -> nothing (never a bogus filetype).
+        assert_eq!(
+            editor_filetype(Some("nvim"), Some("v1.2.3 - release notes")),
+            None
+        );
+        assert_eq!(editor_filetype(Some("nvim"), None), None);
     }
 
     #[test]

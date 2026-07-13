@@ -162,13 +162,15 @@ fn main() {
     let mut measure = TextMeasure::new(sc);
     let mut pane_overlay = PaneOverlay::default();
     for (i, pane) in panes.iter().enumerate() {
-        // The left ("editor") pane shows an editor mode (design §10.4); the others don't.
+        // The left ("editor") pane shows an editor mode + filetype (design §10.4); others don't.
         let mode = (i == 0).then_some("NORMAL");
+        let filetype = (i == 0).then_some("rust");
         let (q, l) = status_line(
             pane.rect,
             "~/skelly",
             Some("main"),
             mode,
+            filetype,
             "zsh",
             pane.cursor,
             sc,
@@ -218,6 +220,7 @@ fn status_line(
     cwd: &str,
     branch: Option<&str>,
     mode: Option<&str>,
+    filetype: Option<&str>,
     shell: &str,
     cursor: (usize, usize),
     scale: f32,
@@ -289,11 +292,18 @@ fn status_line(
             x += w + gap;
         }
     }
-    // The editor mode (design §10.4), after the branch - mirrors the binary's `mode` segment.
+    // The editor mode + filetype (design §10.4), after the branch - mirror the binary segments.
     if let Some(mode) = mode {
         let w = m.width(mode, FontRole::Mono, None);
         if x + w <= left_limit {
             labels.push(label(mode.to_owned(), x, theme.fg_secondary));
+            x += w + gap;
+        }
+    }
+    if let Some(filetype) = filetype {
+        let w = m.width(filetype, FontRole::Mono, None);
+        if x + w <= left_limit {
+            labels.push(label(filetype.to_owned(), x, theme.fg_muted));
             x += w + gap;
         }
     }
