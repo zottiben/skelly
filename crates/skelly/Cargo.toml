@@ -9,8 +9,19 @@ repository.workspace = true
 authors.workspace = true
 publish = false
 
-[lints]
-workspace = true
+# The binary needs a little platform FFI (the macOS application menu via objc2), so it defines
+# its own lint table instead of inheriting the workspace's `unsafe_code = "forbid"`: unsafe is
+# `deny` here (allowed only with a `// SAFETY:` justification), every other lint mirrors the
+# workspace.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = { level = "allow", priority = 1 }
 
 [dev-dependencies]
 # session_capture example: render a live shell session to a PNG for verification.
@@ -31,3 +42,11 @@ skelly-pane = { version = "0.1.0", path = "../skelly-pane" }
 skelly-session = { version = "0.1.0", path = "../skelly-session" }
 # Text-only clipboard; disable the default image feature to keep the tree lean.
 arboard = { version = "3.6.1", default-features = false }
+
+# macOS: build a native application menu so the standard system shortcuts (⌘H hide, ⌘M
+# minimize, ⌘Q quit, Hide Others, …) work - winit installs no menu on its own. Versions are
+# pinned to match winit 0.30's own objc2 tree so the types interoperate.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5.2"
+objc2-app-kit = { version = "0.2.2", features = ["NSMenu", "NSMenuItem", "NSApplication", "NSResponder", "NSEvent"] }
+objc2-foundation = { version = "0.2.2", features = ["NSString"] }

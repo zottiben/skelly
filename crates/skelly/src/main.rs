@@ -16,6 +16,8 @@ mod contextmenu;
 mod deadpane;
 mod emptystate;
 mod gitdock;
+#[cfg(target_os = "macos")]
+mod menu;
 mod motion;
 mod onboarding;
 mod palette;
@@ -4028,6 +4030,12 @@ impl ApplicationHandler<Wakeup> for App {
                 return;
             }
         };
+        // Install the native macOS application menu so the standard system shortcuts (⌘H hide,
+        // ⌘M minimize, ⌘Q quit, …) work - winit provides none. `resumed` runs on the main thread.
+        #[cfg(target_os = "macos")]
+        if let Some(mtm) = objc2_foundation::MainThreadMarker::new() {
+            menu::install(mtm);
+        }
 
         let size = window.inner_size();
         self.scale = window.scale_factor();
