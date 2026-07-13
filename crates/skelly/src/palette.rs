@@ -19,6 +19,9 @@ use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure,
 const PAD: f32 = 14.0;
 /// Horizontal inset of a row's text from the padded content edge (leaves room for the pill).
 const ROW_INSET: f32 = 10.0;
+/// The palette's minimum width (logical px), so it stays a comfortable, stable size instead of
+/// shrinking to hug narrow content as the query filters the results (design §10.8 palette card).
+const MIN_WIDTH: f32 = 540.0;
 /// Input row height.
 const INPUT_H: f32 = 34.0;
 /// Result-count row height.
@@ -500,7 +503,7 @@ impl Palette {
                 + measure.width(row.hint, FontRole::Micro, None);
             content_w = content_w.max(w);
         }
-        let width = content_w + 2.0 * inset;
+        let width = (content_w + 2.0 * inset).max(MIN_WIDTH * scale);
         #[allow(
             clippy::cast_precision_loss,
             reason = "the match + category counts are small, exact values"
