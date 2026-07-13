@@ -41,6 +41,17 @@ with the decision + date.
 - [x] **Scrollback search scope** - _Resolved 2026-07-13: **active pane only** (`⌘F` searches the
   focused pane's scrollback via `Terminal::find`). An all-panes / cross-pane search is a later
   additive option._
+- [~] **Per-workspace cwd/theme isolation** (§08 #2 "Each isolates tabs, cwd & theme") -
+  _Partially resolved 2026-07-13. **Tabs**: isolated (stashed per workspace, shells keep
+  running). **cwd**: already isolated - each workspace's tabs are separate shell processes that
+  each own their cwd (shells spawn in `current_dir`, `[panes] split_inherits_cwd`, tabs
+  `follow_cwd`), so a workspace's directory context is its shells' cwds; there is no single
+  "workspace cwd" in the schema. **Theme**: left OPEN. A per-workspace theme override has **no
+  config key** - the schema is a single global `[appearance] theme` with no `[[workspace]]`
+  section - so storing it would violate Hard rule 1 (no UI state without a config key) and mean
+  inventing schema the guide never defines (Hard rule 5). Settling it needs a guide-level config
+  extension (e.g. a `[[workspace]]` array with an optional `theme`), not a code guess. Until
+  then Skelly keeps one global UI theme; switching workspaces does not repaint._
 
 Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 

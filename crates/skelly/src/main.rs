@@ -244,9 +244,11 @@ impl Tab {
 }
 
 /// A workspace: a named, isolated tab set (design §08 #2 - "Each isolates tabs, cwd & theme").
-/// The *active* workspace's tabs live in `App.tabs`/`active`; the others are stashed here (their
-/// shells keep running in the background), swapped in on switch. Theme/cwd isolation are
-/// follow-ups; today a workspace isolates its tabs.
+/// The *active* workspace's tabs + groups live in `App.tabs`/`active`/`groups`; the others are
+/// stashed here (their shells keep running in the background), swapped in on switch. cwd
+/// isolation falls out of the tab isolation - each workspace's tabs are separate shell processes
+/// that own their own cwd. Per-workspace *theme* is an open decision (no config key for it yet;
+/// see design/README.md "Per-workspace cwd/theme isolation"), so the UI theme stays global.
 struct Workspace {
     /// The display name; its first letter is the sidebar chip glyph.
     name: String,
