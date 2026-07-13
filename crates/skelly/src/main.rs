@@ -256,6 +256,9 @@ struct App {
     /// A stack of recently-closed tabs' titles, for `⇧⌘T` reopen (design §11) - a fresh tab is
     /// opened carrying the title back (the shell itself can't be resurrected).
     closed_titles: Vec<String>,
+    /// Whether the tmux-style pane leader (`[panes] leader`, default `ctrl+a`, §11) was just
+    /// pressed, so the next key is a leader pane chord (`hjkl`/`⇧hjkl`/`z`/`x`/`|`/`-`).
+    leader_pending: bool,
     /// The live shadow worktree while rewound to a past state (`None` = at HEAD/now). Its
     /// drop removes the worktree, so returning to now / closing just clears it.
     shadow: Option<ShadowWorktree>,
@@ -339,6 +342,7 @@ impl App {
             onboarding: Config::is_first_run().then(onboarding::Onboarding::new),
             renaming: None,
             closed_titles: Vec::new(),
+            leader_pending: false,
             shadow: None,
             session_start: Instant::now(),
             session_started: false,
@@ -2296,6 +2300,44 @@ impl App {
         }
     }
 
+    /// Handle the tmux-style pane leader (`[panes] leader`, default `ctrl+a`, §11). Returns
+    /// whether the key was consumed. Pressing the leader arms it; the next key is a leader pane
+    /// chord (`hjkl`/`⇧hjkl`/`z`/`x`/`|`/`-`), or anything else cancels it.
+    fn on_leader(&mut self, key_event: &KeyEvent) -> bool {
+        let PhysicalKey::Code(code) = key_event.physical_key else {
+            // A pending leader is cancelled by a non-code key (e.g. a dead key).
+            if self.leader_pending {
+                self.leader_pending = false;
+                return true;
+            }
+            return false;
+        };
+        if self.leader_pending {
+            self.leader_pending = false;
+            if let Some(action) = leader_chord(code, self.modifiers) {
+                if action == PaneAction::Close {
+                    self.request_close_pane();
+                } else {
+                    self.apply_pane_action(action);
+                }
+            }
+            // Consume the key either way (a non-chord just cancels the leader).
+            return true;
+        }
+        // Arm the leader when its exact chord is pressed.
+        let mask = ModifiersState::CONTROL
+            | ModifiersState::ALT
+            | ModifiersState::SHIFT
+            | ModifiersState::SUPER;
+        if let Some((mods, key)) = parse_leader(&self.config.panes.leader) {
+            if code == key && (self.modifiers & mask) == mods {
+                self.leader_pending = true;
+                return true;
+            }
+        }
+        false
+    }
+
     /// The global Session shortcuts (design §11): `⌥⌘←` rewind one step, `⌥⌘→` fast-forward,
     /// `⌥⌘0` return to now. These work whether or not the timeline dock is open; a rewind /
     /// fast-forward opens it so the rewound state is visible. Returns whether a chord fired.
@@ -2459,6 +2501,11 @@ impl App {
         }
         if matches!(key_event.logical_key.as_ref(), Key::Named(NamedKey::F2)) {
             self.start_rename();
+            return;
+        }
+        // The tmux-style pane leader (`[panes] leader`): arm it, or apply the pending chord.
+        // Checked before terminal input so the leader key doesn't reach the shell.
+        if self.on_leader(key_event) {
             return;
         }
         // Tab management (⌘T new, ⌘W close, ⌘1..9 go-to, ⌥⇧[ ] cycle). Matched on the
@@ -3121,6 +3168,81 @@ impl App {
 /// (`⌥|` split right, `⌥-` split down, `⌥Z` zoom, `⌥1..⌥8` focus by number), plus
 /// `⌥h/j/k/l` directional focus, `⌥⇧h/j/k/l` resize, `⌥w` close, and `⌥=` even out.
 /// Returns `None` for anything else (which then reaches the shell).
+/// Parse a `[panes] leader` spec like `ctrl+a` into `(modifiers, key)`, or `None` when it names
+/// no key. Modifiers: `ctrl`/`control`, `alt`/`opt`/`option`, `shift`, `cmd`/`super`/`meta`.
+fn parse_leader(spec: &str) -> Option<(ModifiersState, KeyCode)> {
+    let mut mods = ModifiersState::empty();
+    let mut key = None;
+    for part in spec.split('+') {
+        match part.trim().to_ascii_lowercase().as_str() {
+            "" => {}
+            "ctrl" | "control" => mods |= ModifiersState::CONTROL,
+            "alt" | "opt" | "option" => mods |= ModifiersState::ALT,
+            "shift" => mods |= ModifiersState::SHIFT,
+            "cmd" | "super" | "meta" | "win" => mods |= ModifiersState::SUPER,
+            other => key = letter_key_code(other),
+        }
+    }
+    key.map(|k| (mods, k))
+}
+
+/// The `KeyCode` for a single lowercase ASCII letter (`a`..=`z`), else `None`.
+fn letter_key_code(s: &str) -> Option<KeyCode> {
+    if s.len() != 1 {
+        return None;
+    }
+    Some(match s.as_bytes()[0] {
+        b'a' => KeyCode::KeyA,
+        b'b' => KeyCode::KeyB,
+        b'c' => KeyCode::KeyC,
+        b'd' => KeyCode::KeyD,
+        b'e' => KeyCode::KeyE,
+        b'f' => KeyCode::KeyF,
+        b'g' => KeyCode::KeyG,
+        b'h' => KeyCode::KeyH,
+        b'i' => KeyCode::KeyI,
+        b'j' => KeyCode::KeyJ,
+        b'k' => KeyCode::KeyK,
+        b'l' => KeyCode::KeyL,
+        b'm' => KeyCode::KeyM,
+        b'n' => KeyCode::KeyN,
+        b'o' => KeyCode::KeyO,
+        b'p' => KeyCode::KeyP,
+        b'q' => KeyCode::KeyQ,
+        b'r' => KeyCode::KeyR,
+        b's' => KeyCode::KeyS,
+        b't' => KeyCode::KeyT,
+        b'u' => KeyCode::KeyU,
+        b'v' => KeyCode::KeyV,
+        b'w' => KeyCode::KeyW,
+        b'x' => KeyCode::KeyX,
+        b'y' => KeyCode::KeyY,
+        b'z' => KeyCode::KeyZ,
+        _ => return None,
+    })
+}
+
+/// The pane action for a leader chord (after the leader prefix, §11): `hjkl` focus, `⇧hjkl`
+/// resize, `z` zoom, `x` close, `|` (Backslash) / `-` split, else `None`.
+fn leader_chord(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
+    let shift = mods.shift_key();
+    Some(match code {
+        KeyCode::KeyH if shift => PaneAction::Resize(Dir::Left),
+        KeyCode::KeyJ if shift => PaneAction::Resize(Dir::Down),
+        KeyCode::KeyK if shift => PaneAction::Resize(Dir::Up),
+        KeyCode::KeyL if shift => PaneAction::Resize(Dir::Right),
+        KeyCode::KeyH => PaneAction::Focus(Dir::Left),
+        KeyCode::KeyJ => PaneAction::Focus(Dir::Down),
+        KeyCode::KeyK => PaneAction::Focus(Dir::Up),
+        KeyCode::KeyL => PaneAction::Focus(Dir::Right),
+        KeyCode::KeyZ => PaneAction::Zoom,
+        KeyCode::KeyX => PaneAction::Close,
+        KeyCode::Backslash => PaneAction::Split(Dir::Right),
+        KeyCode::Minus => PaneAction::Split(Dir::Down),
+        _ => return None,
+    })
+}
+
 fn pane_action(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
     // `⌥` chords only; `⌥⌘arrows` are the global session (timeline) shortcuts, handled first.
     if !mods.alt_key() || mods.super_key() {
@@ -3523,10 +3645,10 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        cycle_index, dim, editor_filetype, editor_mode, index_after_close, order,
+        cycle_index, dim, editor_filetype, editor_mode, index_after_close, leader_chord, order,
         overlay_panel_top, overlay_rise_offset, pane_action, pane_dims, panic_message,
-        pointer_cell_in, process_name, resolve_cell, selection_cells, selection_text, tab_action,
-        PaneAction, Selection, TabAction,
+        parse_leader, pointer_cell_in, process_name, resolve_cell, selection_cells, selection_text,
+        tab_action, PaneAction, Selection, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -3884,6 +4006,37 @@ mod tests {
             pane_action(KeyCode::Digit3, alt),
             Some(PaneAction::FocusIndex(2))
         );
+    }
+
+    #[test]
+    fn leader_parses_and_decodes_pane_chords() {
+        // The default `ctrl+a` leader parses to Ctrl + KeyA.
+        assert_eq!(
+            parse_leader("ctrl+a"),
+            Some((ModifiersState::CONTROL, KeyCode::KeyA))
+        );
+        assert_eq!(
+            parse_leader("Ctrl + B"),
+            Some((ModifiersState::CONTROL, KeyCode::KeyB))
+        );
+        assert_eq!(parse_leader("ctrl+"), None, "no key named");
+        // Leader chords: hjkl focus, ⇧hjkl resize, z/x/|/- (Backslash/Minus).
+        let none = ModifiersState::empty();
+        let shift = ModifiersState::SHIFT;
+        assert_eq!(
+            leader_chord(KeyCode::KeyL, none),
+            Some(PaneAction::Focus(Dir::Right))
+        );
+        assert_eq!(
+            leader_chord(KeyCode::KeyK, shift),
+            Some(PaneAction::Resize(Dir::Up))
+        );
+        assert_eq!(leader_chord(KeyCode::KeyX, none), Some(PaneAction::Close));
+        assert_eq!(
+            leader_chord(KeyCode::Backslash, none),
+            Some(PaneAction::Split(Dir::Right))
+        );
+        assert_eq!(leader_chord(KeyCode::KeyQ, none), None);
     }
 
     #[test]
