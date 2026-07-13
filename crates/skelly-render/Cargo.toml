@@ -30,4 +30,7 @@ pollster = "1.0.1"
 raw-window-handle = "0.6"
 skelly-config = { version = "0.1.0", path = "../skelly-config" }
 thiserror.workspace = true
+# The `Script` type in cosmic-text's `Fallback` trait (used to wire the Nerd Font fallback);
+# pinned to the version cosmic-text/glyphon resolve so the type matches.
+unicode-script = "0.5.8"
 wgpu = "30"

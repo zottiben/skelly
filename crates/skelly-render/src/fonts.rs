@@ -14,7 +14,11 @@
 //! letter-spacing transcribed from the §05 scale, in *logical* px (multiply by the DPI
 //! scale for physical px).
 
-use glyphon::fontdb;
+use std::sync::OnceLock;
+
+use glyphon::cosmic_text::{Fallback, PlatformFallback};
+use glyphon::{fontdb, FontSystem};
+use unicode_script::Script;
 
 /// The bundled font files, embedded in the binary so chrome renders identically anywhere.
 const IBM_PLEX_SANS_REGULAR: &[u8] = include_bytes!("../assets/fonts/IBMPlexSans-Regular.ttf");
@@ -24,12 +28,19 @@ const SPACE_GROTESK_VARIABLE: &[u8] = include_bytes!("../assets/fonts/SpaceGrote
 const JETBRAINS_MONO_REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 const JETBRAINS_MONO_MEDIUM: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Medium.ttf");
 const JETBRAINS_MONO_BOLD: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf");
+/// Symbols Nerd Font Mono - the icons-only Nerd Font, bundled so terminal programs (lazyvim,
+/// starship, …) render their glyphs without the user installing a patched font. It carries the
+/// Nerd Font private-use-area glyphs at fixed (mono) advance so they align to the cell grid; the
+/// terminal falls back to it for any glyph its primary font lacks.
+const SYMBOLS_NERD_FONT: &[u8] = include_bytes!("../assets/fonts/SymbolsNerdFontMono-Regular.ttf");
 
 /// The bundled font family names, as registered in the font database (see the `fc-scan`
 /// output the assets were verified against).
 pub(crate) const FAMILY_SANS: &str = "IBM Plex Sans";
 pub(crate) const FAMILY_DISPLAY: &str = "Space Grotesk";
 pub(crate) const FAMILY_MONO: &str = "JetBrains Mono";
+/// The bundled Nerd Font fallback family (icons for terminal programs).
+pub(crate) const FAMILY_NERD: &str = "Symbols Nerd Font Mono";
 
 /// Load the bundled chrome fonts into `db` if they are not already present. Idempotent:
 /// called on every `FontSystem` the crate builds (renderer, capture, measurer) so the
@@ -54,9 +65,64 @@ pub(crate) fn load_bundled(db: &mut fontdb::Database) {
         JETBRAINS_MONO_REGULAR,
         JETBRAINS_MONO_MEDIUM,
         JETBRAINS_MONO_BOLD,
+        SYMBOLS_NERD_FONT,
     ] {
         db.load_font_data(data.to_vec());
     }
+}
+
+/// The terminal's font fallback: the platform defaults, but with the bundled `Symbols Nerd Font
+/// Mono` inserted first in the common list so a glyph missing from the primary font (a Nerd Font
+/// icon in lazyvim/starship/…) resolves to it instead of showing tofu. Script + forbidden
+/// fallbacks defer to the platform.
+#[derive(Debug)]
+struct NerdFallback;
+
+impl Fallback for NerdFallback {
+    fn common_fallback(&self) -> &[&'static str] {
+        static LIST: OnceLock<Vec<&'static str>> = OnceLock::new();
+        LIST.get_or_init(|| {
+            let mut list = vec![FAMILY_NERD];
+            list.extend_from_slice(PlatformFallback.common_fallback());
+            list
+        })
+        .as_slice()
+    }
+
+    fn forbidden_fallback(&self) -> &[&'static str] {
+        PlatformFallback.forbidden_fallback()
+    }
+
+    fn script_fallback(&self, script: Script, locale: &str) -> &[&'static str] {
+        PlatformFallback.script_fallback(script, locale)
+    }
+}
+
+/// Build a `FontSystem` for the terminal grid: the system fonts plus Skelly's bundled families,
+/// with the bundled `JetBrains Mono` as the generic monospace default (so an unconfigured or
+/// uninstalled terminal font still renders in a known-good mono) and the [`NerdFallback`] wired so
+/// Nerd Font icon glyphs resolve to the bundled Symbols font. Mirrors `FontSystem::new`'s db setup
+/// but swaps in our fallback + monospace default.
+#[must_use]
+pub(crate) fn new_font_system() -> FontSystem {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    load_bundled(&mut db);
+    db.set_monospace_family(FAMILY_MONO);
+    db.set_sans_serif_family(FAMILY_SANS);
+    FontSystem::new_with_locale_and_db_and_fallback(locale(), db, NerdFallback)
+}
+
+/// The current locale for script-fallback ordering (mirrors cosmic-text's own detection), e.g.
+/// `en-US`; falls back to `en-US` when unset.
+fn locale() -> String {
+    std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LC_CTYPE"))
+        .or_else(|_| std::env::var("LANG"))
+        .ok()
+        .and_then(|raw| raw.split('.').next().map(|s| s.replace('_', "-")))
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "en-US".to_owned())
 }
 
 /// A chrome type token from the guide's §05 scale. Each maps 1:1 to a `(family, weight,
