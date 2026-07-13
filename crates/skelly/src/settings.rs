@@ -202,13 +202,19 @@ static CATEGORIES: &[Category] = &[
                 label: "Theme",
                 key: "appearance.theme",
                 kind: Kind::Choice {
-                    options: &["Ossein Dark", "Ossein Light"],
-                    get: |c| usize::from(c.appearance.theme == "ossein-light"),
+                    options: &["Ossein Dark", "Ossein Light", "Tokyo Night", "Kanagawa"],
+                    get: |c| match c.appearance.theme.as_str() {
+                        "ossein-light" => 1,
+                        "tokyonight" => 2,
+                        "kanagawa" => 3,
+                        _ => 0,
+                    },
                     set: |c, i| {
-                        let name = if i == 1 {
-                            "ossein-light"
-                        } else {
-                            "ossein-dark"
+                        let name = match i {
+                            1 => "ossein-light",
+                            2 => "tokyonight",
+                            3 => "kanagawa",
+                            _ => "ossein-dark",
                         };
                         name.clone_into(&mut c.appearance.theme);
                     },

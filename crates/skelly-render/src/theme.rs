@@ -187,6 +187,50 @@ impl Theme {
                 diff_del: srgb(0xD2, 0x0F, 0x39),
                 diff_hunk: srgb(0x1E, 0x66, 0xF5),
             },
+            // Tokyo Night (the canonical "night" palette; the guide's config lists it as a
+            // preset). Mapped from tokyonight.nvim's published colors to Skelly's semantic tokens.
+            "tokyonight" => Self {
+                bg_base: srgb_hex(0x1A, 0x1B, 0x26),
+                bg_sidebar: srgb(0x16, 0x16, 0x1E),
+                bg_surface: srgb(0x29, 0x2E, 0x42),
+                bg_elevated: srgb(0x2F, 0x35, 0x49),
+                bg_inset: srgb(0x16, 0x16, 0x1E),
+                fg_primary: srgb(0xC0, 0xCA, 0xF5),
+                fg_secondary: srgb(0xA9, 0xB1, 0xD6),
+                fg_muted: srgb(0x56, 0x5F, 0x89),
+                fg_faint: srgb(0x41, 0x48, 0x68),
+                accent: srgb(0x7A, 0xA2, 0xF7),
+                accent_hover: srgb(0x9E, 0xB8, 0xF9),
+                accent_subtle_alpha: 0.16,
+                border_subtle: srgb(0x1F, 0x23, 0x35),
+                border: srgb(0x29, 0x2E, 0x42),
+                border_strong: srgb(0x54, 0x5C, 0x7E),
+                diff_add: srgb(0x9E, 0xCE, 0x6A),
+                diff_del: srgb(0xF7, 0x76, 0x8E),
+                diff_hunk: srgb(0x7A, 0xA2, 0xF7),
+            },
+            // Kanagawa (the "wave" palette; the guide's config lists it as a preset). Mapped from
+            // kanagawa.nvim's published colors.
+            "kanagawa" => Self {
+                bg_base: srgb_hex(0x1F, 0x1F, 0x28),
+                bg_sidebar: srgb(0x16, 0x16, 0x1D),
+                bg_surface: srgb(0x2A, 0x2A, 0x37),
+                bg_elevated: srgb(0x36, 0x36, 0x46),
+                bg_inset: srgb(0x16, 0x16, 0x1D),
+                fg_primary: srgb(0xDC, 0xD7, 0xBA),
+                fg_secondary: srgb(0xC8, 0xC0, 0x93),
+                fg_muted: srgb(0x72, 0x71, 0x69),
+                fg_faint: srgb(0x54, 0x54, 0x64),
+                accent: srgb(0x7E, 0x9C, 0xD8),
+                accent_hover: srgb(0x7F, 0xB4, 0xCA),
+                accent_subtle_alpha: 0.16,
+                border_subtle: srgb(0x22, 0x22, 0x2C),
+                border: srgb(0x2A, 0x2A, 0x37),
+                border_strong: srgb(0x54, 0x54, 0x6D),
+                diff_add: srgb(0x76, 0x94, 0x6A),
+                diff_del: srgb(0xC3, 0x40, 0x43),
+                diff_hunk: srgb(0x7E, 0x9C, 0xD8),
+            },
             // Ossein Dark (default) - the guide's token table.
             _ => Self {
                 bg_base: srgb_hex(0x18, 0x18, 0x25),
@@ -262,6 +306,18 @@ mod tests {
         let light = Theme::resolve("ossein-light");
         assert_ne!(dark.bg_base, light.bg_base);
         assert_ne!(dark.fg_primary, light.fg_primary);
+    }
+
+    #[test]
+    fn preset_themes_resolve_to_distinct_palettes() {
+        // Tokyo Night + Kanagawa are real, distinct themes (not the Ossein fallback).
+        let ossein = Theme::resolve("ossein-dark");
+        let tokyo = Theme::resolve("tokyonight");
+        let kana = Theme::resolve("kanagawa");
+        assert_ne!(tokyo.bg_base, ossein.bg_base);
+        assert_ne!(kana.bg_base, ossein.bg_base);
+        assert_ne!(tokyo.bg_base, kana.bg_base);
+        assert_ne!(tokyo.accent, kana.accent);
     }
 
     #[test]
