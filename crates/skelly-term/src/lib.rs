@@ -116,6 +116,32 @@ pub enum CursorShape {
     Hidden,
 }
 
+/// A scrollback search hit ([`Terminal::find`], the guide's `⌘F`): where the match sits in the
+/// visible grid after it is scrolled into view, plus the buffer line to continue searching from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct FindHit {
+    /// The match's row in the visible grid (`0` = top visible row).
+    pub row: usize,
+    /// The match's starting column in that row.
+    pub col: usize,
+    /// The match length in columns (clamped to the row end for multi-line matches).
+    pub len: usize,
+    /// The match's absolute buffer line, to pass back as `from` for the next/prev search.
+    pub line: i32,
+}
+
+/// Escape a query so a `RegexSearch` matches it literally (backslash-prefix the regex metachars).
+fn escape_regex(query: &str) -> String {
+    let mut out = String::with_capacity(query.len());
+    for c in query.chars() {
+        if ".^$*+?()[]{}|\\".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// How the shell ended, reported once the child process has exited.
 ///
 /// The shell runs until the user exits it (`exit`, Ctrl-D), it is killed, or it
@@ -419,6 +445,64 @@ impl Terminal {
             term.scroll_display(scroll);
         }
         self.dirty.store(true, Ordering::Relaxed);
+    }
+
+    /// Search the scrollback for `query` (a literal, case-sensitive match) and scroll the found
+    /// match into view (the guide's `⌘F` "Find in scrollback"). `from` is the line of the current
+    /// match to continue from (`None` starts fresh - the newest match searching up, or the oldest
+    /// searching down); `forward` searches toward newer output. Returns the match's visible
+    /// position, or `None` when there is no match.
+    ///
+    /// # Panics
+    /// Panics if the terminal mutex is poisoned.
+    pub fn find(&mut self, query: &str, from: Option<i32>, forward: bool) -> Option<FindHit> {
+        use alacritty_terminal::grid::Dimensions;
+        use alacritty_terminal::index::{Column, Direction, Line, Point, Side};
+        use alacritty_terminal::term::search::RegexSearch;
+
+        if query.is_empty() {
+            return None;
+        }
+        let mut regex = RegexSearch::new(&escape_regex(query)).ok()?;
+        let mut term = self.term.lock().expect("terminal mutex poisoned");
+        let cols = term.columns();
+        let screen = term.screen_lines();
+        let history = term.history_size();
+        let dir = if forward {
+            Direction::Right
+        } else {
+            Direction::Left
+        };
+        // Step one line off the current match so we advance to the next one; a fresh search starts
+        // at the bottom (searching up) or the top of history (searching down).
+        let origin = match from {
+            Some(line) if forward => Point::new(Line(line + 1), Column(0)),
+            Some(line) => Point::new(Line(line - 1), Column(cols.saturating_sub(1))),
+            None if forward => Point::new(Line(-(i32::try_from(history).unwrap_or(0))), Column(0)),
+            None => Point::new(
+                Line(i32::try_from(screen).unwrap_or(1) - 1),
+                Column(cols.saturating_sub(1)),
+            ),
+        };
+        let m = term.search_next(&mut regex, origin, dir, Side::Left, None)?;
+        let (start, end) = (*m.start(), *m.end());
+        term.scroll_to_point(start);
+        let offset = i32::try_from(term.grid().display_offset()).unwrap_or(0);
+        let row = usize::try_from((start.line.0 + offset).max(0)).unwrap_or(0);
+        let col = start.column.0.min(cols.saturating_sub(1));
+        // A match may span lines; highlight to the row end in that case.
+        let len = if end.line == start.line {
+            (end.column.0 + 1).saturating_sub(col)
+        } else {
+            cols - col
+        };
+        self.dirty.store(true, Ordering::Relaxed);
+        Some(FindHit {
+            row,
+            col,
+            len,
+            line: start.line.0,
+        })
     }
 
     /// Clear the saved scrollback history (the guide's `⌘L` "Clear scrollback"), leaving the

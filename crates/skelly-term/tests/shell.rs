@@ -70,6 +70,44 @@ fn foreground_job_is_detected() {
 }
 
 #[test]
+fn find_locates_text_scrolled_into_history() {
+    // A short grid so a burst of output pushes an early line off-screen into scrollback.
+    let mut term = Terminal::spawn(80, 8, || {}).expect("spawn shell");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while term.snapshot().iter().all(String::is_empty) {
+        assert!(Instant::now() < deadline, "shell never produced a prompt");
+        sleep(Duration::from_millis(50));
+    }
+    // Print a unique marker, then enough filler to scroll it out of the 8-row screen.
+    term.write(b"printf 'UNIQ_FIND_MARKER_42\\n'; for i in $(seq 1 40); do echo filler$i; done\n");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !term.snapshot().iter().any(|l| l.contains("filler40")) {
+        assert!(Instant::now() < deadline, "filler output never completed");
+        sleep(Duration::from_millis(50));
+    }
+    let has_marker = |t: &Terminal| {
+        t.snapshot()
+            .iter()
+            .any(|l| l.contains("UNIQ_FIND_MARKER_42"))
+    };
+    assert!(
+        !has_marker(&term),
+        "the marker scrolled off-screen into history"
+    );
+
+    // Find pulls the marker back into view; a missing query finds nothing.
+    let hit = term
+        .find("UNIQ_FIND_MARKER_42", None, false)
+        .expect("the marker is found in scrollback");
+    assert!(hit.len >= "UNIQ_FIND_MARKER_42".len());
+    assert!(has_marker(&term), "the match was scrolled into view");
+    assert!(
+        term.find("NO_SUCH_TEXT_ZZZ", None, false).is_none(),
+        "a query with no match returns None"
+    );
+}
+
+#[test]
 fn shell_executes_a_command_and_output_reaches_the_grid() {
     let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
 

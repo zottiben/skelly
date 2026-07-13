@@ -269,6 +269,9 @@ struct App {
     /// Whether the keybinding cheatsheet overlay (`⌘/`, §11) is open. While up it captures input
     /// (`Esc` / `⌘/` closes).
     cheatsheet_open: bool,
+    /// The scrollback find state (`⌘F`, §11), `Some` while the find bar is open. Captures typing
+    /// into the query; `Enter`/`↑↓` navigate matches, `Esc` closes.
+    find: Option<FindState>,
     /// The live shadow worktree while rewound to a past state (`None` = at HEAD/now). Its
     /// drop removes the worktree, so returning to now / closing just clears it.
     shadow: Option<ShadowWorktree>,
@@ -354,6 +357,7 @@ impl App {
             closed_titles: Vec::new(),
             leader_pending: false,
             cheatsheet_open: false,
+            find: None,
             shadow: None,
             session_start: Instant::now(),
             session_started: false,
@@ -629,6 +633,8 @@ impl App {
         // modal editor. `job_name` is the cached focused-pane process (refreshed each redraw);
         // the shape is the real DECSCUSR signal the editor sets, so this is not a guess.
         let job = ws.job_name.as_deref();
+        // The focused pane's rect, captured for the `⌘F` find-match highlight.
+        let mut focused_rect = None;
         // Collect the pane rects + exit statuses + cursor position/shape + focus first, so the
         // tab borrow ends before the measurer's mutable borrow.
         let panes: Vec<(
@@ -649,6 +655,9 @@ impl App {
                     w: rect.w,
                     h: rect.h,
                 };
+                if id == focused_id {
+                    focused_rect = Some(px);
+                }
                 // Only the focused pane surfaces an editor mode + filetype (its job is tracked).
                 let (mode, filetype) = if id == focused_id {
                     (
@@ -708,7 +717,107 @@ impl App {
                 }
             }
         }
+        // The scrollback find bar + match highlight (design §11 `⌘F`).
+        if let Some((query, hit, searched)) = self
+            .find
+            .as_ref()
+            .map(|f| (f.query.clone(), f.hit, f.searched))
+        {
+            self.push_find_overlay(&mut quads, &mut labels, focused_rect, &query, hit, searched);
+        }
         (scrims, quads, labels)
+    }
+
+    /// Draw the find-match highlight over the focused pane and the find bar along the window
+    /// bottom (design §11 `⌘F`): `Find: <query>` with a match / no-match status.
+    fn push_find_overlay(
+        &mut self,
+        quads: &mut Vec<skelly_render::ChromeQuad>,
+        labels: &mut Vec<ProseLabel>,
+        focused_rect: Option<PxRect>,
+        query: &str,
+        hit: Option<skelly_term::FindHit>,
+        searched: bool,
+    ) {
+        use skelly_render::{ChromeQuad, FontRole};
+        let scale = scale32(self.scale);
+        // The match highlight: an accent tint over the matched cells in the focused pane.
+        if let (Some(rect), Some(hit)) = (focused_rect, hit) {
+            let (cell_w, cell_h) = self.cell_size();
+            let inset = self.pane_inset();
+            #[allow(
+                clippy::cast_precision_loss,
+                reason = "cell col/row are small grid coordinates"
+            )]
+            let (col, row, len) = (hit.col as f32, hit.row as f32, hit.len.max(1) as f32);
+            quads.push(ChromeQuad::tint(
+                PxRect {
+                    x: rect.x + inset + col * cell_w,
+                    y: rect.y + inset + row * cell_h,
+                    w: len * cell_w,
+                    h: cell_h,
+                },
+                self.theme.accent,
+                0.4,
+                0.0,
+            ));
+        }
+        // The find bar: a bg.inset strip along the window bottom with a border.subtle top
+        // hairline, `⌕ Find: <query>` on the left, and a match status on the right.
+        let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
+        let bar_h = statusline::HEIGHT * scale;
+        let top = surface_h - bar_h;
+        quads.push(ChromeQuad::fill(
+            PxRect {
+                x: 0.0,
+                y: top,
+                w: surface_w,
+                h: bar_h,
+            },
+            self.theme.bg_inset,
+        ));
+        quads.push(ChromeQuad::fill(
+            PxRect {
+                x: 0.0,
+                y: top,
+                w: surface_w,
+                h: scale.max(1.0),
+            },
+            self.theme.accent,
+        ));
+        let pad = 14.0 * scale;
+        let line = self.measure.line_height(FontRole::Mono);
+        let cy = top + (bar_h - line) * 0.5;
+        labels.push(ProseLabel {
+            text: format!("\u{2315} find: {query}"),
+            x: pad,
+            y: cy,
+            role: FontRole::Mono,
+            color: self.theme.fg_primary,
+            weight: None,
+            max_w: f32::MAX,
+        });
+        let status = if hit.is_some() {
+            "match".to_owned()
+        } else if searched {
+            "no match".to_owned()
+        } else {
+            "\u{2191}\u{2193} next / prev  \u{21a9} search  esc close".to_owned()
+        };
+        let sw = self.measure.width(&status, FontRole::Mono, None);
+        labels.push(ProseLabel {
+            text: status,
+            x: surface_w - pad - sw,
+            y: cy,
+            role: FontRole::Mono,
+            color: if hit.is_none() && searched {
+                self.theme.diff_del
+            } else {
+                self.theme.fg_muted
+            },
+            weight: None,
+            max_w: f32::MAX,
+        });
     }
 
     /// Repaint every visible pane from its terminal grid, resolving cell colors and
@@ -1731,6 +1840,88 @@ impl App {
         true
     }
 
+    /// Open (or refocus) the scrollback find bar (design §11 `⌘F`) for the focused pane.
+    fn open_find(&mut self) {
+        if self.find.is_none() {
+            self.find = Some(FindState {
+                query: String::new(),
+                hit: None,
+                searched: false,
+            });
+        }
+        self.request_redraw();
+    }
+
+    /// Close the find bar, clear its highlight, and snap the focused pane back to the bottom.
+    fn close_find(&mut self) {
+        if self.find.take().is_some() {
+            if let Some(term) = self.focused_term() {
+                term.scroll_to_bottom();
+            }
+            self.request_redraw();
+        }
+    }
+
+    /// Run the current find query over the focused pane's scrollback (design §11): `from` = the
+    /// current match line to continue from (`None` = a fresh search), `forward` toward newer
+    /// output. Stores the hit (which scrolls it into view) or marks "no match".
+    fn run_find(&mut self, from: Option<i32>, forward: bool) {
+        let Some(query) = self.find.as_ref().map(|f| f.query.clone()) else {
+            return;
+        };
+        let hit = if query.is_empty() {
+            None
+        } else {
+            self.focused_term()
+                .and_then(|t| t.find(&query, from, forward))
+        };
+        if let Some(find) = self.find.as_mut() {
+            find.hit = hit;
+            find.searched = !query.is_empty();
+        }
+        self.request_redraw();
+    }
+
+    /// Feed a key to the open find bar: typing edits the query (re-searching from the top),
+    /// `Enter`/`↓` next match, `⇧Enter`/`↑` previous, `Esc` closes. Returns whether it consumed
+    /// the key.
+    fn on_find_key(&mut self, key_event: &KeyEvent) -> bool {
+        if self.find.is_none() {
+            return false;
+        }
+        match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape) => self.close_find(),
+            Key::Named(NamedKey::Enter | NamedKey::ArrowDown) => {
+                let from = self.find.as_ref().and_then(|f| f.hit.map(|h| h.line));
+                self.run_find(from, self.modifiers.shift_key());
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                let from = self.find.as_ref().and_then(|f| f.hit.map(|h| h.line));
+                self.run_find(from, true);
+            }
+            Key::Named(NamedKey::Backspace) => {
+                if let Some(find) = self.find.as_mut() {
+                    find.query.pop();
+                }
+                self.run_find(None, false);
+            }
+            Key::Character(ch) => {
+                if let Some(find) = self.find.as_mut() {
+                    find.query.push_str(ch);
+                }
+                self.run_find(None, false);
+            }
+            Key::Named(NamedKey::Space) => {
+                if let Some(find) = self.find.as_mut() {
+                    find.query.push(' ');
+                }
+                self.run_find(None, false);
+            }
+            _ => {}
+        }
+        true
+    }
+
     /// Reopen the most recently closed tab (design §11 `⇧⌘T`): a fresh tab carrying its title
     /// back (the killed shell can't be resurrected). A no-op when nothing was closed.
     fn reopen_closed_tab(&mut self) {
@@ -2462,6 +2653,8 @@ impl App {
         } else if ch == "/" {
             self.cheatsheet_open = !self.cheatsheet_open;
             self.request_redraw();
+        } else if ch.eq_ignore_ascii_case("f") {
+            self.open_find();
         } else if ch.eq_ignore_ascii_case("l") {
             self.clear_focused_scrollback();
         } else if ch == "=" || ch == "+" {
@@ -2526,6 +2719,11 @@ impl App {
                 self.cheatsheet_open = false;
                 self.request_redraw();
             }
+            return;
+        }
+        // The scrollback find bar (§11) captures input while open (typing / navigate / Esc). `⌘F`
+        // and `⌘K` etc. still route (super chords), so let those fall through first.
+        if self.find.is_some() && !self.modifiers.super_key() && self.on_find_key(key_event) {
             return;
         }
         // The "running job" confirm modal captures input while fully up (design §12).
@@ -2789,6 +2987,14 @@ struct ConfirmFrame {
     panel: PxRect,
     quads: Vec<skelly_render::ChromeQuad>,
     labels: Vec<skelly_render::ProseLabel>,
+}
+
+/// The scrollback find bar state (design §11 `⌘F`): the query and the current match hit.
+struct FindState {
+    query: String,
+    hit: Option<skelly_term::FindHit>,
+    /// Whether a non-empty query has been searched (so the bar can show "no match").
+    searched: bool,
 }
 
 /// Owned first-run onboarding frame data the borrowed [`OverlayView`] points at.
