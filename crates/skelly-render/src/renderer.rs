@@ -290,7 +290,8 @@ impl Renderer {
 
     /// Rebuild the terminal cell font at a new `font_size` (px) / `line_height` - the live
     /// `⌘=/-/0` bindings (design §11). Only the terminal grid layer changes; the proportional
-    /// chrome is unaffected. The binary re-fits the PTY grids to the new [`cell_metrics`] after.
+    /// chrome is unaffected. The binary re-fits the PTY grids to the new [`Renderer::cell_metrics`]
+    /// after.
     pub fn set_font_size(&mut self, font_size: u16, line_height: f32) {
         self.text.set_font_size(font_size, line_height);
     }

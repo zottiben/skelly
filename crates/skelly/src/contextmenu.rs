@@ -7,7 +7,7 @@
 //! anchor here), routing keys / clicks, and running each action against that tab.
 //!
 //! The guide's "Move to group ›" submenu is realized as flat rows (the overlay is a single card):
-//! a "Move to <group>" per other group, "New group", and "Remove from group" when grouped.
+//! a `Move to <group>` per other group, "New group", and "Remove from group" when grouped.
 
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, TextMeasure, Theme};
 
