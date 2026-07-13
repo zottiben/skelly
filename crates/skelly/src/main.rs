@@ -29,7 +29,7 @@ mod toast;
 mod tooltip;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
@@ -39,7 +39,7 @@ use skelly_render::{
     AnsiPalette, CursorShape, GitDockView, GridCell, OverlayView, PaneView, ProseLabel, PxRect,
     Renderer, SettingsView, SidebarView, Srgb, TextMeasure, Theme, TimelineView,
 };
-use skelly_session::{Actor, Repo, SessionEvent, ShadowWorktree};
+use skelly_session::{Actor, Repo, SessionEvent, ShadowWorktree, Status};
 use skelly_term::{CellAttrs, CellColor, ExitStatus, TermCell, Terminal};
 
 use confirm::{CloseTarget, Confirm};
@@ -89,6 +89,9 @@ const DOCK_BUTTON_INSET: f32 = 46.0;
 const RAIL_WIDTH: f32 = 56.0;
 /// How long a transient toast stays up before it auto-dismisses (design §12).
 const TOAST_DURATION: Duration = Duration::from_secs(4);
+/// How often the background thread polls the repo's working tree to record edits into the session
+/// timeline (design §10.5). Off the UI thread, so the interval is a battery/freshness trade-off.
+const GIT_POLL_INTERVAL: Duration = Duration::from_secs(4);
 /// The caret blink half-period (design §06 "caret block blinks", steps(1) ~1.1s = 530ms on/off).
 /// Only applies when the running program requests a blinking cursor (`DECSCUSR`); a steady cursor
 /// (vim normal mode, most shells) never blinks. The phase resets on each keypress.
@@ -111,9 +114,13 @@ const MIN_FONT_SIZE: u16 = 8;
 const MAX_FONT_SIZE: u16 = 32;
 const DEFAULT_FONT_SIZE: u16 = 14;
 
-/// Event the reader thread sends to wake the UI when a shell produces output.
+/// A user event that wakes the UI loop: a shell produced output (needs a repaint), or the git
+/// poll thread posted a fresh working-tree status (drained, repaints only if it changed).
 #[derive(Debug, Clone, Copy)]
-struct Wakeup;
+enum Wakeup {
+    Shell,
+    GitPoll,
+}
 
 fn main() -> anyhow::Result<()> {
     // Hold the log-file guard for the whole run so buffered logs flush on exit; install the
@@ -424,6 +431,12 @@ struct App {
     /// The last-applied blink "off" state, so the loop repaints only when the phase actually
     /// flips (edge-triggered), never in a redraw loop.
     blink_phase: bool,
+    /// The latest working-tree status produced by the background git-poll thread, drained on the
+    /// UI thread to record timeline edit events. `None` until a fresh poll lands.
+    pending_status: Arc<Mutex<Option<Status>>>,
+    /// The set of working-tree paths already known to be dirty (repo-relative). A path appearing
+    /// here that wasn't before is a fresh edit, recorded once into the timeline (design §10.5).
+    tracked_dirty: HashSet<String>,
     /// The command palette's open / close animation (design §03 motion), live only while it
     /// plays. While any animation is set the event loop polls + redraws each frame; it clears
     /// itself when done (finalizing the close), returning the loop to its idle `Wait`.
@@ -513,6 +526,8 @@ impl App {
             tooltip_visible: false,
             blink_epoch: Instant::now(),
             blink_phase: false,
+            pending_status: Arc::new(Mutex::new(None)),
+            tracked_dirty: HashSet::new(),
             palette_anim: None,
             confirm_anim: None,
         }
@@ -840,7 +855,7 @@ impl App {
             } else {
                 let proxy = proxy.clone();
                 match Terminal::spawn_shell(target.0, target.1, Some(shell.as_str()), move || {
-                    let _ = proxy.send_event(Wakeup);
+                    let _ = proxy.send_event(Wakeup::Shell);
                 }) {
                     Ok(term) => {
                         // Apply the configured default cursor shape (appearance.cursor) to the
@@ -1743,6 +1758,89 @@ impl App {
     fn persist_sidebar_mode(&mut self) {
         self.config.sidebar.mode = self.sidebar.mode();
         self.persist_config();
+    }
+
+    /// Start the background thread that watches the repo's working tree, so the session timeline
+    /// records the user's edits (design §10.5) - which happen inside the panes (vim), invisible to
+    /// Skelly otherwise. Polling runs off the UI thread and posts each status via `Wakeup::GitPoll`
+    /// (drained in [`drain_git_poll`](Self::drain_git_poll)); a non-repo cwd simply records nothing.
+    fn start_git_poll(&mut self) {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let Ok(Some(repo)) = Repo::discover(&cwd) else {
+            return;
+        };
+        // Seed the known-dirty set from the current tree, so changes made *before* this session
+        // aren't re-reported as edits - only new edits during the session become timeline events.
+        if let Ok(status) = repo.status() {
+            self.tracked_dirty = status
+                .files
+                .iter()
+                .map(|f| f.path.to_string_lossy().into_owned())
+                .collect();
+        }
+        let slot = Arc::clone(&self.pending_status);
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(GIT_POLL_INTERVAL);
+            let Ok(status) = repo.status() else {
+                continue;
+            };
+            if let Ok(mut guard) = slot.lock() {
+                *guard = Some(status);
+            }
+            if proxy.send_event(Wakeup::GitPoll).is_err() {
+                break; // the event loop is gone; stop polling.
+            }
+        });
+    }
+
+    /// Drain the latest working-tree status from the poll thread: record any file that became
+    /// dirty since the last poll as a timeline edit event, and refresh the status-line dirty
+    /// totals. Repaints only when something changed (so idle polls cost nothing).
+    fn drain_git_poll(&mut self) {
+        let Some(status) = self.pending_status.lock().ok().and_then(|mut g| g.take()) else {
+            return;
+        };
+        let key = |f: &skelly_session::ChangedFile| f.path.to_string_lossy().into_owned();
+        let current: HashSet<String> = status.files.iter().map(&key).collect();
+        // Files newly dirty since the last poll = edits made this session; record one event.
+        let newly: Vec<&skelly_session::ChangedFile> = status
+            .files
+            .iter()
+            .filter(|f| !self.tracked_dirty.contains(&key(f)))
+            .collect();
+        if !newly.is_empty() {
+            let (title, detail) = if let [f] = newly.as_slice() {
+                let path = key(f);
+                let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
+                (
+                    format!("Edited {name}"),
+                    format!("+{} \u{2212}{} \u{b7} {path}", f.added, f.removed),
+                )
+            } else {
+                let (a, r) = newly
+                    .iter()
+                    .fold((0u32, 0u32), |(a, r), f| (a + f.added, r + f.removed));
+                (
+                    format!("Edited {} files", newly.len()),
+                    format!("+{a} \u{2212}{r}"),
+                )
+            };
+            tracing::debug!(files = newly.len(), %title, "timeline: recorded edit");
+            self.record_event(Actor::Human, title, detail, None);
+        }
+        // Refresh the status-line dirty totals + the tracked set from the fresh status.
+        let (total_a, total_r) = status
+            .files
+            .iter()
+            .fold((0u32, 0u32), |(a, r), f| (a + f.added, r + f.removed));
+        let new_dirty = (total_a > 0 || total_r > 0).then_some((total_a, total_r));
+        let changed = new_dirty != self.status_dirty || current != self.tracked_dirty;
+        self.status_dirty = new_dirty;
+        self.tracked_dirty = current;
+        if changed {
+            self.request_redraw();
+        }
     }
 
     /// Toggle the git diff dock (`⇧⌘G`). Opening refreshes the repo status and the
@@ -4359,16 +4457,20 @@ impl ApplicationHandler<Wakeup> for App {
         // Seed the session timeline with its "session started" anchor, so it is the first
         // event even if the user commits before ever opening the timeline (guarded to once).
         self.record_session_start();
+        // Start recording working-tree edits into the timeline (design §10.5).
+        self.start_git_poll();
         tracing::info!(
             panes = self.active_tab().panes.len(),
             "window, GPU, and shell ready"
         );
     }
 
-    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: Wakeup) {
-        // New shell output arrived; ask the window to repaint.
-        if let Some(window) = self.window.as_ref() {
-            window.request_redraw();
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: Wakeup) {
+        match event {
+            // New shell output arrived; ask the window to repaint.
+            Wakeup::Shell => self.request_redraw(),
+            // A fresh working-tree status; record any new edits (repaints only if it changed).
+            Wakeup::GitPoll => self.drain_git_poll(),
         }
     }
 
