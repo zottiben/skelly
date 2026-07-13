@@ -427,6 +427,16 @@ impl Terminal {
         }
     }
 
+    /// Whether the running program has requested a *blinking* cursor (via `DECSCUSR`'s blinking
+    /// styles). The renderer blinks the caret only when this is set - a solid cursor stays solid
+    /// (so vim's steady normal-mode cursor never blinks). Design §06 "caret block blinks".
+    #[must_use]
+    pub fn cursor_blinking(&self) -> bool {
+        self.term
+            .lock()
+            .is_ok_and(|term| term.cursor_style().blinking)
+    }
+
     /// Set the *default* cursor shape (the config `appearance.cursor`) - what the cursor is when a
     /// program hasn't overridden it via `DECSCUSR`. A program's per-mode cursor (vim) still wins;
     /// this just changes the resting shape at the shell. Applies live to this terminal.

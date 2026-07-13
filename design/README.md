@@ -68,6 +68,16 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Motion polish scoped to the caret blink; panel slides deferred (§06).** Added the
+  §06 caret blink: the focused caret blinks on a 530ms half-cycle **only when the running program
+  requests a blinking cursor** (`DECSCUSR`; vim's steady normal-mode cursor never blinks), reusing
+  the `WaitUntil` deadline path (edge-triggered, resets on keypress - no idle busy-loop). Decided
+  NOT to add the tab-switch crossfade / pane split-close / dock-sidebar slide animations: they add
+  latency and risk the input snappiness a vim workflow prioritizes (the perf work above cut a frame
+  of latency), and a transient animation can't be verified headlessly. The `motion.rs` infra +
+  `OverlayAnim` settle pattern remain (used by the palette + confirm modal) if a specific slide is
+  requested later.
+
 - 2026-07-13 - **Settings audit: which controls apply, and which await features.** Every control
   round-trips its config key (Hard rule 1). Applied live: `appearance.theme` / `font_size` /
   `line_height` / `show_status_line`, `sidebar.mode` / `width` / `show_pinned`, `appearance.cursor`

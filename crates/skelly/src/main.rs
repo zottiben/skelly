@@ -82,6 +82,10 @@ const RESIZE_STEP: f32 = 0.04;
 const RAIL_WIDTH: f32 = 56.0;
 /// How long a transient toast stays up before it auto-dismisses (design §12).
 const TOAST_DURATION: Duration = Duration::from_secs(4);
+/// The caret blink half-period (design §06 "caret block blinks", steps(1) ~1.1s = 530ms on/off).
+/// Only applies when the running program requests a blinking cursor (`DECSCUSR`); a steady cursor
+/// (vim normal mode, most shells) never blinks. The phase resets on each keypress.
+const CURSOR_BLINK_INTERVAL: Duration = Duration::from_millis(530);
 /// How long the pointer must rest on an icon-only element before its tooltip shows (design §09).
 const HOVER_DELAY: Duration = Duration::from_millis(450);
 /// Logical width (px) of the git diff dock - the guide's default (resizable 360-560 is a
@@ -404,6 +408,12 @@ struct App {
     /// Whether the hover tooltip has crossed its delay and is currently drawn (a one-shot latch so
     /// the reveal repaints exactly once, not every idle wake).
     tooltip_visible: bool,
+    /// When the caret-blink cycle last reset (each keypress). The blink phase is measured from
+    /// here so the cursor is solid right after typing, then blinks while idle (design §06).
+    blink_epoch: Instant,
+    /// The last-applied blink "off" state, so the loop repaints only when the phase actually
+    /// flips (edge-triggered), never in a redraw loop.
+    blink_phase: bool,
     /// The command palette's open / close animation (design §03 motion), live only while it
     /// plays. While any animation is set the event loop polls + redraws each frame; it clears
     /// itself when done (finalizing the close), returning the loop to its idle `Wait`.
@@ -490,6 +500,8 @@ impl App {
             toast_expires: Instant::now(),
             hover_tip: None,
             tooltip_visible: false,
+            blink_epoch: Instant::now(),
+            blink_phase: false,
             palette_anim: None,
             confirm_anim: None,
         }
@@ -679,6 +691,12 @@ impl App {
         ws.panes.get_mut(&id)
     }
 
+    /// The focused pane's terminal, borrowed immutably.
+    fn focused_term_ref(&self) -> Option<&Terminal> {
+        let ws = self.active_tab();
+        ws.panes.get(&ws.tree.focused())
+    }
+
     /// Whether the focused pane's shell has exited (so it shows the "shell exited" overlay
     /// and swallows input, waiting for a restart).
     fn focused_pane_dead(&self) -> bool {
@@ -786,6 +804,7 @@ impl App {
         let inset = self.pane_inset();
         let scale = scale32(self.scale);
         let viewport = self.viewport_rect();
+        let blink_off = self.cursor_blink_off(Instant::now());
         let ws = self.active_tab();
         let focused = ws.tree.focused();
         // A pristine single-pane tab paints the empty-state mark + hint chips over its
@@ -830,14 +849,22 @@ impl App {
                     Some((sid, sel)) if sid == id => selection_cells(sel, rows.len(), cols),
                     _ => Vec::new(),
                 };
+                // Blink the caret only in the focused pane, only when the program requested a
+                // blinking cursor, and only in the "off" half of the cycle (design §06).
+                let is_focused = id == focused;
+                let cursor_shape = if is_focused && blink_off && term.cursor_blinking() {
+                    CursorShape::Hidden
+                } else {
+                    render_cursor_shape(term.cursor_shape())
+                };
                 Some(PaneFrame {
                     rect,
                     origin,
                     rows,
                     cursor: term.cursor(),
-                    cursor_shape: render_cursor_shape(term.cursor_shape()),
+                    cursor_shape,
                     selection,
-                    focused: id == focused,
+                    focused: is_focused,
                     logo,
                 })
             })
@@ -3379,6 +3406,21 @@ impl App {
         true
     }
 
+    /// Whether the caret is in the "off" half of its blink cycle right now, measured from
+    /// `blink_epoch` (the last keypress). The renderer hides the focused caret when this is true
+    /// and the program requested a blinking cursor (design §06).
+    fn cursor_blink_off(&self, now: Instant) -> bool {
+        let elapsed = now.saturating_duration_since(self.blink_epoch);
+        (elapsed.as_millis() / CURSOR_BLINK_INTERVAL.as_millis()) % 2 == 1
+    }
+
+    /// Whether the focused pane's cursor is currently requesting a blink (so the loop knows to
+    /// wake at the next toggle to repaint it).
+    fn focused_cursor_blinking(&self) -> bool {
+        self.focused_term_ref()
+            .is_some_and(skelly_term::Terminal::cursor_blinking)
+    }
+
     /// Clear the focused pane's scrollback history (design §11 `⌘L`).
     fn clear_focused_scrollback(&mut self) {
         if let Some(term) = self.focused_term() {
@@ -3539,6 +3581,8 @@ impl App {
     /// A dead pane instead restarts on Enter and swallows the rest; a live pane forwards
     /// the bytes, and submitting a command (Enter) retires the tab's empty state.
     fn forward_key_to_focused(&mut self, key_event: &KeyEvent) {
+        // Typing resets the caret-blink cycle so the cursor is solid while the user works.
+        self.blink_epoch = Instant::now();
         let is_enter = matches!(key_event.logical_key.as_ref(), Key::Named(NamedKey::Enter));
         // A focused pane whose shell has exited shows the "shell exited" overlay: Enter
         // restarts the shell, and every other key is swallowed (there is no shell to send
@@ -4259,6 +4303,16 @@ impl ApplicationHandler<Wakeup> for App {
                 self.request_redraw();
             }
         }
+        // Toggle a blinking caret (design §06) - edge-triggered so it repaints once per flip, only
+        // while the focused program requested a blink.
+        let blinking = self.focused_cursor_blinking();
+        if blinking {
+            let off = self.cursor_blink_off(now);
+            if off != self.blink_phase {
+                self.blink_phase = off;
+                self.request_redraw();
+            }
+        }
         // While any animation is live, poll and repaint each frame so it advances; otherwise idle
         // in `Wait` until the next real event (shell output, input, resize) - or sleep only until
         // the earliest pending deadline (a toast's expiry, or a tooltip's reveal) so the loop
@@ -4274,6 +4328,14 @@ impl ApplicationHandler<Wakeup> for App {
                 let reveal = *since + HOVER_DELAY;
                 deadline = Some(deadline.map_or(reveal, |d| d.min(reveal)));
             }
+        }
+        // Wake at the next caret-blink toggle so the blink keeps ticking while idle.
+        if blinking {
+            let elapsed = now.saturating_duration_since(self.blink_epoch);
+            let ticks = elapsed.as_millis() / CURSOR_BLINK_INTERVAL.as_millis();
+            let next = self.blink_epoch
+                + CURSOR_BLINK_INTERVAL * u32::try_from(ticks + 1).unwrap_or(u32::MAX);
+            deadline = Some(deadline.map_or(next, |d| d.min(next)));
         }
         match deadline {
             Some(d) => event_loop.set_control_flow(ControlFlow::WaitUntil(d)),
