@@ -2,8 +2,7 @@
 
 A barebones, keyboard-driven terminal emulator built natively in Rust. Minimal by
 design, for vim / neovim / LazyVim development: multi-pane splits, per-repo git
-diff, and a rewindable session timeline. Ghostty-grade minimalism with a Zen-style
-tab sidebar. Targets macOS and Linux.
+diff, and a rewindable session timeline.
 
 ## Install
 
@@ -40,9 +39,7 @@ cargo test --workspace   # run the test suite
 ```
 
 Right now the binary loads `~/.config/skelly/config.toml` (or spec defaults when
-there is no file) and reports the resolved settings - proving the config slice
-end-to-end. Configuration is the single source of truth: every setting maps 1:1 to
-a `config.toml` key.
+there is no file) and reports the resolved settings.
 
 ## Contributing
 
