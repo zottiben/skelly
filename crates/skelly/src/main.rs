@@ -48,7 +48,7 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
-use winit::window::{Window, WindowId};
+use winit::window::{CursorIcon, Window, WindowId};
 
 /// Logical padding (px) around the whole pane area - the window content margin.
 const WINDOW_PAD: f32 = 12.0;
@@ -66,6 +66,11 @@ const RAIL_WIDTH: f32 = 56.0;
 /// Logical width (px) of the git diff dock - the guide's default (resizable 360-560 is a
 /// later slice, so it is fixed for now).
 const GIT_DOCK_WIDTH: f32 = 420.0;
+/// The right dock's resizable width bounds (logical px), per the guide's dims (420 default).
+const DOCK_WIDTH_MIN: f32 = 360.0;
+const DOCK_WIDTH_MAX: f32 = 560.0;
+/// The grab zone (logical px, each side) around the dock's left edge for a resize drag.
+const DOCK_GRAB: f32 = 5.0;
 /// Diff lines scrolled per `PageUp`/`PageDown` in the git dock.
 const DIFF_SCROLL_LINES: i32 = 10;
 /// Terminal font-size bounds + reset default (the `⌘=/-/0` bindings, §11), matching the
@@ -303,6 +308,11 @@ struct App {
     pointer: (f64, f64),
     /// Whether a mouse-drag selection is in progress (in the active tab).
     selecting: bool,
+    /// The right dock's width in **logical** px (resizable 360-560, the guide's dims); dragging
+    /// its left edge changes it.
+    dock_width: f32,
+    /// Whether the right dock's left edge is being dragged to resize it.
+    dock_resizing: bool,
     /// The command palette's open / close animation (design §03 motion), live only while it
     /// plays. While any animation is set the event loop polls + redraws each frame; it clears
     /// itself when done (finalizing the close), returning the loop to its idle `Wait`.
@@ -377,6 +387,8 @@ impl App {
             modifiers: ModifiersState::empty(),
             pointer: (0.0, 0.0),
             selecting: false,
+            dock_width: GIT_DOCK_WIDTH,
+            dock_resizing: false,
             palette_anim: None,
             confirm_anim: None,
         }
@@ -446,10 +458,31 @@ impl App {
     /// before it. Both use the guide's 420px default.
     fn right_dock_width_px(&self) -> f32 {
         if self.git_dock.open || self.timeline.open {
-            GIT_DOCK_WIDTH * scale32(self.scale)
+            self.dock_width * scale32(self.scale)
         } else {
             0.0
         }
+    }
+
+    /// Whether the pointer sits on the open right dock's left edge (its resize grab zone).
+    fn on_dock_edge(&self) -> bool {
+        if !(self.git_dock.open || self.timeline.open) {
+            return false;
+        }
+        let (px, _) = point_f32(self.pointer);
+        let edge = dim_f32(self.size.0) - self.right_dock_width_px();
+        (px - edge).abs() <= DOCK_GRAB * scale32(self.scale)
+    }
+
+    /// Resize the right dock from the current pointer x (dragging its left edge), clamped to the
+    /// guide's 360-560 range, and re-fit the panes to the new viewport.
+    fn resize_dock_to_pointer(&mut self) {
+        let scale = scale32(self.scale);
+        let (px, _) = point_f32(self.pointer);
+        let width = (dim_f32(self.size.0) - px) / scale;
+        self.dock_width = width.clamp(DOCK_WIDTH_MIN, DOCK_WIDTH_MAX);
+        self.sync_layout();
+        self.request_redraw();
     }
 
     /// The physical-pixel inset inside each pane (border-to-cells gap).
@@ -2882,6 +2915,19 @@ impl App {
 
     /// Extend the active drag selection to the pointer (a no-op unless a drag is live).
     fn on_cursor_moved(&mut self) {
+        // Dragging the dock's left edge resizes it.
+        if self.dock_resizing {
+            self.resize_dock_to_pointer();
+            return;
+        }
+        // Show a horizontal-resize cursor when hovering the dock's draggable edge.
+        if let Some(window) = self.window.as_ref() {
+            window.set_cursor(if self.on_dock_edge() {
+                CursorIcon::EwResize
+            } else {
+                CursorIcon::Default
+            });
+        }
         if !self.selecting {
             return;
         }
@@ -2916,6 +2962,11 @@ impl App {
         }
         match state {
             ElementState::Pressed => {
+                // Grabbing the open dock's left edge starts a resize drag (consumes the press).
+                if self.on_dock_edge() {
+                    self.dock_resizing = true;
+                    return;
+                }
                 if let Some(hit) = self.sidebar_hit() {
                     match hit {
                         sidebar::Hit::Workspace(index) => self.switch_workspace(index),
@@ -2946,6 +2997,7 @@ impl App {
             }
             ElementState::Released => {
                 self.selecting = false;
+                self.dock_resizing = false;
                 // A click with no drag clears the (single-cell) selection.
                 if self
                     .active_tab()
