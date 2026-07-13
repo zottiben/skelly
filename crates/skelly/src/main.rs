@@ -10,6 +10,7 @@
 //! output. Errors are contextualized here with `anyhow`; `wgpu`/`alacritty` types
 //! never leak up.
 
+mod cheatsheet;
 mod confirm;
 mod deadpane;
 mod emptystate;
@@ -217,6 +218,10 @@ struct Workspace {
 
 /// Application state driven by the winit event loop. The window and renderer are
 /// `None` until the platform signals `resumed`; the tab list exists from the start.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent UI-mode flags (selecting, leader-pending, cheatsheet, session-started)"
+)]
 struct App {
     config: Config,
     proxy: EventLoopProxy<Wakeup>,
@@ -261,6 +266,9 @@ struct App {
     /// Whether the tmux-style pane leader (`[panes] leader`, default `ctrl+a`, §11) was just
     /// pressed, so the next key is a leader pane chord (`hjkl`/`⇧hjkl`/`z`/`x`/`|`/`-`).
     leader_pending: bool,
+    /// Whether the keybinding cheatsheet overlay (`⌘/`, §11) is open. While up it captures input
+    /// (`Esc` / `⌘/` closes).
+    cheatsheet_open: bool,
     /// The live shadow worktree while rewound to a past state (`None` = at HEAD/now). Its
     /// drop removes the worktree, so returning to now / closing just clears it.
     shadow: Option<ShadowWorktree>,
@@ -345,6 +353,7 @@ impl App {
             renaming: None,
             closed_titles: Vec::new(),
             leader_pending: false,
+            cheatsheet_open: false,
             shadow: None,
             session_start: Instant::now(),
             session_started: false,
@@ -722,10 +731,14 @@ impl App {
             .is_some()
             .then(|| self.build_onboarding_frame())
             .flatten();
-        let overlay =
-            (onboarding.is_none() && self.palette.open).then(|| self.build_palette_frame());
+        // The keybinding cheatsheet (design §11) reuses the overlay pass, below onboarding.
+        let cheatsheet = (onboarding.is_none() && self.cheatsheet_open)
+            .then(|| self.build_cheatsheet_frame())
+            .flatten();
+        let show_overlay = onboarding.is_none() && cheatsheet.is_none();
+        let overlay = (show_overlay && self.palette.open).then(|| self.build_palette_frame());
         // The confirm modal reuses the overlay pass; it never coexists with the palette.
-        let confirm = (onboarding.is_none() && !self.palette.open)
+        let confirm = (show_overlay && !self.palette.open)
             .then(|| self.build_confirm_frame())
             .flatten();
         let settings = self.settings.open.then(|| self.build_settings_frame());
@@ -765,6 +778,7 @@ impl App {
             let overlay_frame = onboarding
                 .as_ref()
                 .map(|f| (f.panel, &f.quads, &f.labels))
+                .or_else(|| cheatsheet.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
                 .or_else(|| overlay.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
                 .or_else(|| confirm.as_ref().map(|f| (f.panel, &f.quads, &f.labels)));
             match overlay_frame {
@@ -854,6 +868,31 @@ impl App {
         let scale = scale32(self.scale);
         let onb = self.onboarding.as_ref()?;
         let (quads, labels) = onboarding::build(onb, panel, scale, &self.theme, &mut self.measure);
+        Some(OnboardingFrame {
+            panel,
+            quads,
+            labels,
+        })
+    }
+
+    /// Lay out the keybinding cheatsheet (design §11 `⌘/`) as a centered card, clamped to the
+    /// window, and build its two-column content.
+    fn build_cheatsheet_frame(&mut self) -> Option<OnboardingFrame> {
+        if !self.cheatsheet_open {
+            return None;
+        }
+        let scale = scale32(self.scale);
+        let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
+        let (mut w, mut h) = cheatsheet::card_size(scale, &mut self.measure);
+        w = w.min(surface_w * 0.94);
+        h = h.min(surface_h * 0.9);
+        let panel = PxRect {
+            x: ((surface_w - w) / 2.0).max(0.0),
+            y: ((surface_h - h) / 2.0).max(0.0),
+            w,
+            h,
+        };
+        let (quads, labels) = cheatsheet::build(panel, scale, &self.theme, &mut self.measure);
         Some(OnboardingFrame {
             panel,
             quads,
@@ -2420,6 +2459,9 @@ impl App {
             self.reopen_closed_tab();
         } else if ch == "," {
             self.open_settings();
+        } else if ch == "/" {
+            self.cheatsheet_open = !self.cheatsheet_open;
+            self.request_redraw();
         } else if ch.eq_ignore_ascii_case("l") {
             self.clear_focused_scrollback();
         } else if ch == "=" || ch == "+" {
@@ -2473,6 +2515,17 @@ impl App {
         // The first-run onboarding modal (design §10.1) captures all input while up.
         if self.onboarding.is_some() {
             self.on_onboarding_key(key_event);
+            return;
+        }
+        // The keybinding cheatsheet (§11) captures input: Esc or ⌘/ closes, everything else is
+        // swallowed while it is up.
+        if self.cheatsheet_open {
+            let toggle = self.modifiers.super_key()
+                && matches!(key_event.logical_key.as_ref(), Key::Character(c) if c == "/");
+            if toggle || matches!(key_event.logical_key.as_ref(), Key::Named(NamedKey::Escape)) {
+                self.cheatsheet_open = false;
+                self.request_redraw();
+            }
             return;
         }
         // The "running job" confirm modal captures input while fully up (design §12).
