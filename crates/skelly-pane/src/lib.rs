@@ -286,6 +286,9 @@ pub struct PaneTree {
     focused: PaneId,
     zoomed: bool,
     next_id: u32,
+    /// Which preset [`cycle_layout`](Self::cycle_layout) last applied, so repeated presses walk
+    /// through the arrangements.
+    layout_preset: u8,
 }
 
 impl PaneTree {
@@ -298,6 +301,7 @@ impl PaneTree {
             focused: root,
             zoomed: false,
             next_id: 1,
+            layout_preset: 0,
         }
     }
 
@@ -460,6 +464,27 @@ impl PaneTree {
         self.root.even_out();
     }
 
+    /// Cycle the panes through preset layouts (the guide's §11 `⌥Space` "Cycle layout preset"):
+    /// even columns -> even rows -> main-vertical (one large pane left, the rest stacked right),
+    /// keeping the same panes (and the focused one). A no-op with fewer than two panes. Cancels
+    /// zoom. Returns whether the layout changed.
+    pub fn cycle_layout(&mut self) -> bool {
+        let mut ids = Vec::new();
+        self.root.collect_leaves(&mut ids);
+        if ids.len() < 2 {
+            return false;
+        }
+        // Apply the current preset, then advance - so the first press gives even columns.
+        self.root = match self.layout_preset {
+            0 => build_chain(Axis::Row, &ids),
+            1 => build_chain(Axis::Col, &ids),
+            _ => build_main_vertical(&ids),
+        };
+        self.layout_preset = (self.layout_preset + 1) % 3;
+        self.zoomed = false;
+        true
+    }
+
     /// Each visible pane's rectangle within `viewport`. When a pane is zoomed, only
     /// that pane is returned, filling the whole viewport; otherwise the panes tile
     /// `viewport` exactly, with no gaps or overlaps.
@@ -483,6 +508,41 @@ impl PaneTree {
 impl Default for PaneTree {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Build an evenly-split chain of `ids` along `axis` (each pane an equal share) - a left-deep
+/// tree of splits. `ids` must be non-empty.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "pane counts are tiny (<=8, the hard cap)"
+)]
+fn build_chain(axis: Axis, ids: &[PaneId]) -> Node {
+    match ids {
+        [] => unreachable!("build_chain needs at least one id"),
+        [id] => Node::Leaf(*id),
+        [id, rest @ ..] => Node::Split {
+            axis,
+            // The first pane takes `1/n`; the recursive remainder splits the rest evenly.
+            ratio: 1.0 / ids.len() as f32,
+            first: Box::new(Node::Leaf(*id)),
+            second: Box::new(build_chain(axis, rest)),
+        },
+    }
+}
+
+/// Build a "main-vertical" layout: the first pane fills the left half, the rest stack evenly in
+/// the right half. `ids` must be non-empty.
+fn build_main_vertical(ids: &[PaneId]) -> Node {
+    match ids {
+        [] => unreachable!("build_main_vertical needs at least one id"),
+        [id] => Node::Leaf(*id),
+        [id, rest @ ..] => Node::Split {
+            axis: Axis::Row,
+            ratio: 0.5,
+            first: Box::new(Node::Leaf(*id)),
+            second: Box::new(build_chain(Axis::Col, rest)),
+        },
     }
 }
 
@@ -654,6 +714,50 @@ mod tests {
         assert!(!t.focus(Dir::Left), "already at the left edge");
         assert!(t.focus(Dir::Right));
         assert_eq!(t.focused(), right);
+    }
+
+    #[test]
+    #[allow(
+        clippy::many_single_char_names,
+        reason = "test: a/b/c/t name the panes and the tree tersely"
+    )]
+    fn cycle_layout_rearranges_panes_through_presets_keeping_them_all() {
+        let mut t = PaneTree::new();
+        let a = t.focused();
+        let b = t.split(Dir::Right).unwrap();
+        let c = t.split(Dir::Down).unwrap(); // 3 panes, some arrangement
+        let all = |t: &PaneTree| {
+            let mut v = t.panes();
+            v.sort();
+            v
+        };
+        let mut sorted = vec![a, b, c];
+        sorted.sort();
+
+        // Preset 0: even columns (all side by side) - three equal-width panes at y=0.
+        assert!(t.cycle_layout());
+        assert_eq!(all(&t), sorted, "no pane lost");
+        let cols = t.layout(Rect::new(0.0, 0.0, 900.0, 300.0));
+        assert!(
+            cols.iter().all(|(_, r)| approx(r.h, 300.0)),
+            "even columns share the full height"
+        );
+        assert!(cols.iter().all(|(_, r)| approx(r.w, 300.0)), "equal widths");
+
+        // Preset 1: even rows (stacked).
+        assert!(t.cycle_layout());
+        let rows = t.layout(Rect::new(0.0, 0.0, 300.0, 900.0));
+        assert!(rows.iter().all(|(_, r)| approx(r.w, 300.0)), "full width");
+        assert!(
+            rows.iter().all(|(_, r)| approx(r.h, 300.0)),
+            "equal heights"
+        );
+
+        // Preset 2: main-vertical (first pane fills the left half).
+        assert!(t.cycle_layout());
+        let main = t.layout(Rect::new(0.0, 0.0, 800.0, 600.0));
+        let first = main.iter().find(|(id, _)| *id == a).unwrap().1;
+        assert!(approx(first.w, 400.0), "main pane takes the left half");
     }
 
     #[test]

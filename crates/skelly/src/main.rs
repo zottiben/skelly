@@ -128,6 +128,8 @@ enum PaneAction {
     Swap(Dir),
     /// Reset every split to an even 50/50.
     EvenOut,
+    /// Cycle the panes through preset layouts (even columns / rows / main-vertical).
+    CycleLayout,
 }
 
 /// A tab operation bound to a keyboard chord.
@@ -1448,6 +1450,7 @@ impl App {
                 ws.tree.even_out();
                 true
             }
+            PaneAction::CycleLayout => ws.tree.cycle_layout(),
         };
         if changed {
             let ws = self.active_tab_mut();
@@ -3256,6 +3259,7 @@ fn pane_action(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
         KeyCode::Equal => PaneAction::EvenOut,
         KeyCode::KeyZ => PaneAction::Zoom,
         KeyCode::KeyW => PaneAction::Close,
+        KeyCode::Space => PaneAction::CycleLayout,
         // Arrow keys are the guide's §11 primary pane nav: ⌥arrows move focus, ⌃⌥arrows resize,
         // ⌥⇧arrows swap (`hjkl` remain as the vim-style aliases below / the leader chords).
         KeyCode::ArrowLeft if ctrl => PaneAction::Resize(Dir::Left),
