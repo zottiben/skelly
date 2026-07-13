@@ -172,6 +172,9 @@ struct Tab {
     /// Whether this tab is pinned to the sidebar's 3-up pinned grid (design §08 #4). Pinned
     /// tabs show as icon tiles above the tab list instead of in it.
     pinned: bool,
+    /// A user-set custom name (design §11 `F2` rename); overrides the auto job-name title and
+    /// stops it following the running command. `None` = the automatic title.
+    custom_title: Option<String>,
 }
 
 impl Tab {
@@ -187,6 +190,7 @@ impl Tab {
             job_name: None,
             job_pid: None,
             pinned: false,
+            custom_title: None,
         }
     }
 
@@ -246,6 +250,12 @@ struct App {
     /// The first-run onboarding modal (design §10.1), shown once on a fresh install (no config
     /// file yet). While set, it captures input; Skip/Start write the config and dismiss it.
     onboarding: Option<onboarding::Onboarding>,
+    /// The in-progress rename buffer for the active tab (design §11 `F2`); `Some` = the tab's
+    /// sidebar row is an editable field. Typing edits it, `Enter` commits, `Esc` cancels.
+    renaming: Option<String>,
+    /// A stack of recently-closed tabs' titles, for `⇧⌘T` reopen (design §11) - a fresh tab is
+    /// opened carrying the title back (the shell itself can't be resurrected).
+    closed_titles: Vec<String>,
     /// The live shadow worktree while rewound to a past state (`None` = at HEAD/now). Its
     /// drop removes the worktree, so returning to now / closing just clears it.
     shadow: Option<ShadowWorktree>,
@@ -327,6 +337,8 @@ impl App {
             confirm: None,
             // Fresh install (no config file yet) -> show the first-run onboarding (design §10.1).
             onboarding: Config::is_first_run().then(onboarding::Onboarding::new),
+            renaming: None,
+            closed_titles: Vec::new(),
             shadow: None,
             session_start: Instant::now(),
             session_started: false,
@@ -888,8 +900,10 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, tab)| {
-                tab.job_name
+                // A user-set custom name (F2) wins; else the running-command name; else `Tab N`.
+                tab.custom_title
                     .clone()
+                    .or_else(|| tab.job_name.clone())
                     .unwrap_or_else(|| format!("Tab {}", i + 1))
             })
             .collect()
@@ -930,7 +944,14 @@ impl App {
         // The tab list shows the unpinned tabs; the grid shows the pinned ones (glyph = the
         // tab title's first letter). `active_tab` is the active tab's position in the list, or
         // `usize::MAX` when the active tab is pinned (then `active_pinned` marks its tile).
-        let list_titles: Vec<String> = unpinned.iter().map(|&i| titles[i].clone()).collect();
+        let mut list_titles: Vec<String> = unpinned.iter().map(|&i| titles[i].clone()).collect();
+        // While renaming (F2), the active tab's row is an editable field: show the buffer + a
+        // caret in place of its title.
+        if let Some(buf) = &self.renaming {
+            if let Some(pos) = unpinned.iter().position(|&i| i == self.active) {
+                list_titles[pos] = format!("{buf}\u{2502}");
+            }
+        }
         let list_running: Vec<bool> = unpinned.iter().map(|&i| running[i]).collect();
         let pinned_glyphs: Vec<char> = pinned
             .iter()
@@ -1479,6 +1500,15 @@ impl App {
     /// Closing the **last** tab does not quit (design edge state): it resets to a fresh
     /// empty tab that shows the empty state, so the window always holds at least one tab.
     fn close_tab(&mut self) {
+        // Remember the closed tab's title for `⇧⌘T` reopen, but only if it was meaningfully
+        // named (a custom name or a running command) - a bare "Tab N" is not worth reopening.
+        let title = self.tab_titles().get(self.active).cloned();
+        if let Some(title) = title {
+            let tab = &self.tabs[self.active];
+            if tab.custom_title.is_some() || tab.job_name.is_some() {
+                self.closed_titles.push(title);
+            }
+        }
         let count = self.tabs.len();
         if count <= 1 {
             // Never quit: replace the only tab with a pristine one (the old tab drops, so
@@ -1615,6 +1645,55 @@ impl App {
             tab.pinned = !tab.pinned;
             self.request_redraw();
         }
+    }
+
+    /// Begin renaming the active tab (design §11 `F2`): its sidebar row becomes an editable
+    /// field seeded with the current title. `Enter` commits, `Esc` cancels.
+    fn start_rename(&mut self) {
+        let title = self
+            .tab_titles()
+            .get(self.active)
+            .cloned()
+            .unwrap_or_default();
+        self.renaming = Some(title);
+        self.request_redraw();
+    }
+
+    /// Feed a key to the in-progress rename (a typed char, `Backspace`, `Enter` = commit,
+    /// `Esc` = cancel). Returns whether the rename consumed the key.
+    fn on_rename_key(&mut self, key_event: &KeyEvent) -> bool {
+        let Some(buf) = self.renaming.as_mut() else {
+            return false;
+        };
+        match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::Enter) => {
+                let name = self.renaming.take().unwrap_or_default();
+                let trimmed = name.trim();
+                // An empty name clears the custom title back to the automatic one.
+                self.active_tab_mut().custom_title =
+                    (!trimmed.is_empty()).then(|| trimmed.to_owned());
+            }
+            Key::Named(NamedKey::Escape) => self.renaming = None,
+            Key::Named(NamedKey::Backspace) => {
+                buf.pop();
+            }
+            Key::Character(ch) => buf.push_str(ch),
+            Key::Named(NamedKey::Space) => buf.push(' '),
+            _ => {}
+        }
+        self.request_redraw();
+        true
+    }
+
+    /// Reopen the most recently closed tab (design §11 `⇧⌘T`): a fresh tab carrying its title
+    /// back (the killed shell can't be resurrected). A no-op when nothing was closed.
+    fn reopen_closed_tab(&mut self) {
+        let Some(title) = self.closed_titles.pop() else {
+            return;
+        };
+        self.new_tab();
+        self.active_tab_mut().custom_title = Some(title);
+        self.request_redraw();
     }
 
     /// Cycle to the next (`forward`) or previous tab, wrapping around.
@@ -2290,6 +2369,10 @@ impl App {
             self.toggle_timeline();
         } else if shift && ch.eq_ignore_ascii_case("p") {
             self.toggle_pin();
+        } else if shift && ch.eq_ignore_ascii_case("n") {
+            self.add_workspace();
+        } else if shift && ch.eq_ignore_ascii_case("t") {
+            self.reopen_closed_tab();
         } else if ch == "," {
             self.open_settings();
         } else if ch.eq_ignore_ascii_case("l") {
@@ -2367,6 +2450,15 @@ impl App {
         }
         if self.timeline.open {
             self.on_timeline_key(event_loop, key_event);
+            return;
+        }
+        // Renaming a tab (F2) captures every typed key into its name buffer until Enter/Esc.
+        if self.renaming.is_some() {
+            self.on_rename_key(key_event);
+            return;
+        }
+        if matches!(key_event.logical_key.as_ref(), Key::Named(NamedKey::F2)) {
+            self.start_rename();
             return;
         }
         // Tab management (⌘T new, ⌘W close, ⌘1..9 go-to, ⌥⇧[ ] cycle). Matched on the
@@ -3080,7 +3172,9 @@ fn pane_action(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
 /// plus `⌥⇧[` / `⌥⇧]` to cycle prev / next (the guide's bracket chords). Matched on
 /// the physical key. Returns `None` for anything else (which then reaches the shell).
 fn tab_action(code: KeyCode, mods: ModifiersState) -> Option<TabAction> {
-    if mods.super_key() && !mods.alt_key() {
+    // Plain `⌘` chords (no shift) - so the `⇧⌘` chords (`⇧⌘N` new group, `⇧⌘T` reopen, `⇧⌘P`
+    // pin) fall through to `on_super_chord`.
+    if mods.super_key() && !mods.alt_key() && !mods.shift_key() {
         return Some(match code {
             KeyCode::KeyT => TabAction::New,
             KeyCode::KeyW => TabAction::Close,
