@@ -101,7 +101,7 @@ fn main() {
 }
 
 /// One representative event: session-relative time, actor label + color, title, and an
-/// optional right badge (`now` / `view`).
+/// optional right badge (`HEAD` / `VIEWING` / `FUTURE`).
 struct Event {
     time: &'static str,
     actor: &'static str,
@@ -206,7 +206,7 @@ fn build_dock(width: u32, height: u32, scale: f32, theme: &Theme) -> CaptureTime
             actor: "you",
             actor_fg: theme.accent,
             title: "git commit - feat: pane tree",
-            badge: Some(("view", theme.accent)),
+            badge: Some(("VIEWING", theme.accent)),
             title_fg: theme.fg_primary,
         },
         Event {
@@ -214,7 +214,7 @@ fn build_dock(width: u32, height: u32, scale: f32, theme: &Theme) -> CaptureTime
             actor: "you",
             actor_fg: theme.accent,
             title: "Staged timeline.rs",
-            badge: None,
+            badge: Some(("FUTURE", theme.accent)),
             title_fg: theme.fg_muted,
         },
         Event {
@@ -222,7 +222,7 @@ fn build_dock(width: u32, height: u32, scale: f32, theme: &Theme) -> CaptureTime
             actor: "you",
             actor_fg: theme.accent,
             title: "git commit - feat: timeline",
-            badge: Some(("now", theme.diff_hunk)),
+            badge: Some(("HEAD", theme.diff_hunk)),
             title_fg: theme.fg_muted,
         },
     ];

@@ -271,10 +271,14 @@ impl TimelineDock {
             } else {
                 theme.fg_secondary
             };
+            // Rewind-state badges (design §10.7 timeline events): the newest restorable state is
+            // `HEAD`; while rewound, the viewed row is `VIEWING` and each later row is `future`.
             let badge = if Some(index) == newest {
-                Some(("now", theme.diff_hunk))
+                Some(("HEAD", theme.diff_hunk))
             } else if is_selected && viewing_past {
-                Some(("view", theme.accent))
+                Some(("VIEWING", theme.accent))
+            } else if viewing_past && index > self.selected {
+                Some(("FUTURE", theme.accent))
             } else {
                 None
             };
