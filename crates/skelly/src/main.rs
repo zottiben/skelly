@@ -183,6 +183,39 @@ struct Tab {
     /// A user-set custom name (design §11 `F2` rename); overrides the auto job-name title and
     /// stops it following the running command. `None` = the automatic title.
     custom_title: Option<String>,
+    /// The collapsible group this tab belongs to (index into the workspace's `groups`, design
+    /// §08 #5), or `None` for an ungrouped top-level tab.
+    group: Option<usize>,
+}
+
+/// A collapsible tab group (design §08 #5): a named header with a member count that clusters
+/// tabs ("Groups map to a working directory or project"). Collapsing hides its children in the
+/// sidebar but keeps their shells running. Groups belong to a workspace.
+struct TabGroup {
+    /// The header name (e.g. `skelly · main`), shown uppercased-ish in a mono label.
+    name: String,
+    /// Whether the group is collapsed - its member tabs are hidden from the list (their shells
+    /// stay alive), leaving just the header + count.
+    collapsed: bool,
+}
+
+/// The sidebar's ordered tab layout (design §08 #4/#5): the pinned tabs, the unpinned tabs in
+/// display order (ungrouped first, then each group's members clustered), and the group spans
+/// over that ordered list. All values are real `App.tabs` indices; each span's `[start, len)`
+/// ranges over positions in `ordered`.
+struct TabLayout {
+    pinned: Vec<usize>,
+    ordered: Vec<usize>,
+    spans: Vec<GroupSpanData>,
+}
+
+/// One group's span over the ordered unpinned list: the header name + collapsed flag and the
+/// `[start, start + len)` range of member positions within `TabLayout::ordered`.
+struct GroupSpanData {
+    name: String,
+    collapsed: bool,
+    start: usize,
+    len: usize,
 }
 
 impl Tab {
@@ -199,6 +232,7 @@ impl Tab {
             job_pid: None,
             pinned: false,
             custom_title: None,
+            group: None,
         }
     }
 
@@ -216,9 +250,10 @@ impl Tab {
 struct Workspace {
     /// The display name; its first letter is the sidebar chip glyph.
     name: String,
-    /// The stashed `(tabs, active)` for an *inactive* workspace; `None` while it is active
-    /// (its tabs are live in `App.tabs`/`active`).
-    stash: Option<(Vec<Tab>, usize)>,
+    /// The stashed `(tabs, active, groups)` for an *inactive* workspace; `None` while it is
+    /// active (its tabs/groups are live in `App.tabs`/`active`/`groups`). Each workspace
+    /// isolates its own collapsible groups (design §08 #2).
+    stash: Option<(Vec<Tab>, usize, Vec<TabGroup>)>,
 }
 
 /// Application state driven by the winit event loop. The window and renderer are
@@ -296,6 +331,9 @@ struct App {
     tabs: Vec<Tab>,
     /// Index of the visible tab in `tabs`.
     active: usize,
+    /// The active workspace's collapsible tab groups (design §08 #5); each `Tab.group` indexes
+    /// this. Inactive workspaces stash their own. Empty when no groups have been created.
+    groups: Vec<TabGroup>,
     /// The workspaces (design §08 #2). The active one's tabs live in `tabs`/`active` above; the
     /// others are stashed in their `Workspace`. Always at least one.
     workspaces: Vec<Workspace>,
@@ -384,6 +422,7 @@ impl App {
             renderer: None,
             tabs: vec![Tab::new()],
             active: 0,
+            groups: Vec::new(),
             workspaces: vec![Workspace {
                 name: "Personal".to_owned(),
                 stash: None,
@@ -1159,22 +1198,24 @@ impl App {
         // the control strip via `top_inset` (logical px, macOS only).
         let titles = self.tab_titles();
         let running = self.tab_running();
-        let group = self.group_label();
         let chips = self.workspace_chips();
-        let (unpinned, pinned) = self.split_pinned();
-        // The tab list shows the unpinned tabs; the grid shows the pinned ones (glyph = the
-        // tab title's first letter). `active_tab` is the active tab's position in the list, or
-        // `usize::MAX` when the active tab is pinned (then `active_pinned` marks its tile).
-        let mut list_titles: Vec<String> = unpinned.iter().map(|&i| titles[i].clone()).collect();
+        let layout = self.tab_layout();
+        // The tab list shows the unpinned tabs in display order (ungrouped, then each group's
+        // members); the grid shows the pinned ones (glyph = the tab title's first letter).
+        // `active_tab` is the active tab's position in the ordered list, or `usize::MAX` when the
+        // active tab is pinned (then `active_pinned` marks its tile).
+        let mut list_titles: Vec<String> =
+            layout.ordered.iter().map(|&i| titles[i].clone()).collect();
         // While renaming (F2), the active tab's row is an editable field: show the buffer + a
         // caret in place of its title.
         if let Some(buf) = &self.renaming {
-            if let Some(pos) = unpinned.iter().position(|&i| i == self.active) {
+            if let Some(pos) = layout.ordered.iter().position(|&i| i == self.active) {
                 list_titles[pos] = format!("{buf}\u{2502}");
             }
         }
-        let list_running: Vec<bool> = unpinned.iter().map(|&i| running[i]).collect();
-        let pinned_glyphs: Vec<char> = pinned
+        let list_running: Vec<bool> = layout.ordered.iter().map(|&i| running[i]).collect();
+        let pinned_glyphs: Vec<char> = layout
+            .pinned
             .iter()
             .map(|&i| {
                 titles[i]
@@ -1184,17 +1225,28 @@ impl App {
                     .to_ascii_uppercase()
             })
             .collect();
+        let groups: Vec<sidebar::GroupSpan> = layout
+            .spans
+            .iter()
+            .map(|s| sidebar::GroupSpan {
+                name: &s.name,
+                collapsed: s.collapsed,
+                start: s.start,
+                len: s.len,
+            })
+            .collect();
         let view = sidebar::View {
-            tab_count: unpinned.len(),
-            active_tab: unpinned
+            tab_count: layout.ordered.len(),
+            active_tab: layout
+                .ordered
                 .iter()
                 .position(|&i| i == self.active)
                 .unwrap_or(usize::MAX),
             chips: &chips,
             active_chip: self.active_workspace,
             pinned: &pinned_glyphs,
-            active_pinned: pinned.iter().position(|&i| i == self.active),
-            group_label: group.as_deref(),
+            active_pinned: layout.pinned.iter().position(|&i| i == self.active),
+            groups: &groups,
             tab_running: &list_running,
             tab_titles: &list_titles,
             rail: self.sidebar_rail_now(),
@@ -1567,23 +1619,33 @@ impl App {
             return None;
         }
         let scale = scale32(self.scale);
-        let group = self.group_label();
         let chips = self.workspace_chips();
-        let (unpinned, pinned) = self.split_pinned();
-        // Layout only depends on the counts, so glyph placeholders and empty title/running
-        // slices are fine here (the real strings feed rendering, not hit-testing).
-        let pinned_glyphs = vec!['\u{2022}'; pinned.len()];
+        let layout = self.tab_layout();
+        // Layout only depends on the counts + group spans, so glyph placeholders and empty
+        // title/running slices are fine here (the real strings feed rendering, not hit-testing).
+        let pinned_glyphs = vec!['\u{2022}'; layout.pinned.len()];
+        let groups: Vec<sidebar::GroupSpan> = layout
+            .spans
+            .iter()
+            .map(|s| sidebar::GroupSpan {
+                name: &s.name,
+                collapsed: s.collapsed,
+                start: s.start,
+                len: s.len,
+            })
+            .collect();
         let view = sidebar::View {
-            tab_count: unpinned.len(),
-            active_tab: unpinned
+            tab_count: layout.ordered.len(),
+            active_tab: layout
+                .ordered
                 .iter()
                 .position(|&i| i == self.active)
                 .unwrap_or(usize::MAX),
             chips: &chips,
             active_chip: self.active_workspace,
             pinned: &pinned_glyphs,
-            active_pinned: pinned.iter().position(|&i| i == self.active),
-            group_label: group.as_deref(),
+            active_pinned: layout.pinned.iter().position(|&i| i == self.active),
+            groups: &groups,
             tab_running: &[],
             tab_titles: &[],
             rail: self.sidebar_rail_now(),
@@ -1595,11 +1657,11 @@ impl App {
             w: self.sidebar_width_px(),
             h: dim_f32(self.size.1),
         };
-        // The sidebar reports positions within the filtered lists; map them back to real tab
-        // indices (a pinned-tile click just activates that tab).
+        // The sidebar reports positions within the ordered list; map them back to real tab
+        // indices (a pinned-tile click just activates that tab). Group-header hits pass through.
         match sidebar::hit(&view, panel, scale, px, py) {
-            Some(sidebar::Hit::Tab(pos)) => unpinned.get(pos).copied().map(sidebar::Hit::Tab),
-            Some(sidebar::Hit::Pinned(gi)) => pinned.get(gi).copied().map(sidebar::Hit::Tab),
+            Some(sidebar::Hit::Tab(pos)) => layout.ordered.get(pos).copied().map(sidebar::Hit::Tab),
+            Some(sidebar::Hit::Pinned(gi)) => layout.pinned.get(gi).copied().map(sidebar::Hit::Tab),
             other => other,
         }
     }
@@ -1766,6 +1828,8 @@ impl App {
             self.tabs.remove(self.active);
             self.active = index_after_close(self.active, count);
         }
+        // Closing a tab may empty its group; keep the group list dense (design §08 #5).
+        self.prune_empty_groups();
         self.selecting = false;
         // Re-fit the now-visible tab (it may have been sized for an earlier window) and
         // spawn the fresh tab's shell.
@@ -1892,6 +1956,119 @@ impl App {
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.pinned = !tab.pinned;
             self.request_redraw();
+        }
+    }
+
+    /// `⇧⌘N` - create a new collapsible group (design §08 #5) from the active tab. It takes the
+    /// active tab's repo·branch context as its name (e.g. `skelly · main`), or a numbered
+    /// fallback, and the active tab becomes its first member ("Groups map to a working directory
+    /// or project"). A tab already in a group just moves to the new one.
+    fn new_group(&mut self) {
+        let name = self
+            .group_label()
+            .unwrap_or_else(|| format!("Group {}", self.groups.len() + 1));
+        self.groups.push(TabGroup {
+            name,
+            collapsed: false,
+        });
+        let gi = self.groups.len() - 1;
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.group = Some(gi);
+        }
+        // The active tab may have vacated a group, leaving it empty; keep the list dense.
+        self.prune_empty_groups();
+        self.request_redraw();
+    }
+
+    /// Collapse or expand the group at `gi` (design §08 #5): a collapsed group hides its member
+    /// tabs from the sidebar list while their shells keep running. The active tab stays active
+    /// even when its own group collapses (its pane still shows in the terminal area).
+    fn toggle_group(&mut self, gi: usize) {
+        if let Some(group) = self.groups.get_mut(gi) {
+            group.collapsed = !group.collapsed;
+            self.request_redraw();
+        }
+    }
+
+    /// Drop any group left with no member tabs and re-index the survivors so `Tab.group`
+    /// indices stay dense and valid (called after a tab closes or changes group).
+    fn prune_empty_groups(&mut self) {
+        let mut used = vec![false; self.groups.len()];
+        for tab in &self.tabs {
+            if let Some(g) = tab.group {
+                if let Some(slot) = used.get_mut(g) {
+                    *slot = true;
+                }
+            }
+        }
+        if used.iter().all(|&u| u) {
+            return; // every group still has members - nothing to prune
+        }
+        // Build an old -> new index remap, keeping only groups that still have members.
+        let mut remap = vec![None; self.groups.len()];
+        let mut kept = Vec::new();
+        for (old, group) in std::mem::take(&mut self.groups).into_iter().enumerate() {
+            if used[old] {
+                remap[old] = Some(kept.len());
+                kept.push(group);
+            }
+        }
+        self.groups = kept;
+        for tab in &mut self.tabs {
+            if let Some(g) = tab.group {
+                tab.group = remap.get(g).copied().flatten();
+            }
+        }
+    }
+
+    /// `⌘1…9` - jump to the nth tab (0-based) within the active tab's group (design §11: "Number
+    /// jumps to nth tab in the active group"); when the active tab is ungrouped, the nth
+    /// ungrouped tab. A no-op when there is no nth member.
+    fn goto_tab_in_active_group(&mut self, n: usize) {
+        let active_group = self.tabs.get(self.active).and_then(|t| t.group);
+        let target = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.group == active_group)
+            .nth(n)
+            .map(|(i, _)| i);
+        if let Some(i) = target {
+            self.goto_tab(i);
+        }
+    }
+
+    /// The sidebar's ordered tab layout (design §08 #4/#5): pinned tabs, the unpinned tabs in
+    /// display order (ungrouped first, then each group's members), and the group spans over
+    /// that ordered list. See [`TabLayout`].
+    fn tab_layout(&self) -> TabLayout {
+        let (unpinned, pinned) = self.split_pinned();
+        let mut ordered: Vec<usize> = unpinned
+            .iter()
+            .copied()
+            .filter(|&i| self.tabs[i].group.is_none())
+            .collect();
+        let mut spans = Vec::new();
+        for (gi, group) in self.groups.iter().enumerate() {
+            let start = ordered.len();
+            let before = ordered.len();
+            ordered.extend(
+                unpinned
+                    .iter()
+                    .copied()
+                    .filter(|&i| self.tabs[i].group == Some(gi)),
+            );
+            spans.push(GroupSpanData {
+                name: group.name.clone(),
+                collapsed: group.collapsed,
+                start,
+                len: ordered.len() - before,
+            });
+        }
+        TabLayout {
+            pinned,
+            ordered,
+            spans,
         }
     }
 
@@ -2049,10 +2226,12 @@ impl App {
         }
     }
 
-    /// Stash the active workspace's tab set (its shells keep running) so another can swap in.
+    /// Stash the active workspace's tab set + groups (its shells keep running) so another can
+    /// swap in.
     fn stash_active_workspace(&mut self) {
         let tabs = std::mem::take(&mut self.tabs);
-        self.workspaces[self.active_workspace].stash = Some((tabs, self.active));
+        let groups = std::mem::take(&mut self.groups);
+        self.workspaces[self.active_workspace].stash = Some((tabs, self.active, groups));
     }
 
     /// Switch to workspace `index` (design §08 #2): stash the active workspace's tabs, swap in
@@ -2062,12 +2241,13 @@ impl App {
             return;
         }
         self.stash_active_workspace();
-        let (tabs, active) = self.workspaces[index]
+        let (tabs, active, groups) = self.workspaces[index]
             .stash
             .take()
-            .unwrap_or_else(|| (vec![Tab::new()], 0));
+            .unwrap_or_else(|| (vec![Tab::new()], 0, Vec::new()));
         self.tabs = tabs;
         self.active = active;
+        self.groups = groups;
         self.active_workspace = index;
         self.selecting = false;
         self.sync_layout(); // re-fit the swapped-in shells to the viewport
@@ -2086,6 +2266,7 @@ impl App {
         self.workspaces.push(Workspace { name, stash: None });
         self.tabs = vec![Tab::new()];
         self.active = 0;
+        self.groups = Vec::new();
         self.active_workspace = self.workspaces.len() - 1;
         self.selecting = false;
         self.sync_layout();
@@ -2097,7 +2278,7 @@ impl App {
         match action {
             TabAction::New => self.new_tab(),
             TabAction::Close => self.request_close_tab(),
-            TabAction::Goto(index) => self.goto_tab(index),
+            TabAction::Goto(index) => self.goto_tab_in_active_group(index),
             TabAction::Next => self.cycle_tab(true),
             TabAction::Prev => self.cycle_tab(false),
         }
@@ -2293,7 +2474,7 @@ impl App {
             Action::CloseTab => self.request_close_tab(),
             Action::NextTab => self.cycle_tab(true),
             Action::PrevTab => self.cycle_tab(false),
-            Action::GotoTab(index) => self.goto_tab(index),
+            Action::GotoTab(index) => self.goto_tab_in_active_group(index),
             Action::TogglePin => self.toggle_pin(),
             Action::ToggleSidebar => self.toggle_sidebar(),
             Action::CycleSidebarMode => self.cycle_sidebar_mode(),
@@ -2760,7 +2941,7 @@ impl App {
         } else if shift && ch.eq_ignore_ascii_case("p") {
             self.toggle_pin();
         } else if shift && ch.eq_ignore_ascii_case("n") {
-            self.add_workspace();
+            self.new_group();
         } else if shift && ch.eq_ignore_ascii_case("t") {
             self.reopen_closed_tab();
         } else if ch == "," {
@@ -3049,6 +3230,8 @@ impl App {
                             self.goto_tab(index);
                             self.dragging_tab = Some(index);
                         }
+                        // Clicking a group header collapses / expands it (design §08 #5).
+                        sidebar::Hit::GroupHeader(gi) => self.toggle_group(gi),
                         sidebar::Hit::NewTab => self.new_tab(),
                         sidebar::Hit::Util(action) => self.on_util_action(action),
                     }

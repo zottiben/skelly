@@ -10,10 +10,10 @@
 //! (active highlighted) with a "+ New tab" action, and the slim 56px icon rail with
 //! compact centered tab numbers. `⌘B` shows/hides; `⇧⌘B` cycles full <-> rail. The
 //! chosen mode persists to `config.sidebar.mode` (Hard rule 1). Also built here: the workspace
-//! switcher chips (§08 #2) at the top, the command-input well (§08 #3, opens the palette), and
-//! the bottom-anchored utility bar (§08 #7 - the ⚙ settings / ◐ theme / ⟲ timeline / ⑂ git
-//! toggles). Deferred to later slices: the pinned grid and collapsible groups; per-tab
-//! cwd/branch titling (tabs are numbered today).
+//! switcher chips (§08 #2) at the top, the command-input well (§08 #3, opens the palette), the
+//! pinned-tab grid (§08 #4), the collapsible group headers (§08 #5 - a chevron + mono name +
+//! member count; a collapsed group hides its member rows), and the bottom-anchored utility bar
+//! (§08 #7 - the ⚙ settings / ◐ theme / ⟲ timeline / ⑂ git toggles).
 
 use skelly_config::SidebarMode;
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
@@ -48,9 +48,16 @@ const PINNED_INSET: f32 = 13.0;
 const PINNED_GRID_GAP: f32 = 6.0;
 const PINNED_RADIUS: f32 = 8.0;
 const PINNED_COLS: usize = 3;
-/// Height of the group header row (design §08 #5: the "repo · branch" context label above the
-/// tab list), an uppercase micro label with breathing room.
+/// Height of a group header row (design §08 #5: a collapse chevron + mono name + member count),
+/// with breathing room. The mockup's `padding:4px 6px` inside the `padding:0 9px` list.
 const GROUP_H: f32 = 22.0;
+/// Left inset of a group header's chevron from the sidebar edge (list pad + header pad).
+const GROUP_INSET: f32 = 15.0;
+/// Width reserved for the header chevron + its gap before the name (the mockup's `gap:6px`).
+const GROUP_CHEVRON_SLOT: f32 = 14.0;
+/// The group-header chevrons (design §08 #5): `▾` expanded (accent), `▸` collapsed (muted).
+const CHEVRON_OPEN: &str = "\u{25be}";
+const CHEVRON_CLOSED: &str = "\u{25b8}";
 /// Height of an overflow indicator row (`↑ N more` / `↓ N more`).
 const IND_H: f32 = 16.0;
 /// Height of a tab row (and the "+ New tab" action), per the §09 "Sidebar tab item" (Height 30).
@@ -98,6 +105,8 @@ pub(crate) enum Hit {
     CommandInput,
     /// Switch to the tab at this 0-based index.
     Tab(usize),
+    /// Collapse / expand the group at this 0-based index (a group header, design §08 #5).
+    GroupHeader(usize),
     /// Open a new tab.
     NewTab,
     /// Trigger a utility-bar toggle (design §08 #7).
@@ -121,9 +130,10 @@ pub(crate) struct View<'a> {
     pub(crate) pinned: &'a [char],
     /// The grid position of the active tab when it is pinned (highlights that tile).
     pub(crate) active_pinned: Option<usize>,
-    /// The group header above the tab list (design §08 #5: the "repo · branch" context), or
-    /// `None` outside a git repo. Shown uppercase.
-    pub(crate) group_label: Option<&'a str>,
+    /// The collapsible tab groups (design §08 #5), each spanning a contiguous range of the
+    /// ordered tab list. Empty when no groups exist (the list is then a flat set of ungrouped
+    /// tabs). Ungrouped tabs occupy the positions before the first group's `start`.
+    pub(crate) groups: &'a [GroupSpan<'a>],
     /// Whether each tab has a live foreground job (a `●` running dot instead of the `❯` prompt),
     /// one flag per tab. Empty or short-of-`tab_count` means "not running".
     pub(crate) tab_running: &'a [bool],
@@ -133,6 +143,19 @@ pub(crate) struct View<'a> {
     pub(crate) rail: bool,
     /// The macOS control-strip inset in **logical** px (0 elsewhere); content clears it.
     pub(crate) top_inset: f32,
+}
+
+/// One collapsible group's span over the ordered tab list (design §08 #5): the header name +
+/// collapsed flag and the `[start, start + len)` range of member tab positions.
+pub(crate) struct GroupSpan<'a> {
+    /// The header name (e.g. `skelly · main`), rendered in a mono micro label.
+    pub(crate) name: &'a str,
+    /// Whether the group is collapsed (its member tab rows are hidden - header only).
+    pub(crate) collapsed: bool,
+    /// The first tab position belonging to this group in the ordered list.
+    pub(crate) start: usize,
+    /// The number of member tabs.
+    pub(crate) len: usize,
 }
 
 /// A utility-bar icon's action (design §08 #7: "Settings, theme, session timeline, git diff
@@ -245,8 +268,8 @@ enum RowKind {
     Command,
     /// The pinned-tab grid (design §08 #4), drawn only when tabs are pinned.
     Pinned,
-    /// The group header (design §08 #5), drawn only when there is a group label.
-    Group,
+    /// A collapsible group header (design §08 #5) for the group at this 0-based index.
+    GroupHeader(usize),
     /// A tab at this 0-based index.
     Tab(usize),
     /// The "N tabs hidden above" indicator (drawn only when `> 0`).
@@ -281,7 +304,7 @@ fn rows_layout(
     active: usize,
     panel_h: f32,
     top_inset: f32,
-    has_group: bool,
+    groups: &[GroupSpan],
     pinned_h: f32,
 ) -> Vec<Row> {
     // Reserve the bottom-anchored utility bar so the top-down flow stops above it.
@@ -297,7 +320,7 @@ fn rows_layout(
     });
     y += CMD_H + CMD_GAP;
 
-    // The pinned-tab grid (design §08 #4), above the group header, when anything is pinned.
+    // The pinned-tab grid (design §08 #4), above the tab list, when anything is pinned.
     if pinned_h > 0.0 {
         rows.push(Row {
             top: y,
@@ -307,55 +330,80 @@ fn rows_layout(
         y += pinned_h;
     }
 
-    // The group header (design §08 #5), above the tab list, when there is one.
-    if has_group {
-        rows.push(Row {
-            top: y,
-            height: GROUP_H,
-            kind: RowKind::Group,
-        });
-        y += GROUP_H;
-    }
+    if groups.is_empty() {
+        // The common case: a flat tab list windowed into the panel (design §12 overflow), the
+        // header pinned + the active tab auto-scrolled into view + "+ New tab" following.
+        // Capacity for tab rows, reserving both overflow-indicator slots + the new-tab action.
+        let reserved_below = IND_H + TAB_H + PAD_BOTTOM;
+        let avail = flow_h - y - IND_H - reserved_below;
+        let capacity = (avail / (TAB_H + TAB_GAP_V)).floor().max(1.0) as usize;
+        let visible = count.min(capacity);
+        let first = if count <= visible {
+            0
+        } else {
+            active.saturating_sub(visible - 1).min(count - visible)
+        };
+        let more_above = first;
+        let more_below = count - first - visible;
 
-    // Capacity for tab rows, reserving both overflow-indicator slots + the new-tab action.
-    // Each tab occupies its pill height plus the inter-tab gap.
-    let reserved_below = IND_H + TAB_H + PAD_BOTTOM;
-    let avail = flow_h - y - IND_H - reserved_below;
-    let capacity = (avail / (TAB_H + TAB_GAP_V)).floor().max(1.0) as usize;
-    let visible = count.min(capacity);
-    let first = if count <= visible {
-        0
+        // The overflow indicators only occupy a row when there is something hidden, so a short
+        // tab list sits flush under the command well (no reserved gap).
+        if more_above > 0 {
+            rows.push(Row {
+                top: y,
+                height: IND_H,
+                kind: RowKind::OverflowUp(more_above),
+            });
+            y += IND_H;
+        }
+        for index in first..first + visible {
+            rows.push(Row {
+                top: y,
+                height: TAB_H,
+                kind: RowKind::Tab(index),
+            });
+            y += TAB_H + TAB_GAP_V;
+        }
+        if more_below > 0 {
+            rows.push(Row {
+                top: y,
+                height: IND_H,
+                kind: RowKind::OverflowDown(more_below),
+            });
+            y += IND_H;
+        }
     } else {
-        active.saturating_sub(visible - 1).min(count - visible)
-    };
-    let more_above = first;
-    let more_below = count - first - visible;
-
-    // The overflow indicators only occupy a row when there is something hidden, so a short tab
-    // list sits flush under the group header / command well (no reserved gap).
-    if more_above > 0 {
-        rows.push(Row {
-            top: y,
-            height: IND_H,
-            kind: RowKind::OverflowUp(more_above),
-        });
-        y += IND_H;
-    }
-    for index in first..first + visible {
-        rows.push(Row {
-            top: y,
-            height: TAB_H,
-            kind: RowKind::Tab(index),
-        });
-        y += TAB_H + TAB_GAP_V;
-    }
-    if more_below > 0 {
-        rows.push(Row {
-            top: y,
-            height: IND_H,
-            kind: RowKind::OverflowDown(more_below),
-        });
-        y += IND_H;
+        // Grouped: the ungrouped tabs (positions before the first group) render in full, then
+        // each group as a header + its member rows (design §08 #5); a collapsed group is just
+        // its header. Group organization implies modest counts, so the grouped view is not
+        // windowed.
+        let ungrouped_end = groups[0].start;
+        for index in 0..ungrouped_end {
+            rows.push(Row {
+                top: y,
+                height: TAB_H,
+                kind: RowKind::Tab(index),
+            });
+            y += TAB_H + TAB_GAP_V;
+        }
+        for (gi, group) in groups.iter().enumerate() {
+            rows.push(Row {
+                top: y,
+                height: GROUP_H,
+                kind: RowKind::GroupHeader(gi),
+            });
+            y += GROUP_H;
+            if !group.collapsed {
+                for index in group.start..group.start + group.len {
+                    rows.push(Row {
+                        top: y,
+                        height: TAB_H,
+                        kind: RowKind::Tab(index),
+                    });
+                    y += TAB_H + TAB_GAP_V;
+                }
+            }
+        }
     }
     rows.push(Row {
         top: y,
@@ -393,12 +441,13 @@ pub(crate) fn hit(view: &View, panel: PxRect, scale: f32, px: f32, py: f32) -> O
     }
     let top_inset = view.top_inset + chips_block_h(view);
     let y_logical = (py - panel.y) / scale;
+    let layout_groups: &[GroupSpan] = if view.rail { &[] } else { view.groups };
     for row in rows_layout(
         view.tab_count,
         view.active_tab,
         panel.h / scale,
         top_inset,
-        view.group_label.is_some(),
+        layout_groups,
         pinned_block_h(view, panel, scale),
     ) {
         if y_logical >= row.top && y_logical < row.top + row.height {
@@ -413,6 +462,7 @@ pub(crate) fn hit(view: &View, panel: PxRect, scale: f32, px: f32, py: f32) -> O
                         .map(Hit::Pinned)
                 }
                 RowKind::Tab(index) => Some(Hit::Tab(index)),
+                RowKind::GroupHeader(gi) => Some(Hit::GroupHeader(gi)),
                 RowKind::NewTab => Some(Hit::NewTab),
                 _ => None,
             };
@@ -483,7 +533,7 @@ pub(crate) fn build(
         panel,
         active: view.active_tab,
         rail: view.rail,
-        group_label: view.group_label,
+        groups: view.groups,
         tab_running: view.tab_running,
         tab_titles: view.tab_titles,
         pinned: view.pinned,
@@ -491,12 +541,14 @@ pub(crate) fn build(
         scale,
         theme,
     };
+    // The slim rail lays the tab list out flat (numbered), so groups only shape the full panel.
+    let layout_groups: &[GroupSpan] = if view.rail { &[] } else { view.groups };
     for row in rows_layout(
         view.tab_count,
         view.active_tab,
         panel.h / scale,
         view.top_inset + chips_block,
-        view.group_label.is_some(),
+        layout_groups,
         pinned_block_h(view, panel, scale),
     ) {
         push_row(&mut quads, &mut labels, row, &ctx, measure);
@@ -532,7 +584,7 @@ struct RowCtx<'a> {
     panel: PxRect,
     active: usize,
     rail: bool,
-    group_label: Option<&'a str>,
+    groups: &'a [GroupSpan<'a>],
     tab_running: &'a [bool],
     tab_titles: &'a [String],
     pinned: &'a [char],
@@ -579,23 +631,53 @@ fn push_row(
                 );
             }
         }
-        RowKind::Group => {
-            // The "repo · branch" group header (design §08 #5): an uppercase micro label,
-            // quiet (fg.faint), inset like the tab labels.
-            if let Some(label) = ctx.group_label {
+        RowKind::GroupHeader(gi) => {
+            // A collapsible group header (design §08 #5): a chevron (▾ open / ▸ collapsed), the
+            // mono name, and a right-aligned member count. Full panel only (the rail lays the
+            // tab list out flat). Grouped tabs never reach the rail path, so this is defensive.
+            if let Some(group) = ctx.groups.get(gi) {
                 if !ctx.rail {
-                    push_label(
-                        labels,
-                        measure,
-                        &label.to_uppercase(),
-                        FontRole::Micro,
-                        ctx.theme.fg_faint,
-                        ctx.panel,
-                        top,
-                        height,
-                        false,
-                        ctx.scale,
-                    );
+                    let inset = GROUP_INSET * ctx.scale;
+                    let x = ctx.panel.x + inset;
+                    let (chevron, chev_color) = if group.collapsed {
+                        (CHEVRON_CLOSED, ctx.theme.fg_muted)
+                    } else {
+                        (CHEVRON_OPEN, ctx.theme.accent)
+                    };
+                    let chev_line = measure.line_height(FontRole::Caption);
+                    labels.push(ProseLabel {
+                        text: chevron.to_owned(),
+                        x,
+                        y: top + (height - chev_line) * 0.5,
+                        role: FontRole::Caption,
+                        color: chev_color,
+                        weight: None,
+                        max_w: f32::MAX,
+                    });
+                    // The count, right-aligned; the name fills the space between chevron + count.
+                    let count = group.len.to_string();
+                    let count_w = measure.width(&count, FontRole::Micro, None);
+                    let count_x = ctx.panel.x + ctx.panel.w - inset - count_w;
+                    let name_x = x + GROUP_CHEVRON_SLOT * ctx.scale;
+                    let name_line = measure.line_height(FontRole::Micro);
+                    labels.push(ProseLabel {
+                        text: group.name.to_owned(),
+                        x: name_x,
+                        y: top + (height - name_line) * 0.5,
+                        role: FontRole::Micro,
+                        color: ctx.theme.fg_muted,
+                        weight: None,
+                        max_w: (count_x - name_x - GROUP_CHEVRON_SLOT * ctx.scale).max(1.0),
+                    });
+                    labels.push(ProseLabel {
+                        text: count,
+                        x: count_x,
+                        y: top + (height - name_line) * 0.5,
+                        role: FontRole::Micro,
+                        color: ctx.theme.fg_faint,
+                        weight: None,
+                        max_w: f32::MAX,
+                    });
                 }
             }
         }
@@ -1104,7 +1186,7 @@ fn push_label(
 
 #[cfg(test)]
 mod tests {
-    use super::{build, hit, Hit, Sidebar, UtilAction, View, UTIL_ICONS};
+    use super::{build, hit, GroupSpan, Hit, Sidebar, UtilAction, View, UTIL_ICONS};
     use skelly_config::SidebarMode;
     use skelly_render::{PxRect, TextMeasure, Theme};
 
@@ -1128,7 +1210,7 @@ mod tests {
             active_chip: 0,
             pinned: &[],
             active_pinned: None,
-            group_label: None,
+            groups: &[],
             tab_running: &[],
             tab_titles: &[],
             rail,
@@ -1255,6 +1337,122 @@ mod tests {
         assert!(paint.quads.len() >= 4);
     }
 
+    /// A full-panel view with `count` ordered tabs, single-char titles, and the given groups.
+    fn grouped_view<'a>(count: usize, active: usize, groups: &'a [GroupSpan<'a>]) -> View<'a> {
+        View {
+            tab_count: count,
+            active_tab: active,
+            chips: &[],
+            active_chip: 0,
+            pinned: &[],
+            active_pinned: None,
+            groups,
+            tab_running: &[],
+            tab_titles: &[],
+            rail: false,
+            top_inset: 0.0,
+        }
+    }
+
+    #[test]
+    fn grouped_layout_renders_headers_and_collapse_hides_children() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
+        // Positions 0,1 are ungrouped; 2,3 belong to group "proj".
+        let expanded = [GroupSpan {
+            name: "proj",
+            collapsed: false,
+            start: 2,
+            len: 2,
+        }];
+        let paint = build(&grouped_view(4, 0, &expanded), panel(), 2.0, &theme, &mut m);
+        let texts: Vec<&str> = paint.labels.iter().map(|l| l.text.as_str()).collect();
+        assert!(texts.contains(&"proj"), "group name header missing");
+        assert!(texts.contains(&"2"), "group member count missing");
+        // All four tabs (2 ungrouped + 2 members) show as "Tab N".
+        assert_eq!(
+            texts.iter().filter(|t| t.starts_with("Tab ")).count(),
+            4,
+            "expanded group should list its members"
+        );
+
+        // Collapsing the group hides its two member rows (header + count still shown).
+        let collapsed = [GroupSpan {
+            name: "proj",
+            collapsed: true,
+            start: 2,
+            len: 2,
+        }];
+        let paint = build(
+            &grouped_view(4, 0, &collapsed),
+            panel(),
+            2.0,
+            &theme,
+            &mut m,
+        );
+        let texts: Vec<&str> = paint.labels.iter().map(|l| l.text.as_str()).collect();
+        assert!(
+            texts.contains(&"proj"),
+            "collapsed header still shows the name"
+        );
+        assert_eq!(
+            texts.iter().filter(|t| t.starts_with("Tab ")).count(),
+            2,
+            "a collapsed group hides its members, leaving the 2 ungrouped tabs"
+        );
+    }
+
+    #[test]
+    fn hit_maps_group_headers_and_members_in_order() {
+        let groups = [GroupSpan {
+            name: "proj",
+            collapsed: false,
+            start: 2,
+            len: 2,
+        }];
+        let v = grouped_view(4, 0, &groups);
+        let p = panel();
+        // Scan down the panel collecting the distinct row hits in order.
+        let mut seq: Vec<Hit> = Vec::new();
+        let mut y = 0.0;
+        while y < p.h {
+            if let Some(h) = hit(&v, p, 2.0, 120.0, y) {
+                if seq.last() != Some(&h) {
+                    seq.push(h);
+                }
+            }
+            y += 2.0;
+        }
+        let pos = |h: Hit| {
+            seq.iter()
+                .position(|x| *x == h)
+                .unwrap_or_else(|| panic!("{h:?} not hit"))
+        };
+        // The two ungrouped tabs precede the header, whose members follow it.
+        assert!(pos(Hit::Tab(1)) < pos(Hit::GroupHeader(0)));
+        assert!(pos(Hit::GroupHeader(0)) < pos(Hit::Tab(2)));
+        assert!(pos(Hit::Tab(2)) < pos(Hit::Tab(3)));
+        assert!(pos(Hit::Tab(3)) < pos(Hit::NewTab));
+
+        // A collapsed group's member rows are not hittable at all.
+        let collapsed = [GroupSpan {
+            name: "proj",
+            collapsed: true,
+            start: 2,
+            len: 2,
+        }];
+        let vc = grouped_view(4, 0, &collapsed);
+        let mut y = 0.0;
+        let mut saw_member = false;
+        while y < p.h {
+            if matches!(hit(&vc, p, 2.0, 120.0, y), Some(Hit::Tab(2 | 3))) {
+                saw_member = true;
+            }
+            y += 2.0;
+        }
+        assert!(!saw_member, "collapsed group members must not be hittable");
+    }
+
     #[test]
     fn workspace_chips_render_and_map_clicks() {
         let theme = Theme::resolve("ossein-dark");
@@ -1267,7 +1465,7 @@ mod tests {
             active_chip: 0,
             pinned: &[],
             active_pinned: None,
-            group_label: None,
+            groups: &[],
             tab_running: &[],
             tab_titles: &[],
             rail: false,

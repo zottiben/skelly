@@ -57,6 +57,19 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Collapsible tab groups (§08 #5) + `⇧⌘N` fix.** Real named, collapsible groups
+  now exist (was: a single decorative "repo · branch" header, and `⇧⌘N` wrongly created a
+  workspace). Model: each workspace owns `Vec<TabGroup>`; each tab carries `group: Option<usize>`.
+  `⇧⌘N` creates a group from the active tab (named after its repo·branch context, e.g.
+  `skelly · main`, or `Group N`) - the guide's `⇧⌘N New group`, not a workspace (the guide has
+  no new-workspace key; the `+` chip still makes those). The sidebar renders ungrouped tabs first,
+  then each group as a header (▾/▸ chevron + mono name + member count); clicking a header
+  collapses/expands it (members hide but their shells keep running). `⌘1…9` now jumps to the nth
+  tab **in the active group** (guide §11), and closing a tab prunes any emptied group. Decided:
+  the grouped list is not overflow-windowed (organization implies modest counts); the flat
+  no-groups path keeps the exact §12 windowing. Groups are per-workspace (stashed on switch).
+  Still deferred (needs a context menu / cross-group drag, no guide keybinding): right-click
+  "Move to group" and dragging a tab between groups; drag-reorder today reorders the flat list.
 - 2026-07-13 - **Palette `⌘↵` run in new pane (§10.8/§11).** The palette footer now shows
   `⌘↵ run in new pane` in files mode, and `⌘↵` on a file entry splits a fresh pane (Dir::Right,
   respecting the 8-pane cap) before typing the path there, so the command runs in a new pane
