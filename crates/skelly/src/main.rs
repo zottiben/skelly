@@ -12,6 +12,7 @@
 
 mod cheatsheet;
 mod confirm;
+mod contextmenu;
 mod deadpane;
 mod emptystate;
 mod gitdock;
@@ -38,6 +39,7 @@ use skelly_session::{Actor, Repo, SessionEvent, ShadowWorktree};
 use skelly_term::{CellAttrs, CellColor, ExitStatus, TermCell, Terminal};
 
 use confirm::{CloseTarget, Confirm};
+use contextmenu::{ContextMenu, MenuAction, MenuContext};
 use gitdock::GitDock;
 use palette::Palette;
 use settings::Settings;
@@ -360,6 +362,9 @@ struct App {
     /// "56px · hover to expand"). Transient pointer state, not a config key: the rail overlays
     /// the panes while expanded, so the terminal never reflows on hover.
     rail_expanded: bool,
+    /// The open right-click tab action menu (design §08), or `None` when closed. Reuses the
+    /// shared overlay card, anchored at the click; captures keys + clicks while up.
+    context_menu: Option<ContextMenu>,
     /// The command palette's open / close animation (design §03 motion), live only while it
     /// plays. While any animation is set the event loop polls + redraws each frame; it clears
     /// itself when done (finalizing the close), returning the loop to its idle `Wait`.
@@ -439,6 +444,7 @@ impl App {
             dock_resizing: false,
             dragging_tab: None,
             rail_expanded: false,
+            context_menu: None,
             palette_anim: None,
             confirm_anim: None,
         }
@@ -952,6 +958,12 @@ impl App {
         let cheatsheet = (onboarding.is_none() && self.cheatsheet_open)
             .then(|| self.build_cheatsheet_frame())
             .flatten();
+        // The right-click tab menu (design §08) reuses the overlay pass as an anchored card.
+        let context_menu = self
+            .context_menu
+            .is_some()
+            .then(|| self.build_context_menu_frame())
+            .flatten();
         let show_overlay = onboarding.is_none() && cheatsheet.is_none();
         let overlay = (show_overlay && self.palette.open).then(|| self.build_palette_frame());
         // The confirm modal reuses the overlay pass; it never coexists with the palette.
@@ -991,11 +1003,17 @@ impl App {
                 })),
                 None => renderer.set_timeline(None),
             }
-            // Overlay precedence: onboarding (first run) > palette > confirm.
+            // Overlay precedence: onboarding (first run) > cheatsheet > context menu > palette >
+            // confirm (mutually exclusive in practice; the order guards accidental overlaps).
             let overlay_frame = onboarding
                 .as_ref()
                 .map(|f| (f.panel, &f.quads, &f.labels))
                 .or_else(|| cheatsheet.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
+                .or_else(|| {
+                    context_menu
+                        .as_ref()
+                        .map(|f| (f.panel, &f.quads, &f.labels))
+                })
                 .or_else(|| overlay.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
                 .or_else(|| confirm.as_ref().map(|f| (f.panel, &f.quads, &f.labels)));
             match overlay_frame {
@@ -1110,6 +1128,29 @@ impl App {
             h,
         };
         let (quads, labels) = cheatsheet::build(panel, scale, &self.theme, &mut self.measure);
+        Some(OnboardingFrame {
+            panel,
+            quads,
+            labels,
+        })
+    }
+
+    /// The placed panel (physical px) of the open context menu: its natural size clamped inside
+    /// the window. `None` when no menu is open.
+    fn context_menu_panel(&mut self) -> Option<PxRect> {
+        let scale = scale32(self.scale);
+        let surface = (dim_f32(self.size.0), dim_f32(self.size.1));
+        let menu = self.context_menu.as_ref()?;
+        let size = menu.natural_size(scale, &mut self.measure);
+        Some(menu.place(size, surface))
+    }
+
+    /// Lay out the right-click tab menu (design §08) as an anchored overlay card.
+    fn build_context_menu_frame(&mut self) -> Option<OnboardingFrame> {
+        let panel = self.context_menu_panel()?;
+        let scale = scale32(self.scale);
+        let menu = self.context_menu.as_ref()?;
+        let (quads, labels) = menu.build(panel, scale, &self.theme, &mut self.measure);
         Some(OnboardingFrame {
             panel,
             quads,
@@ -2074,6 +2115,129 @@ impl App {
         }
     }
 
+    /// Right-click (design §08 "Right-click any tab for the full action menu"): open the tab
+    /// action menu when the click lands on a sidebar tab. The tab is focused first (right-click
+    /// selects), then the menu opens anchored at the pointer.
+    fn on_right_click(&mut self) {
+        if self.context_menu.is_some() {
+            self.close_context_menu();
+        }
+        if let Some(sidebar::Hit::Tab(index)) = self.sidebar_hit() {
+            self.goto_tab(index);
+            self.open_context_menu();
+        }
+    }
+
+    /// Open the right-click menu for the active (just-clicked) tab, anchored at the pointer.
+    fn open_context_menu(&mut self) {
+        let Some(tab) = self.tabs.get(self.active) else {
+            return;
+        };
+        let group = tab.group;
+        let ctx = MenuContext {
+            pinned: tab.pinned,
+            group,
+            other_groups: self
+                .groups
+                .iter()
+                .enumerate()
+                .filter(|(gi, _)| Some(*gi) != group)
+                .map(|(gi, g)| (gi, g.name.clone()))
+                .collect(),
+        };
+        self.context_menu = Some(ContextMenu::new(point_f32(self.pointer), &ctx));
+        self.request_redraw();
+    }
+
+    /// Dismiss the right-click menu.
+    fn close_context_menu(&mut self) {
+        if self.context_menu.take().is_some() {
+            self.request_redraw();
+        }
+    }
+
+    /// The entry index under the pointer in the open menu, if any (shared placed panel).
+    fn context_menu_hit(&mut self) -> Option<usize> {
+        let panel = self.context_menu_panel()?;
+        let (px, py) = point_f32(self.pointer);
+        let scale = scale32(self.scale);
+        self.context_menu.as_ref()?.hit(panel, scale, px, py)
+    }
+
+    /// Run a chosen menu action against the active (right-clicked) tab, then close the menu.
+    fn run_menu_action(&mut self, action: MenuAction) {
+        self.context_menu = None;
+        match action {
+            MenuAction::TogglePin => self.toggle_pin(),
+            MenuAction::Rename => self.start_rename(),
+            MenuAction::Duplicate => self.duplicate_active_tab(),
+            MenuAction::NewGroup => self.new_group(),
+            MenuAction::MoveToGroup(gi) => self.move_active_tab_to_group(Some(gi)),
+            MenuAction::RemoveFromGroup => self.move_active_tab_to_group(None),
+            MenuAction::Close => self.request_close_tab(),
+        }
+        self.request_redraw();
+    }
+
+    /// Move the active tab into `target` (an existing group, or `None` to ungroup) and prune any
+    /// group the move leaves empty.
+    fn move_active_tab_to_group(&mut self, target: Option<usize>) {
+        if let Some(tab) = self.tabs.get_mut(self.active) {
+            tab.group = target;
+        }
+        self.prune_empty_groups();
+        self.request_redraw();
+    }
+
+    /// Duplicate the active tab (context menu): insert a fresh tab right after it, inheriting its
+    /// group + custom name, and focus the copy (its shell is a new process, spawned by
+    /// `sync_layout`).
+    fn duplicate_active_tab(&mut self) {
+        let (group, custom_title) = self
+            .tabs
+            .get(self.active)
+            .map_or((None, None), |t| (t.group, t.custom_title.clone()));
+        let mut tab = Tab::new();
+        tab.group = group;
+        tab.custom_title = custom_title;
+        let at = (self.active + 1).min(self.tabs.len());
+        self.tabs.insert(at, tab);
+        self.active = at;
+        self.selecting = false;
+        self.sync_layout();
+        self.request_redraw();
+    }
+
+    /// Keys while the right-click menu is up (design §08): `↑/↓` move the highlight (skipping
+    /// dividers), `Enter` runs the highlighted action, `Esc` dismisses. Captured while open.
+    fn on_context_menu_key(&mut self, key_event: &KeyEvent) {
+        match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape) => self.close_context_menu(),
+            Key::Named(NamedKey::ArrowDown) => {
+                if let Some(menu) = self.context_menu.as_mut() {
+                    menu.move_selection(1);
+                }
+                self.request_redraw();
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                if let Some(menu) = self.context_menu.as_mut() {
+                    menu.move_selection(-1);
+                }
+                self.request_redraw();
+            }
+            Key::Named(NamedKey::Enter) => {
+                let action = self
+                    .context_menu
+                    .as_ref()
+                    .and_then(ContextMenu::selected_action);
+                if let Some(action) = action {
+                    self.run_menu_action(action);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Begin renaming the active tab (design §11 `F2`): its sidebar row becomes an editable
     /// field seeded with the current title. `Enter` commits, `Esc` cancels.
     fn start_rename(&mut self) {
@@ -3008,6 +3172,11 @@ impl App {
             self.on_onboarding_key(key_event);
             return;
         }
+        // The right-click tab menu (design §08) captures input while open.
+        if self.context_menu.is_some() {
+            self.on_context_menu_key(key_event);
+            return;
+        }
         // The keybinding cheatsheet (§11) captures input: Esc or ⌘/ closes, everything else is
         // swallowed while it is up.
         if self.cheatsheet_open {
@@ -3146,6 +3315,18 @@ impl App {
 
     /// Extend the active drag selection to the pointer (a no-op unless a drag is live).
     fn on_cursor_moved(&mut self) {
+        // The right-click menu takes the pointer while open: hovering highlights its items.
+        if self.context_menu.is_some() {
+            if let Some(panel) = self.context_menu_panel() {
+                let (px, py) = point_f32(self.pointer);
+                let scale = scale32(self.scale);
+                if let Some(menu) = self.context_menu.as_mut() {
+                    menu.hover(panel, scale, px, py);
+                }
+                self.request_redraw();
+            }
+            return;
+        }
         // Dragging the dock's left edge resizes it.
         if self.dock_resizing {
             self.resize_dock_to_pointer();
@@ -3205,6 +3386,22 @@ impl App {
         if self.onboarding.is_some() {
             if state == ElementState::Pressed {
                 self.on_onboarding_click();
+            }
+            return;
+        }
+        // The right-click tab menu captures clicks: an item runs its action, a click elsewhere
+        // dismisses it (design §08). Either way nothing behind the menu reacts.
+        if self.context_menu.is_some() {
+            if state == ElementState::Pressed {
+                match self.context_menu_hit() {
+                    Some(i) => {
+                        let action = self.context_menu.as_mut().and_then(|m| m.action_at(i));
+                        if let Some(action) = action {
+                            self.run_menu_action(action);
+                        }
+                    }
+                    None => self.close_context_menu(),
+                }
             }
             return;
         }
@@ -3702,6 +3899,11 @@ impl ApplicationHandler<Wakeup> for App {
                 button: MouseButton::Left,
                 ..
             } => self.on_left_click(state),
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => self.on_right_click(),
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
             WindowEvent::Resized(size) => {
                 self.size = (size.width, size.height);

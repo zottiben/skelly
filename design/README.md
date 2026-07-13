@@ -68,6 +68,15 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Right-click tab action menu (§08).** The guide's "Right-click any tab for the
+  full action menu" is built: right-clicking a sidebar tab focuses it and opens an anchored menu
+  (reusing the shared overlay card - `bg.elevated` + shadow + `border.strong` ring), with
+  keyboard (↑/↓/↵/esc) + mouse (hover/click, click-away dismiss) drive. Items: Pin/Unpin (⇧⌘P),
+  Rename… (F2), Duplicate (new tab inheriting the group + name), New group (⇧⌘N), Move to
+  "<group>" per other group, Remove from group (when grouped), and Close (⌘W, danger color =
+  `diff.del` #F38BA8, matching the mockup). Decided: the mockup's "Move to group ›" **submenu** is
+  realized as flat rows (the overlay slot is a single card; a nested submenu card is a later
+  refinement) - this keeps the full move-into-existing-group behavior without a second overlay.
 - 2026-07-13 - **Collapsible tab groups (§08 #5) + `⇧⌘N` fix.** Real named, collapsible groups
   now exist (was: a single decorative "repo · branch" header, and `⇧⌘N` wrongly created a
   workspace). Model: each workspace owns `Vec<TabGroup>`; each tab carries `group: Option<usize>`.
