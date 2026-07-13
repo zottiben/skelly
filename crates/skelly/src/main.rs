@@ -2212,6 +2212,32 @@ impl App {
         }
     }
 
+    /// The global Session shortcuts (design §11): `⌥⌘←` rewind one step, `⌥⌘→` fast-forward,
+    /// `⌥⌘0` return to now. These work whether or not the timeline dock is open; a rewind /
+    /// fast-forward opens it so the rewound state is visible. Returns whether a chord fired.
+    fn on_session_chord(&mut self, key_event: &KeyEvent) -> bool {
+        if !(self.modifiers.alt_key() && self.modifiers.super_key()) {
+            return false;
+        }
+        match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::ArrowLeft) => {
+                if !self.timeline.open {
+                    self.toggle_timeline();
+                }
+                self.timeline_step(-1);
+            }
+            Key::Named(NamedKey::ArrowRight) => {
+                if !self.timeline.open {
+                    self.toggle_timeline();
+                }
+                self.timeline_step(1);
+            }
+            Key::Character("0") => self.timeline_return_to_now(),
+            _ => return false,
+        }
+        true
+    }
+
     /// Move the timeline selection by `delta` and reconcile the shadow worktree to it.
     fn timeline_step(&mut self, delta: i32) {
         if self.timeline.move_selection(delta) {
@@ -2316,6 +2342,11 @@ impl App {
         // Platform combos (Cmd/Super + K/Q/C/V/B, and the ⇧-modified dock/pin chords). The
         // terminal owns every other key - Ctrl+C etc. still reach the shell.
         if self.on_super_chord(event_loop, key_event) {
+            return;
+        }
+        // Session shortcuts (`⌥⌘←/→` step the rewind, `⌥⌘0` return to now, §11) work globally -
+        // opening the timeline dock so the rewound state is visible.
+        if self.on_session_chord(key_event) {
             return;
         }
         // Pane control (the `⌥` leader chords). Matched on the physical key so macOS
@@ -2960,7 +2991,8 @@ impl App {
 /// `⌥h/j/k/l` directional focus, `⌥⇧h/j/k/l` resize, `⌥w` close, and `⌥=` even out.
 /// Returns `None` for anything else (which then reaches the shell).
 fn pane_action(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
-    if !mods.alt_key() {
+    // `⌥` chords only; `⌥⌘arrows` are the global session (timeline) shortcuts, handled first.
+    if !mods.alt_key() || mods.super_key() {
         return None;
     }
     let shift = mods.shift_key();
