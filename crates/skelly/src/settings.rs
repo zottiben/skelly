@@ -338,13 +338,13 @@ static CATEGORIES: &[Category] = &[
                 label: "Width",
                 key: "sidebar.width",
                 kind: Kind::Range {
-                    min: 56,
+                    min: 180,
                     max: 360,
                     step: 8,
                     divisor: 1,
                     suffix: "px",
                     get: |c| i32::from(c.sidebar.width),
-                    set: |c, v| c.sidebar.width = v.clamp(56, 360) as u16,
+                    set: |c, v| c.sidebar.width = v.clamp(180, 360) as u16,
                 },
             },
             Control {

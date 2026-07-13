@@ -68,6 +68,15 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Sidebar drag-resize + snap-to-rail (§12 "Sidebar collapsed").** The full sidebar
+  panel's right edge is now draggable (a 5px grab zone + `EwResize` cursor, mirroring the dock
+  resize), applying the guide's snap thresholds live: dragging to >=180 logical keeps the full
+  panel at that width (<=360), 90-180 snaps to the slim rail (Autohide), and <90 hides it (`⌘B`
+  restores). The width/mode persist once on release (Hard rule 1; per-frame writes avoided). A new
+  drag only starts from the full panel (the rail widens via `⇧⌘B`), but a single continuous drag
+  crosses all thresholds both ways. The `[sidebar] width` valid range is tightened to the guide's
+  **180-360** (config validation + the settings slider), since below 180 is the rail mode, not a
+  narrow panel.
 - 2026-07-13 - **Transient toasts (§09 primitive / §12 flows).** The guide's toast primitive (a
   bottom-anchored `bg.elevated` card - status dot + message) is built and auto-dismisses after
   4s (the loop sleeps to the deadline via `ControlFlow::WaitUntil`, so it costs nothing idle).

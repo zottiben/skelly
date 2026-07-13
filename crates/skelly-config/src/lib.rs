@@ -121,8 +121,9 @@ pub enum CursorStyle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Sidebar {
-    /// Full-panel sidebar width in px (valid range 56..=360). The slim icon rail is a
-    /// fixed 56px and is selected by `mode = "autohide"`, not by a narrow `width`.
+    /// Full-panel sidebar width in px (valid range 180..=360, the guide's dims). The slim icon
+    /// rail is a fixed 56px selected by `mode = "autohide"`; dragging the panel narrower than
+    /// 180 snaps to the rail rather than storing a narrow `width`.
     pub width: u16,
     /// Show the pinned-tab grid.
     pub show_pinned: bool,
@@ -442,9 +443,9 @@ impl Config {
                 self.appearance.opacity
             ));
         }
-        if !(56..=360).contains(&self.sidebar.width) {
+        if !(180..=360).contains(&self.sidebar.width) {
             return invalid(format!(
-                "sidebar.width = {} (must be 56..=360)",
+                "sidebar.width = {} (must be 180..=360)",
                 self.sidebar.width
             ));
         }

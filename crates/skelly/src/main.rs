@@ -30,7 +30,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use skelly_config::Config;
+use skelly_config::{Config, SidebarMode};
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
 use skelly_render::{
     AnsiPalette, GitDockView, GridCell, OverlayView, PaneView, ProseLabel, PxRect, Renderer,
@@ -359,6 +359,9 @@ struct App {
     dock_width: f32,
     /// Whether the right dock's left edge is being dragged to resize it.
     dock_resizing: bool,
+    /// Whether the sidebar's right edge is being dragged to resize it (design §12: narrowing
+    /// past 180 snaps to the rail, past 90 hides it).
+    sidebar_resizing: bool,
     /// The tab index currently being drag-reordered in the sidebar (updated as it moves), or
     /// `None` when no tab drag is in progress.
     dragging_tab: Option<usize>,
@@ -451,6 +454,7 @@ impl App {
             selecting: false,
             dock_width: GIT_DOCK_WIDTH,
             dock_resizing: false,
+            sidebar_resizing: false,
             dragging_tab: None,
             rail_expanded: false,
             context_menu: None,
@@ -569,6 +573,51 @@ impl App {
         self.dock_width = width.clamp(DOCK_WIDTH_MIN, DOCK_WIDTH_MAX);
         self.sync_layout();
         self.request_redraw();
+    }
+
+    /// Whether the pointer sits on the full sidebar's right edge (its resize grab zone). Only the
+    /// full panel (Fixed) is drag-resizable; the rail is widened via `⇧⌘B`.
+    fn on_sidebar_edge(&self) -> bool {
+        if self.sidebar.mode() != SidebarMode::Fixed {
+            return false;
+        }
+        let (px, _) = point_f32(self.pointer);
+        (px - self.sidebar_width_px()).abs() <= DOCK_GRAB * scale32(self.scale)
+    }
+
+    /// Resize the sidebar from the current pointer x (dragging its right edge), applying the
+    /// guide's §12 snap thresholds: >=180 logical stays the full panel at that width (<=360);
+    /// 90..180 snaps to the slim rail (Autohide); <90 hides it (`⌘B` restores). Updates the
+    /// in-memory config; [`end_sidebar_resize`](Self::end_sidebar_resize) persists once on release.
+    fn resize_sidebar_to_pointer(&mut self) {
+        let (px, _) = point_f32(self.pointer);
+        let target = px / scale32(self.scale);
+        let mode = if target < 90.0 {
+            SidebarMode::Hidden
+        } else if target < 180.0 {
+            SidebarMode::Autohide
+        } else {
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                reason = "target is a guarded, in-range positive width"
+            )]
+            let width = (target.round() as u16).min(360);
+            self.config.sidebar.width = width;
+            SidebarMode::Fixed
+        };
+        self.sidebar.set_mode(mode);
+        self.config.sidebar.mode = mode;
+        self.rail_expanded = false;
+        self.sync_layout();
+        self.request_redraw();
+    }
+
+    /// Finish a sidebar resize drag: persist the settled width + mode once (the file is the
+    /// source of truth, Hard rule 1; per-frame writes during the drag are avoided).
+    fn end_sidebar_resize(&mut self) {
+        self.sidebar_resizing = false;
+        self.persist_config();
     }
 
     /// The physical-pixel inset inside each pane (border-to-cells gap).
@@ -3383,6 +3432,11 @@ impl App {
             self.resize_dock_to_pointer();
             return;
         }
+        // Dragging the sidebar's right edge resizes it (snapping to rail / hidden, design §12).
+        if self.sidebar_resizing {
+            self.resize_sidebar_to_pointer();
+            return;
+        }
         // Dragging a sidebar tab over another reorders the tab list.
         if let Some(from) = self.dragging_tab {
             if let Some(sidebar::Hit::Tab(target)) = self.sidebar_hit() {
@@ -3394,9 +3448,9 @@ impl App {
             }
             return;
         }
-        // Show a horizontal-resize cursor when hovering the dock's draggable edge.
+        // Show a horizontal-resize cursor when hovering either draggable edge (dock or sidebar).
         if let Some(window) = self.window.as_ref() {
-            window.set_cursor(if self.on_dock_edge() {
+            window.set_cursor(if self.on_dock_edge() || self.on_sidebar_edge() {
                 CursorIcon::EwResize
             } else {
                 CursorIcon::Default
@@ -3468,6 +3522,11 @@ impl App {
                     self.dock_resizing = true;
                     return;
                 }
+                // Grabbing the full sidebar's right edge starts a resize drag (design §12).
+                if self.on_sidebar_edge() {
+                    self.sidebar_resizing = true;
+                    return;
+                }
                 if let Some(hit) = self.sidebar_hit() {
                     match hit {
                         sidebar::Hit::Workspace(index) => self.switch_workspace(index),
@@ -3504,6 +3563,10 @@ impl App {
                 self.selecting = false;
                 self.dock_resizing = false;
                 self.dragging_tab = None;
+                // Persist the settled sidebar width/mode once when a resize drag ends.
+                if self.sidebar_resizing {
+                    self.end_sidebar_resize();
+                }
                 // A click with no drag clears the (single-cell) selection.
                 if self
                     .active_tab()
