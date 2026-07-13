@@ -61,6 +61,7 @@ fn main() {
         origin: (pane_rect.x + inset, pane_rect.y + inset),
         rows: terminal_rows(&theme),
         cursor: (11, 2),
+        cursor_shape: skelly_render::CursorShape::Block,
         focused: true,
         logo: None,
     };

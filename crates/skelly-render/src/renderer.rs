@@ -328,6 +328,7 @@ impl Renderer {
                 pane.origin,
                 pane.rows,
                 cursor,
+                pane.cursor_shape,
                 self.theme.accent,
                 pane.selection,
             ));

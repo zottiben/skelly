@@ -36,8 +36,8 @@ use anyhow::Context as _;
 use skelly_config::{Config, SidebarMode};
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
 use skelly_render::{
-    AnsiPalette, GitDockView, GridCell, OverlayView, PaneView, ProseLabel, PxRect, Renderer,
-    SettingsView, SidebarView, Srgb, TextMeasure, Theme, TimelineView,
+    AnsiPalette, CursorShape, GitDockView, GridCell, OverlayView, PaneView, ProseLabel, PxRect,
+    Renderer, SettingsView, SidebarView, Srgb, TextMeasure, Theme, TimelineView,
 };
 use skelly_session::{Actor, Repo, SessionEvent, ShadowWorktree};
 use skelly_term::{CellAttrs, CellColor, ExitStatus, TermCell, Terminal};
@@ -792,6 +792,7 @@ impl App {
                     origin,
                     rows,
                     cursor: term.cursor(),
+                    cursor_shape: render_cursor_shape(term.cursor_shape()),
                     selection,
                     focused: id == focused,
                     logo,
@@ -3693,6 +3694,7 @@ struct PaneFrame {
     origin: (f32, f32),
     rows: Vec<Vec<GridCell>>,
     cursor: (usize, usize),
+    cursor_shape: CursorShape,
     selection: Vec<(usize, usize)>,
     focused: bool,
     /// The empty-state brand watermark's bounding box, for a pristine tab (design §10.2).
@@ -3707,6 +3709,7 @@ impl PaneFrame {
             origin: self.origin,
             rows: &self.rows,
             cursor: self.cursor,
+            cursor_shape: self.cursor_shape,
             selection: &self.selection,
             focused: self.focused,
             logo: self.logo,
@@ -3832,6 +3835,17 @@ fn editor_mode(job: Option<&str>, shape: skelly_term::CursorShape) -> Option<&'s
         skelly_term::CursorShape::Underline => "REPLACE",
         skelly_term::CursorShape::Block | skelly_term::CursorShape::Hidden => "NORMAL",
     })
+}
+
+/// Map the terminal's requested cursor shape to the renderer's, so the drawn cursor honors what
+/// the running program set via `DECSCUSR` (e.g. vim's block/bar/underline per mode).
+fn render_cursor_shape(shape: skelly_term::CursorShape) -> CursorShape {
+    match shape {
+        skelly_term::CursorShape::Block => CursorShape::Block,
+        skelly_term::CursorShape::Bar => CursorShape::Bar,
+        skelly_term::CursorShape::Underline => CursorShape::Underline,
+        skelly_term::CursorShape::Hidden => CursorShape::Hidden,
+    }
 }
 
 /// The editor filetype to show in the focused pane's status line (design §10.4): `None` unless

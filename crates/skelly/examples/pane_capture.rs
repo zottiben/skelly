@@ -148,6 +148,7 @@ fn main() {
             origin: (rect.x + inset, rect.y + inset),
             rows: grid,
             cursor: term.cursor(),
+            cursor_shape: skelly_render::CursorShape::Block,
             focused: *id == focused,
             logo: None,
         });

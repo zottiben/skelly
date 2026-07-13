@@ -149,6 +149,9 @@ pub struct PaneView<'a> {
     pub rows: &'a [Vec<GridCell>],
     /// Cursor position `(column, row)` - drawn only when `focused`.
     pub cursor: (usize, usize),
+    /// The cursor's shape (block / bar / underline / hidden), honoring what the running program
+    /// requested via `DECSCUSR` (e.g. vim's per-mode cursor).
+    pub cursor_shape: CursorShape,
     /// Selected cells `(column, row)` in this pane.
     pub selection: &'a [(usize, usize)],
     /// Whether this is the focused pane (accent ring + drawn cursor).
@@ -252,6 +255,21 @@ pub struct SettingsView<'a> {
     pub labels: &'a [ProseLabel],
 }
 
+/// The shape to draw the focused pane's cursor as, honoring the running program's `DECSCUSR`
+/// request (vim sets a block in normal mode, a bar in insert, an underline in replace).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    /// A full-cell block (the terminal default; vim normal mode).
+    #[default]
+    Block,
+    /// A thin vertical bar at the cell's left edge (vim insert mode).
+    Bar,
+    /// A thin underline along the cell's bottom (vim replace mode).
+    Underline,
+    /// No cursor drawn (the program hid it).
+    Hidden,
+}
+
 /// One cell to render: its character, foreground, optional background fill, and
 /// resolved text attributes.
 ///
@@ -290,8 +308,16 @@ pub mod bench_support {
     /// focused pane: cursor at `(0, 0)`, no selection) and return how many were produced.
     #[must_use]
     pub fn grid_quads_len(cell_w: f32, cell_h: f32, rows: &[Vec<GridCell>], accent: Srgb) -> usize {
-        let quads =
-            crate::cells::grid_quads(cell_w, cell_h, (0.0, 0.0), rows, Some((0, 0)), accent, &[]);
+        let quads = crate::cells::grid_quads(
+            cell_w,
+            cell_h,
+            (0.0, 0.0),
+            rows,
+            Some((0, 0)),
+            crate::CursorShape::Block,
+            accent,
+            &[],
+        );
         std::hint::black_box(&quads).len()
     }
 

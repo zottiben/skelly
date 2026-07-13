@@ -79,6 +79,7 @@ pub fn capture_cells_rgba(
                 (pad, pad),
                 rows,
                 Some(cursor),
+                crate::CursorShape::Block,
                 theme.accent,
                 selection,
             )
@@ -98,6 +99,8 @@ pub struct CapturePane {
     pub rows: Vec<Vec<GridCell>>,
     /// Cursor position `(column, row)` - drawn only when `focused`.
     pub cursor: (usize, usize),
+    /// The cursor's shape (block / bar / underline / hidden), honoring `DECSCUSR`.
+    pub cursor_shape: crate::CursorShape,
     /// Whether this is the focused pane (accent ring + drawn cursor).
     pub focused: bool,
     /// The empty-state brand watermark's square bounding box (physical px), when this pane
@@ -299,6 +302,7 @@ fn paint_panes(text: &mut TextLayer, panes: &[CapturePane], theme: &Theme) -> Ve
             pane.origin,
             &pane.rows,
             cursor,
+            pane.cursor_shape,
             theme.accent,
             &[],
         ));

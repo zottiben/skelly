@@ -26,6 +26,10 @@ const WINDOW_PAD: f32 = 12.0;
 /// Logical inset inside each pane - mirrors the binary's `PANE_INSET`.
 const PANE_INSET: f32 = 6.0;
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "example: one straight-line capture scene"
+)]
 fn main() {
     let path = std::env::args()
         .nth(1)
@@ -111,6 +115,7 @@ fn main() {
             origin: (rect.x + inset, rect.y + inset),
             rows: grid,
             cursor: term.cursor(),
+            cursor_shape: skelly_render::CursorShape::Block,
             focused: false, // an exited pane draws no cursor
             logo: None,
         });

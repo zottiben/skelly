@@ -152,12 +152,17 @@ pub(crate) fn scrim_quad(rect: crate::PxRect, theme: &crate::theme::Theme) -> Qu
 /// translucent selection fills, then the accent cursor block (only when `cursor` is
 /// `Some`, i.e. the focused pane). All sit *beneath* the glyphs (the text pass loads
 /// over them). `selection` is the list of selected `(column, row)` cells.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one focused per-pane quad builder; grouping the args would only obscure it"
+)]
 pub(crate) fn grid_quads(
     cell_w: f32,
     cell_h: f32,
     origin: (f32, f32),
     rows: &[Vec<crate::GridCell>],
     cursor: Option<(usize, usize)>,
+    cursor_shape: crate::CursorShape,
     accent: crate::theme::Srgb,
     selection: &[(usize, usize)],
 ) -> Vec<Quad> {
@@ -208,7 +213,22 @@ pub(crate) fn grid_quads(
     }
 
     if let Some((cursor_col, cursor_row)) = cursor {
-        quads.push(cell_quad(cursor_col, cursor_row, accent.to_linear()));
+        let x = origin_x + cursor_col as f32 * cell_w;
+        let y = origin_y + cursor_row as f32 * cell_h;
+        let accent = accent.to_linear();
+        // Honor the program's requested cursor shape (design: match vim's per-mode cursor).
+        match cursor_shape {
+            crate::CursorShape::Block => quads.push(Quad::new(x, y, cell_w, cell_h, accent)),
+            crate::CursorShape::Bar => {
+                let bar_w = (cell_w * 0.15).max(2.0);
+                quads.push(Quad::new(x, y, bar_w, cell_h, accent));
+            }
+            crate::CursorShape::Underline => {
+                let bar_h = underline_thickness.max(2.0);
+                quads.push(Quad::new(x, y + cell_h - bar_h, cell_w, bar_h, accent));
+            }
+            crate::CursorShape::Hidden => {}
+        }
     }
     quads
 }
@@ -764,7 +784,16 @@ mod tests {
     #[test]
     fn focused_pane_draws_a_cursor_quad_at_the_offset_origin() {
         let rows = vec![vec![plain('a'), plain('b')]];
-        let quads = grid_quads(10.0, 20.0, (100.0, 200.0), &rows, Some((1, 0)), ACCENT, &[]);
+        let quads = grid_quads(
+            10.0,
+            20.0,
+            (100.0, 200.0),
+            &rows,
+            Some((1, 0)),
+            crate::CursorShape::Block,
+            ACCENT,
+            &[],
+        );
         // No backgrounds/underlines/selection here, so the only quad is the cursor.
         assert_eq!(quads.len(), 1);
         // Cursor at column 1, row 0: origin + (1 * cell_w, 0).
@@ -772,9 +801,73 @@ mod tests {
     }
 
     #[test]
+    fn cursor_shape_bar_and_underline_draw_thin_quads() {
+        let rows = vec![vec![plain('a'), plain('b')]];
+        // A bar cursor: a thin vertical rule at the cell's left edge (full height).
+        let bar = grid_quads(
+            10.0,
+            20.0,
+            (0.0, 0.0),
+            &rows,
+            Some((1, 0)),
+            crate::CursorShape::Bar,
+            ACCENT,
+            &[],
+        );
+        assert_eq!(bar.len(), 1);
+        assert!(bar[0].rect[2] < 10.0, "bar is narrower than a full cell");
+        assert!(rect_eq(bar[0].rect, [10.0, 0.0, 2.0, 20.0]));
+        // An underline cursor: a thin horizontal rule along the cell's bottom (full width).
+        let under = grid_quads(
+            10.0,
+            20.0,
+            (0.0, 0.0),
+            &rows,
+            Some((1, 0)),
+            crate::CursorShape::Underline,
+            ACCENT,
+            &[],
+        );
+        assert_eq!(under.len(), 1);
+        assert!(
+            (under[0].rect[2] - 10.0).abs() < 1e-3,
+            "underline spans the full cell width"
+        );
+        assert!(
+            under[0].rect[3] < 20.0,
+            "underline is shorter than a full cell"
+        );
+        assert!(
+            under[0].rect[1] > 0.0,
+            "underline sits near the cell bottom"
+        );
+        // A hidden cursor emits nothing.
+        let hidden = grid_quads(
+            10.0,
+            20.0,
+            (0.0, 0.0),
+            &rows,
+            Some((1, 0)),
+            crate::CursorShape::Hidden,
+            ACCENT,
+            &[],
+        );
+        assert!(hidden.is_empty(), "a hidden cursor emits no quad");
+    }
+
+    #[test]
     fn unfocused_pane_draws_no_cursor() {
         let rows = vec![vec![plain('a')]];
-        let quads = grid_quads(10.0, 20.0, (0.0, 0.0), &rows, None, ACCENT, &[]);
+        let quads = grid_quads(
+            10.0,
+            20.0,
+            (0.0, 0.0),
+            &rows,
+            None,
+            crate::CursorShape::Block,
+            ACCENT,
+            &[],
+        );
         assert!(quads.is_empty(), "a None cursor emits no quad");
     }
 

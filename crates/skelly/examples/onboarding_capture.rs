@@ -78,6 +78,7 @@ fn main() {
         origin: (24.0, 24.0),
         rows: Vec::<Vec<GridCell>>::new(),
         cursor: (0, 0),
+        cursor_shape: skelly_render::CursorShape::Block,
         focused: false,
         logo: None,
     };
