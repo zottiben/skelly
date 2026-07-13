@@ -68,6 +68,19 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Settings audit: which controls apply, and which await features.** Every control
+  round-trips its config key (Hard rule 1). Applied live: `appearance.theme` / `font_size` /
+  `line_height` / `show_status_line`, `sidebar.mode` / `width` / `show_pinned`, `appearance.cursor`
+  (default cursor shape via alacritty's `default_cursor_style`), `appearance.bold_is_bright`,
+  `panes.max`, `shell.program` (new panes). Still inert - persisted but pending the underlying
+  capability, NOT a regression: `appearance.opacity` / `bg_blur` (need a transparent window +
+  macOS `NSVisualEffectView` compositing - deferred, can't be visually verified headless),
+  `appearance.ligatures` (cosmic-text 0.19 has no clean per-run ligature toggle),
+  `tabs.title` / `follow_cwd` + `panes.split_inherits_cwd` (need OSC-7 per-pane cwd tracking -
+  the same blocker as cwd tab titles), `session.persist` (launch-time restore is a follow-up) /
+  `timeline` / `shadow_worktree`, `git.diff_view = "split"` (side-by-side diff renderer is a
+  follow-up). These stay in the UI so the preference is saved for when the feature lands.
+
 - 2026-07-13 - **Hover tooltips (§09 primitive).** The guide's tooltip primitive is built and
   applied to the icon-only chrome, where a label isn't otherwise visible: the utility-bar icons
   (⚙ Settings ⌘, / ◐ Toggle theme / ⟲ Session timeline ⇧⌘H / ⑂ Git diff ⇧⌘G), the command well
