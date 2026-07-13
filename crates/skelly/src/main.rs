@@ -316,6 +316,10 @@ struct App {
     /// The tab index currently being drag-reordered in the sidebar (updated as it moves), or
     /// `None` when no tab drag is in progress.
     dragging_tab: Option<usize>,
+    /// Whether the slim icon rail is transiently hover-expanded to the full panel (design §08,
+    /// "56px · hover to expand"). Transient pointer state, not a config key: the rail overlays
+    /// the panes while expanded, so the terminal never reflows on hover.
+    rail_expanded: bool,
     /// The command palette's open / close animation (design §03 motion), live only while it
     /// plays. While any animation is set the event loop polls + redraws each frame; it clears
     /// itself when done (finalizing the close), returning the loop to its idle `Wait`.
@@ -393,6 +397,7 @@ impl App {
             dock_width: GIT_DOCK_WIDTH,
             dock_resizing: false,
             dragging_tab: None,
+            rail_expanded: false,
             palette_anim: None,
             confirm_anim: None,
         }
@@ -429,7 +434,7 @@ impl App {
     /// macOS traffic-light strip, since that is where the lights sit (top-left).
     fn viewport_rect(&self) -> Rect {
         let pad = WINDOW_PAD * scale32(self.scale);
-        let sidebar = self.sidebar_width_px();
+        let sidebar = self.sidebar_footprint_px();
         let dock = self.right_dock_width_px();
         let w = dim_f32(self.size.0);
         let h = dim_f32(self.size.1);
@@ -441,19 +446,38 @@ impl App {
         )
     }
 
-    /// The sidebar's width in physical px, or `0.0` when it is hidden. The panel occupies
-    /// the strip `[0, width)` and the pane viewport starts after it; the slim rail is a
-    /// fixed 56px regardless of `sidebar.width`.
+    /// The sidebar's **painted / hit** width in physical px, or `0.0` when hidden. The panel
+    /// occupies the strip `[0, width)`. The slim rail is a fixed 56px regardless of
+    /// `sidebar.width` - unless it is hover-expanded, when it paints at the full panel width
+    /// (overlaying the panes, design §08 "56px · hover to expand").
     fn sidebar_width_px(&self) -> f32 {
         if !self.sidebar.visible() {
             return 0.0;
         }
-        let logical = if self.sidebar.is_rail() {
+        let logical = if self.sidebar_rail_now() {
             RAIL_WIDTH
         } else {
             f32::from(self.config.sidebar.width)
         };
         logical * scale32(self.scale)
+    }
+
+    /// The sidebar's **layout footprint** in physical px - the strip reserved from the pane
+    /// viewport. A hover-expanded rail overlays the panes, so its footprint stays the slim
+    /// rail width and the terminal never reflows on hover; otherwise this equals the painted
+    /// width.
+    fn sidebar_footprint_px(&self) -> f32 {
+        if self.sidebar.is_rail() && self.rail_expanded {
+            RAIL_WIDTH * scale32(self.scale)
+        } else {
+            self.sidebar_width_px()
+        }
+    }
+
+    /// Whether the sidebar is drawn as the slim icon rail right now: the rail mode, but not
+    /// while it is hover-expanded (when it paints as the full panel).
+    fn sidebar_rail_now(&self) -> bool {
+        self.sidebar.is_rail() && !self.rail_expanded
     }
 
     /// The right dock's width in physical px, or `0.0` when neither right dock is open. The
@@ -1173,7 +1197,7 @@ impl App {
             group_label: group.as_deref(),
             tab_running: &list_running,
             tab_titles: &list_titles,
-            rail: self.sidebar.is_rail(),
+            rail: self.sidebar_rail_now(),
             top_inset: self.content_top() / scale,
         };
         let panel = PxRect {
@@ -1288,6 +1312,7 @@ impl App {
             }
             "sidebar.mode" => {
                 self.sidebar.set_mode(self.config.sidebar.mode);
+                self.rail_expanded = false;
                 self.sync_layout();
             }
             // Layout-affecting toggles: re-fit the grids. Hiding the status line reclaims its
@@ -1303,6 +1328,7 @@ impl App {
     /// shells; the chosen mode persists (design §08, Hard rule 1).
     fn toggle_sidebar(&mut self) {
         self.sidebar.toggle();
+        self.rail_expanded = false;
         self.persist_sidebar_mode();
         self.sync_layout();
         self.request_redraw();
@@ -1312,6 +1338,7 @@ impl App {
     /// §08). The viewport changes width, so re-fit the shells; the mode persists.
     fn cycle_sidebar_mode(&mut self) {
         self.sidebar.cycle_rail();
+        self.rail_expanded = false;
         self.persist_sidebar_mode();
         self.sync_layout();
         self.request_redraw();
@@ -1559,7 +1586,7 @@ impl App {
             group_label: group.as_deref(),
             tab_running: &[],
             tab_titles: &[],
-            rail: self.sidebar.is_rail(),
+            rail: self.sidebar_rail_now(),
             top_inset: self.content_top() / scale,
         };
         let panel = PxRect {
@@ -2955,6 +2982,17 @@ impl App {
                 CursorIcon::Default
             });
         }
+        // Auto-hide rail: hovering the slim rail expands it to the full panel (design §08,
+        // "56px · hover to expand"); the pointer leaving the panel collapses it. Overlay - the
+        // pane viewport keeps the rail footprint, so the terminal doesn't reflow on hover.
+        if self.sidebar.is_rail() {
+            let (px, _) = point_f32(self.pointer);
+            let within = px < self.sidebar_width_px();
+            if within != self.rail_expanded {
+                self.rail_expanded = within;
+                self.request_redraw();
+            }
+        }
         if !self.selecting {
             return;
         }
@@ -3461,6 +3499,13 @@ impl ApplicationHandler<Wakeup> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer = (position.x, position.y);
                 self.on_cursor_moved();
+            }
+            WindowEvent::CursorLeft { .. } => {
+                // The pointer left the window - collapse a hover-expanded rail (design §08).
+                if self.rail_expanded {
+                    self.rail_expanded = false;
+                    self.request_redraw();
+                }
             }
             WindowEvent::MouseInput {
                 state,

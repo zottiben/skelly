@@ -57,6 +57,15 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Sidebar deferred interactions built: drag-reorder tabs + rail hover-to-expand
+  (§08).** (a) A sidebar tab can be **dragged to reorder** it - press a tab, drag over another,
+  and the list reorders live (the dragged tab stays active); release ends the drag. (b) The
+  guide's §08 rail spec ("56px · hover to expand") is now real: hovering the slim icon rail
+  **expands it to the full panel as an overlay** and the pointer leaving collapses it. Decided
+  overlay, not push: the pane viewport keeps the rail *footprint* (56px) while expanded, so the
+  terminal never reflows on hover - only the paint/hit width grows to the full panel (opaque
+  `bg.sidebar` fill occludes the panes beneath). The transient expand is pointer state, not a
+  config key (Hard rule 1 unaffected); the persisted mode is still just Fixed/Autohide/Hidden.
 - 2026-07-13 - **§11 keybindings implemented end-to-end** (feature-completeness pass). Every §11
   chord now works: pane nav on `⌥arrows` (focus) / `⌃⌥arrows` (resize) / `⌥⇧arrows` (swap - new
   `PaneTree::swap`), `⌥Space` cycle-layout (new `PaneTree::cycle_layout` - even cols/rows/main-
