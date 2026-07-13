@@ -367,6 +367,11 @@ struct App {
     /// Whether the sidebar's right edge is being dragged to resize it (design §12: narrowing
     /// past 180 snaps to the rail, past 90 hides it).
     sidebar_resizing: bool,
+    /// Whether the open right dock (git diff / timeline) holds keyboard focus. Docks are layers
+    /// over a live terminal (Hard rule 4): opening one keeps focus on the panes (so the user can
+    /// keep typing); clicking the dock focuses it for its own keyboard controls, clicking a pane
+    /// returns focus to the terminal.
+    dock_focused: bool,
     /// The tab index currently being drag-reordered in the sidebar (updated as it moves), or
     /// `None` when no tab drag is in progress.
     dragging_tab: Option<usize>,
@@ -467,6 +472,7 @@ impl App {
             dock_width: GIT_DOCK_WIDTH,
             dock_resizing: false,
             sidebar_resizing: false,
+            dock_focused: false,
             dragging_tab: None,
             rail_expanded: false,
             context_menu: None,
@@ -566,6 +572,16 @@ impl App {
         } else {
             0.0
         }
+    }
+
+    /// Whether the pointer is over the open right dock's body (used to give the dock keyboard
+    /// focus on click). `false` when no dock is open.
+    fn pointer_in_right_dock(&self) -> bool {
+        if !(self.git_dock.open || self.timeline.open) {
+            return false;
+        }
+        let (px, _) = point_f32(self.pointer);
+        px >= dim_f32(self.size.0) - self.right_dock_width_px()
     }
 
     /// Whether the pointer sits on the open right dock's left edge (its resize grab zone).
@@ -1548,6 +1564,8 @@ impl App {
             self.git_dock.open();
             self.refresh_git();
         }
+        // Opening keeps keyboard focus on the terminal; closing clears the dock focus.
+        self.dock_focused = false;
         self.sync_layout();
         self.request_redraw();
     }
@@ -1566,6 +1584,8 @@ impl App {
             self.timeline.open(branch);
             self.reconcile_shadow();
         }
+        // Opening keeps keyboard focus on the terminal; closing clears the dock focus.
+        self.dock_focused = false;
         self.sync_layout();
         self.request_redraw();
     }
@@ -1575,6 +1595,7 @@ impl App {
         if self.timeline.open {
             self.timeline.close();
         }
+        self.dock_focused = false;
         self.discard_shadow();
     }
 
@@ -3377,11 +3398,15 @@ impl App {
             self.on_palette_key(event_loop, key_event);
             return;
         }
-        if self.git_dock.open {
+        // The right docks (git diff / timeline) capture keys only while *focused* (clicked into);
+        // otherwise they are passive layers over a live terminal (Hard rule 4) and keys reach the
+        // focused pane. The toggle chords (⇧⌘G / ⇧⌘H) and session chords stay global below, so a
+        // dock can always be closed / scrubbed without focusing it.
+        if self.git_dock.open && self.dock_focused {
             self.on_gitdock_key(event_loop, key_event);
             return;
         }
-        if self.timeline.open {
+        if self.timeline.open && self.dock_focused {
             self.on_timeline_key(event_loop, key_event);
             return;
         }
@@ -3613,6 +3638,16 @@ impl App {
                     self.sidebar_resizing = true;
                     return;
                 }
+                // Clicking the open right dock focuses it (its keyboard controls take over);
+                // clicking anywhere else returns keyboard focus to the terminal panes.
+                if self.pointer_in_right_dock() {
+                    if !self.dock_focused {
+                        self.dock_focused = true;
+                        self.request_redraw();
+                    }
+                    return;
+                }
+                self.dock_focused = false;
                 if let Some(hit) = self.sidebar_hit() {
                     match hit {
                         sidebar::Hit::Workspace(index) => self.switch_workspace(index),
