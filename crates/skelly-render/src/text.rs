@@ -7,12 +7,9 @@
 //! capture share the exact drawing code - no drift between what ships and what we
 //! verify.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
-
 use glyphon::{
-    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, Style,
-    SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
+    Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache,
+    TextArea, TextAtlas, TextBounds, TextRenderer, Viewport, Wrap,
 };
 use skelly_config::Appearance;
 
@@ -31,10 +28,6 @@ struct PaneBuf {
     left: f32,
     top: f32,
     clip: (f32, f32, f32, f32),
-    /// A fingerprint of the last grid + size actually shaped into `buffer`, so an
-    /// identical grid on a later frame skips the (expensive) re-shape - see the note
-    /// on [`TextLayer::set_panes`]. `None` forces the next call to shape.
-    shaped: Option<u64>,
 }
 
 /// One pane's text input to [`TextLayer::set_panes`]: the cell grid plus the pixel
@@ -66,6 +59,28 @@ pub struct TextLayer {
     panes: Vec<PaneBuf>,
     /// The configured font family when installed; `None` falls back to monospace.
     family_name: Option<String>,
+    /// The fast grid renderer: rasterizes each glyph once into a GPU atlas and draws cells as
+    /// instanced quads (no per-frame shaping). Used for the windowed pane grid + grid capture.
+    glyph: crate::glyph::GlyphLayer,
+    /// A scratch buffer used to shape a single glyph on an atlas cache miss.
+    probe: Buffer,
+    /// The pen baseline within a cell (px from the cell top down to the baseline), for glyph
+    /// placement in the atlas renderer. Recomputed with the metrics on a font-size change.
+    baseline: f32,
+    /// Whether the last `set_*` used the fast grid path (draw the glyph layer) or the glyphon path
+    /// (`set_content`, the plain-text capture). The windowed renderer only ever uses the grid.
+    grid_active: bool,
+    /// The grid panes stored by `set_panes` (owned, so `draw` can build glyph instances with the
+    /// GPU access it has and `set_panes` does not). Cloning the small POD cells each frame is cheap.
+    grid: Vec<StoredPane>,
+}
+
+/// One pane's owned grid + placement, kept between `set_panes` and `draw`.
+struct StoredPane {
+    rows: Vec<Vec<GridCell>>,
+    left: f32,
+    top: f32,
+    clip: (f32, f32, f32, f32),
 }
 
 impl TextLayer {
@@ -96,12 +111,12 @@ impl TextLayer {
         // Honor the configured font (Nerd Fonts included) when it is installed;
         // otherwise fall back to a system monospace face so columns still align.
         let family_name = installed_family(&font_system, &appearance.font_family);
-        let cell_w = measure_cell_width(
-            &mut font_system,
-            font_px,
-            line_px,
-            family_of(family_name.as_deref()),
-        );
+        let metrics = Metrics::new(font_px, line_px);
+        let family = family_of(family_name.as_deref());
+        let cell_w = measure_cell_width(&mut font_system, font_px, line_px, family);
+        let baseline = measure_baseline(&mut font_system, metrics, family);
+        let glyph = crate::glyph::GlyphLayer::new(device, format);
+        let probe = Buffer::new(&mut font_system, metrics);
 
         // Panes are created lazily by the first `set_panes` / `set_cells` call.
         Self {
@@ -109,7 +124,7 @@ impl TextLayer {
             default_fg: Theme::resolve(&appearance.theme).fg_primary,
             cell_w,
             cell_h: line_px,
-            metrics: Metrics::new(font_px, line_px),
+            metrics,
             target_w: dim_to_f32(width),
             target_h: dim_to_f32(height),
             font_system,
@@ -119,30 +134,33 @@ impl TextLayer {
             renderer,
             panes: Vec::new(),
             family_name,
+            glyph,
+            probe,
+            baseline,
+            grid_active: false,
+            grid: Vec::new(),
         }
     }
 
     /// Rebuild the cell metrics for a new `font_size` (px) / `line_height` - the live `⌘=/-/0`
-    /// font-size bindings (design §11). Recomputes the cell width/height + shaping metrics and
-    /// forces every pane to re-shape at the new size (the shape fingerprint keys on the clip
-    /// size, not the font metrics, so it would not otherwise invalidate). The binary re-fits the
-    /// PTY grids to the new cell size afterwards.
+    /// font-size bindings (design §11). Recomputes the cell width/height, shaping metrics, and the
+    /// glyph baseline, and clears the atlas so every glyph re-rasterizes at the new size. The binary
+    /// re-fits the PTY grids to the new cell size afterwards.
     pub fn set_font_size(&mut self, font_size: u16, line_height: f32) {
         let font_px = f32::from(font_size) * self.scale;
         let line_px = font_px * line_height;
         self.metrics = Metrics::new(font_px, line_px);
         self.cell_h = line_px;
-        self.cell_w = measure_cell_width(
-            &mut self.font_system,
-            font_px,
-            line_px,
-            family_of(self.family_name.as_deref()),
-        );
-        // Store the new metrics on each buffer and clear its shape cache; the next `set_panes`
-        // re-shapes it (with a fresh `font_system` borrow) at the new size.
+        let family = family_of(self.family_name.as_deref());
+        self.cell_w = measure_cell_width(&mut self.font_system, font_px, line_px, family);
+        self.baseline = measure_baseline(&mut self.font_system, self.metrics, family);
+        // Every atlas glyph was rasterized at the old size; drop them so the next draw re-rasterizes
+        // at the new size. The scratch probe adopts the new metrics too.
+        self.glyph.reset_atlas();
+        self.probe.set_metrics(self.metrics);
+        // The glyphon capture buffers also re-shape at the new size.
         for pane in &mut self.panes {
             pane.buffer.set_metrics(self.metrics);
-            pane.shaped = None;
         }
     }
 
@@ -187,66 +205,31 @@ impl TextLayer {
                 left: 0.0,
                 top: 0.0,
                 clip: (0.0, 0.0, 0.0, 0.0),
-                shaped: None,
             });
         }
         panes.truncate(n);
     }
 
-    /// Shape each pane's grid into its own buffer, recording where it draws. One
-    /// buffer per input; consecutive cells with the same color and attributes merge
-    /// into runs to keep the span count down.
-    ///
-    /// Shaping a full grid with `cosmic-text` costs on the order of a millisecond (many
-    /// more for a busy colored grid), and the windowed renderer calls this every redraw -
-    /// including redraws driven by animation, selection, or an *unchanged* pane. So each
-    /// pane skips the re-shape when its grid + size fingerprint matches what is already
-    /// shaped in its buffer; only its draw position (which is cheap and applied below
-    /// regardless) may have moved. This is the difference between a repaint costing
-    /// microseconds and costing milliseconds. (A true fixed-metric atlas renderer would
-    /// remove the shaping entirely - tracked as the M2c follow-up.)
+    /// Store each pane's grid + placement for the fast glyph-atlas draw. No shaping here: the atlas
+    /// renderer ([`glyph`](crate::glyph)) rasterizes each glyph once and draws cells as instanced
+    /// quads at fixed positions, so a full-grid change (vim scroll/edit) stays sub-millisecond
+    /// regardless of content - the old per-frame `cosmic-text` shaping was ~50ms on a busy grid.
     pub(crate) fn set_panes(&mut self, inputs: &[PaneTextInput]) {
-        self.ensure_panes(inputs.len());
-        let Self {
-            panes,
-            font_system,
-            family_name,
-            ..
-        } = self;
-        let family = family_of(family_name.as_deref());
-        let default = Attrs::new().family(family);
-        for (pane, input) in panes.iter_mut().zip(inputs) {
-            // Position is cheap and may change without the content changing (e.g. a pane
-            // slides on resize), so always refresh it; only the shaping is gated.
-            pane.left = input.left;
-            pane.top = input.top;
-            pane.clip = input.clip;
-
-            let fingerprint = shape_fingerprint(input.rows, input.clip.2, input.clip.3);
-            if pane.shaped == Some(fingerprint) {
-                continue;
-            }
-
-            pane.buffer
-                .set_size(Some(input.clip.2.max(1.0)), Some(input.clip.3.max(1.0)));
-            let runs = text_runs(input.rows);
-            if runs.is_empty() {
-                pane.buffer.set_text("", &default, Shaping::Advanced, None);
-            } else {
-                let spans = runs
-                    .iter()
-                    .map(|run| (run.text.as_str(), run.attrs(family)));
-                pane.buffer
-                    .set_rich_text(spans, &default, Shaping::Advanced, None);
-            }
-            pane.buffer.shape_until_scroll(font_system, false);
-            pane.shaped = Some(fingerprint);
-        }
+        self.grid_active = true;
+        self.grid.clear();
+        self.grid.extend(inputs.iter().map(|input| StoredPane {
+            rows: input.rows.to_vec(),
+            left: input.left,
+            top: input.top,
+            clip: input.clip,
+        }));
     }
 
     /// Replace the display with a single pane of plain `text` at the content pad, in
-    /// the configured cell font. (The plain-text capture path.)
+    /// the configured cell font. (The plain-text capture path - the one place that still
+    /// shapes through glyphon; the cell grid goes through the atlas renderer.)
     pub fn set_content(&mut self, text: &str) {
+        self.grid_active = false;
         self.ensure_panes(1);
         let pad = CONTENT_PAD * self.scale;
         let Self {
@@ -266,9 +249,6 @@ impl TextLayer {
         let attrs = Attrs::new().family(family_of(family_name.as_deref()));
         pane.buffer.set_text(text, &attrs, Shaping::Advanced, None);
         pane.buffer.shape_until_scroll(font_system, false);
-        // This path shapes unconditionally and isn't grid-fingerprinted; clear any stale
-        // fingerprint so a later `set_panes` on the reused buffer still re-shapes.
-        pane.shaped = None;
     }
 
     /// Replace the display with a single colored grid at the content pad, filling the
@@ -308,6 +288,10 @@ impl TextLayer {
         width: u32,
         height: u32,
     ) -> Result<(), RenderError> {
+        if self.grid_active {
+            self.draw_grid(device, queue, view, width, height);
+            return Ok(());
+        }
         self.viewport.update(queue, Resolution { width, height });
 
         let fg = self.default_fg;
@@ -373,31 +357,66 @@ impl TextLayer {
         self.atlas.trim();
         Ok(())
     }
+
+    /// Draw the stored grid via the glyph-atlas layer (the fast windowed / grid-capture path).
+    /// Infallible: the atlas draw records + submits without any per-frame shaping that could fail.
+    fn draw_grid(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+    ) {
+        self.glyph.resize(width, height);
+        let family = family_of(self.family_name.as_deref());
+        let inputs: Vec<crate::glyph::GlyphPaneInput> = self
+            .grid
+            .iter()
+            .map(|p| crate::glyph::GlyphPaneInput {
+                rows: &p.rows,
+                left: p.left,
+                top: p.top,
+                clip: p.clip,
+            })
+            .collect();
+        self.glyph.set_panes(
+            device,
+            queue,
+            &mut self.font_system,
+            &mut self.swash_cache,
+            &mut self.probe,
+            family,
+            self.cell_w,
+            self.cell_h,
+            self.baseline,
+            &inputs,
+        );
+        self.glyph.draw(device, queue, view);
+    }
 }
 
-/// A run of consecutive cells that share a color, weight, and style - the unit we
-/// hand to `set_rich_text` as one span. Newlines are their own (color-irrelevant)
-/// runs separating rows. `pub(crate)` only so the bench seam can observe `text_runs`'
-/// output; its fields stay private (glyphon's `Color` never leaves this module).
+/// The pen baseline within a cell (px from the cell top down to the baseline), measured by shaping
+/// an ascender+descender probe at `metrics`. Used to place glyph bitmaps in the atlas renderer.
+fn measure_baseline(font_system: &mut FontSystem, metrics: Metrics, family: Family) -> f32 {
+    let mut probe = Buffer::new(font_system, metrics);
+    probe.set_text("Mg", &Attrs::new().family(family), Shaping::Advanced, None);
+    probe.shape_until_scroll(font_system, false);
+    probe
+        .layout_runs()
+        .next()
+        .map_or(metrics.font_size * 0.8, |run| run.line_y)
+}
+
+/// A run of consecutive cells that share a color, weight, and style. Newlines are their own
+/// (color-irrelevant) runs separating rows. `pub(crate)` only so the bench seam can observe
+/// `text_runs`' output (a proxy for grid-coalescing cost); its fields stay private (glyphon's
+/// `Color` never leaves this module).
 pub(crate) struct Run {
     text: String,
     color: Color,
     bold: bool,
     italic: bool,
-}
-
-impl Run {
-    /// The shaping attributes for this run in `family`: color plus bold/italic.
-    fn attrs<'a>(&self, family: Family<'a>) -> Attrs<'a> {
-        let mut attrs = Attrs::new().family(family).color(self.color);
-        if self.bold {
-            attrs = attrs.weight(Weight::BOLD);
-        }
-        if self.italic {
-            attrs = attrs.style(Style::Italic);
-        }
-        attrs
-    }
 }
 
 /// Merge a grid into runs of same-color, same-weight, same-style cells, with a
@@ -523,29 +542,9 @@ fn px_to_i32(value: f32) -> i32 {
     value.max(0.0).round() as i32
 }
 
-/// A 64-bit fingerprint of the grid a pane buffer was shaped from, plus its clip size, so an
-/// identical grid on a later frame is detected and the re-shape skipped (see [`TextLayer::
-/// set_panes`]). Every field that changes the shaped glyphs - character, color, and the
-/// bold/italic face - lives in the hashed `GridCell`; the clip size is hashed by its bit
-/// pattern. A hash collision is astronomically unlikely and would at worst leave one frame's
-/// glyphs stale until the next change repaints - never a persistent artifact.
-fn shape_fingerprint(rows: &[Vec<GridCell>], clip_w: f32, clip_h: f32) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    clip_w.to_bits().hash(&mut hasher);
-    clip_h.to_bits().hash(&mut hasher);
-    rows.len().hash(&mut hasher);
-    for row in rows {
-        row.len().hash(&mut hasher);
-        for cell in row {
-            cell.hash(&mut hasher);
-        }
-    }
-    hasher.finish()
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{shape_fingerprint, text_runs};
+    use super::text_runs;
     use crate::{GridCell, Srgb};
 
     fn cell(c: char, fg: Srgb, bold: bool, italic: bool) -> GridCell {
@@ -557,44 +556,6 @@ mod tests {
             italic,
             underline: false,
         }
-    }
-
-    #[test]
-    fn shape_fingerprint_changes_with_anything_that_alters_the_shaped_glyphs() {
-        // The fingerprint gates whether `set_panes` re-shapes; if it missed a field, an
-        // identical fingerprint would skip a needed re-shape and leave stale glyphs. So every
-        // glyph-affecting change must move it, and an identical grid must keep it stable.
-        let white = Srgb {
-            r: 255,
-            g: 255,
-            b: 255,
-        };
-        let red = Srgb { r: 255, g: 0, b: 0 };
-        let base = vec![vec![cell('a', white, false, false)]];
-        let fp = shape_fingerprint(&base, 100.0, 50.0);
-
-        // Identical grid + size -> identical fingerprint (the skip fires).
-        assert_eq!(fp, shape_fingerprint(&base, 100.0, 50.0));
-        // A different character, color, or face all move it (a re-shape is needed).
-        assert_ne!(
-            fp,
-            shape_fingerprint(&[vec![cell('b', white, false, false)]], 100.0, 50.0)
-        );
-        assert_ne!(
-            fp,
-            shape_fingerprint(&[vec![cell('a', red, false, false)]], 100.0, 50.0)
-        );
-        assert_ne!(
-            fp,
-            shape_fingerprint(&[vec![cell('a', white, true, false)]], 100.0, 50.0)
-        );
-        assert_ne!(
-            fp,
-            shape_fingerprint(&[vec![cell('a', white, false, true)]], 100.0, 50.0)
-        );
-        // A resize (clip size change) re-shapes, so it must move too.
-        assert_ne!(fp, shape_fingerprint(&base, 120.0, 50.0));
-        assert_ne!(fp, shape_fingerprint(&base, 100.0, 60.0));
     }
 
     #[test]

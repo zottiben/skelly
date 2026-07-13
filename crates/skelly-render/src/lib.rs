@@ -21,6 +21,7 @@ mod capture;
 mod cells;
 mod error;
 mod fonts;
+mod glyph;
 mod prose;
 mod renderer;
 mod text;
