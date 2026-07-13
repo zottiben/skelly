@@ -26,18 +26,20 @@ const WINDOW_PAD: f32 = 12.0;
 const PANE_INSET: f32 = 6.0;
 
 // Mirrors the binary's `emptystate` module (examples cannot import the binary crate).
-const CHIPS: [(&str, &str); 3] = [
-    ("\u{2318}K", "palette"),
-    ("\u{2318}T", "new tab"),
-    ("\u{2325}|", "split"),
+const CHIPS: [(&str, &str); 4] = [
+    ("\u{2318}K", "commands"),
+    ("\u{2325}|", "split right"),
+    ("\u{21E7}\u{2318}G", "git diff"),
+    ("\u{2318},", "settings"),
 ];
 const MARK_SIZE: f32 = 56.0;
 const MARK_GAP: f32 = 18.0;
 const CHIP_H: f32 = 28.0;
-const CHIP_PAD: f32 = 11.0;
+const CHIP_PAD: f32 = 13.0;
 const CHIP_GAP: f32 = 10.0;
 const CHIP_KEY_GAP: f32 = 6.0;
-const CHIP_RADIUS: f32 = 6.0;
+const CHIP_ROW_GAP: f32 = 10.0;
+const CHIP_MARGIN: f32 = 40.0;
 
 fn main() {
     let path = std::env::args()
@@ -165,40 +167,62 @@ fn chips_paint(
             (kw, lw, pad + kw + key_gap + lw + pad)
         })
         .collect();
-    let total: f32 =
-        sizes.iter().map(|(_, _, pw)| pw).sum::<f32>() + gap * (CHIPS.len() - 1) as f32;
-    let mut x = rect.x + (rect.w - total) * 0.5;
-    let y = logo.y + logo.h + MARK_GAP * scale;
+    // Greedily wrap chips into rows no wider than the pane span (mirrors the binary).
+    let max_row = (rect.w - 2.0 * CHIP_MARGIN * scale).max(sizes[0].2);
+    let mut rows: Vec<Vec<usize>> = vec![Vec::new()];
+    let mut row_w = 0.0;
+    for (i, &(_, _, pw)) in sizes.iter().enumerate() {
+        let extra = if rows.last().unwrap().is_empty() {
+            pw
+        } else {
+            pw + gap
+        };
+        if !rows.last().unwrap().is_empty() && row_w + extra > max_row {
+            rows.push(vec![i]);
+            row_w = pw;
+        } else {
+            rows.last_mut().unwrap().push(i);
+            row_w += extra;
+        }
+    }
     let mut quads = Vec::new();
     let mut labels = Vec::new();
-    for (i, (key, label)) in CHIPS.iter().enumerate() {
-        let (kw, _, pw) = sizes[i];
-        quads.push(ChromeQuad::rounded(
-            PxRect { x, y, w: pw, h },
-            theme.bg_elevated,
-            CHIP_RADIUS * scale,
-        ));
-        push_chip(
-            &mut labels,
-            m,
-            key,
-            FontRole::Micro,
-            theme.fg_secondary,
-            x + pad,
-            y,
-            h,
-        );
-        push_chip(
-            &mut labels,
-            m,
-            label,
-            FontRole::Caption,
-            theme.fg_muted,
-            x + pad + kw + key_gap,
-            y,
-            h,
-        );
-        x += pw + gap;
+    let mut y = logo.y + logo.h + MARK_GAP * scale;
+    for row in &rows {
+        let row_total: f32 = row.iter().map(|&i| sizes[i].2).sum::<f32>()
+            + gap * (row.len().saturating_sub(1)) as f32;
+        let mut x = rect.x + (rect.w - row_total) * 0.5;
+        for &i in row {
+            let (key, label) = CHIPS[i];
+            let (kw, _, pw) = sizes[i];
+            quads.push(ChromeQuad::rounded(
+                PxRect { x, y, w: pw, h },
+                theme.bg_elevated,
+                h * 0.5,
+            ));
+            push_chip(
+                &mut labels,
+                m,
+                key,
+                FontRole::Micro,
+                theme.fg_secondary,
+                x + pad,
+                y,
+                h,
+            );
+            push_chip(
+                &mut labels,
+                m,
+                label,
+                FontRole::Caption,
+                theme.fg_muted,
+                x + pad + kw + key_gap,
+                y,
+                h,
+            );
+            x += pw + gap;
+        }
+        y += h + CHIP_ROW_GAP * scale;
     }
     (quads, labels)
 }
