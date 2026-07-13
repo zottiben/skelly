@@ -271,9 +271,9 @@ pub(crate) fn card_quads(
 const LOGO_SPINE_ALPHA: f32 = 0.3;
 
 /// Container opacity for the faint empty-state brand watermark (the guide's §10.2 mark,
-/// `opacity:0.32`). The one place a pane paints the vertebra mark, so the value lives here
-/// with the mark's other transcribed geometry.
-pub(crate) const LOGO_WATERMARK_OPACITY: f32 = 0.32;
+/// `opacity:0.32`). Re-exported so the binary paints the fading empty-state mark at exactly the
+/// same base opacity as the pane-layer watermark.
+pub const LOGO_WATERMARK_OPACITY: f32 = 0.32;
 
 /// Build the vertebra logo mark (the guide's §02 brand mark): a faint `accent` spine (a
 /// vertical rounded pill) threading three rounded-diamond discs - two small `fg.primary`
@@ -410,10 +410,17 @@ pub(crate) fn settings_frame_quads(
 }
 
 /// Build the generic right-dock frame chrome, shared by the migrated proportional docks:
-/// the soft shadow the dock casts leftward onto the terminal as it slides over it, and a
-/// `border` divider down the dock's left edge. The dock's content (row fills, bars, text) is
-/// supplied by the binary as a proportional display list drawn on top. Shared by the
-/// windowed [`Renderer`](crate::Renderer) and the headless capture.
+/// the soft shadow the dock casts leftward onto the terminal as it slides over it, an opaque
+/// `bg.base` fill covering the panel, and a `border` divider down the dock's left edge. The
+/// dock's content (row fills, bars, text) is supplied by the binary as a proportional display
+/// list drawn on top. Shared by the windowed [`Renderer`](crate::Renderer) and the headless
+/// capture.
+///
+/// The opaque fill is what lets the dock *slide over* the live terminal: when it is expanded
+/// to full width the panes still render at their normal viewport beneath it (Hard rule 4 -
+/// the terminal never reflows when a dock opens), so without a solid fill the terminal grid
+/// would show through. In the narrow side-dock case the fill sits over the already-cleared
+/// `bg.base` strip, so it is a no-op there.
 pub(crate) fn dock_frame_quads(
     panel: crate::PxRect,
     theme: &crate::theme::Theme,
@@ -422,6 +429,13 @@ pub(crate) fn dock_frame_quads(
     let stroke = scale.max(1.0);
     let mut quads = Vec::new();
     push_left_edge_shadow(&mut quads, panel.x, panel.y, panel.h, scale);
+    quads.push(Quad::new(
+        panel.x,
+        panel.y,
+        panel.w,
+        panel.h,
+        theme.bg_base.to_array(),
+    ));
     quads.push(Quad::new(
         panel.x,
         panel.y,

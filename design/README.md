@@ -68,6 +68,27 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Per-pane cwd via OS process introspection (resolves the tab-title / status-line
+  cwd blocker); GUI-launch shell fixes; empty-state fades on first keystroke.** Each pane's live
+  working directory is now read from its shell process on a 600ms throttle (`/proc/<pid>/cwd` on
+  Linux, `lsof` on macOS) rather than OSC-7 shell integration - so it needs no user shell config
+  and tracks `cd` for any shell. This lights up `tabs.title = cwd` (an idle tab is titled by its
+  focused pane's directory basename, not `Tab N`; a running command still wins) and the live
+  status-line cwd. The shell is now spawned as a **login shell** (so it sources the user's profile
+  and inherits the full `PATH` - a GUI-launched app otherwise only has launchd's minimal `PATH`)
+  and opens in `$HOME` when the launch cwd is `/` (Finder/Spotlight/curl-install). **Empty state:**
+  kept the guide's live prompt, but the mark + hint chips now **fade out over ~500ms the moment the
+  user starts typing** (was: instant clear on first command / §10.2 "chips fade the first time the
+  user runs a command") - the fade is the visible hand-off from pristine to live. The **git diff
+  dock now follows the active tab** (§10.4 "Scoped to the active tab's repo"): it scopes to the
+  focused pane's cwd and re-refreshes on a tab switch or `cd` into another repo (skipped while
+  rewound, Hard rule 3). The cwd read runs **off the UI thread** (a poll thread posts results via
+  `Wakeup::CwdPoll`) so a slow `lsof` never stalls a repaint, and `[tabs] title` / `follow_cwd` are
+  now honored (Hard rule 1). Still a follow-up (deferred to the release after next): the
+  **status-line branch/dirty** and the **session timeline** (its recorded edit history) key off the
+  process cwd - per-repo git status + timeline history need their own design pass - and a dead
+  `shell_pid` is not cleared, so a reused pid could momentarily mis-scope a pane's cwd.
+
 - 2026-07-13 - **Motion polish scoped to the caret blink; panel slides deferred (§06).** Added the
   §06 caret blink: the focused caret blinks on a 530ms half-cycle **only when the running program
   requests a blinking cursor** (`DECSCUSR`; vim's steady normal-mode cursor never blinks), reusing

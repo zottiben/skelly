@@ -18,6 +18,7 @@
 #![doc(test(attr(deny(warnings))))]
 
 use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -68,6 +69,50 @@ const MIN_ROWS: u16 = 1;
 /// Clamp requested dimensions to the usable floor ([`MIN_COLS`] x [`MIN_ROWS`]).
 fn clamp_dims(cols: u16, rows: u16) -> (u16, u16) {
     (cols.max(MIN_COLS), rows.max(MIN_ROWS))
+}
+
+/// The directory the first shell should start in, given the process's launch
+/// directory and `$HOME`.
+///
+/// A GUI launch (Finder / Spotlight, a curl-installed `.app`) hands us the
+/// filesystem root `/` as the working directory - never where a user wants their
+/// shell to open. Fall back to `$HOME` in that case, and when there is no launch
+/// directory at all. A real launch directory (e.g. `skelly` run from a project on
+/// the CLI) is honored so the shell opens where it was invoked. Returning `None`
+/// (both inputs missing) leaves portable-pty to resolve the home directory itself.
+fn resolve_start_dir(launch: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    match launch {
+        Some(dir) if dir != Path::new("/") => Some(dir),
+        _ => home,
+    }
+}
+
+/// Build the [`CommandBuilder`] for the pane's shell.
+///
+/// When no program is configured we use portable-pty's default-program path, which launches the
+/// login shell (`$SHELL`, else the passwd-db shell) as a *login* shell by prefixing argv0 with
+/// `-` - the canonical spelling that works for every shell including `/bin/sh`. This is what makes
+/// a GUI-launched Skelly source the user's profile (`/etc/zprofile` -> macOS `path_helper`, then
+/// `~/.zprofile` / `~/.zshrc`) and inherit the full `PATH` rather than launchd's minimal one, so
+/// `nvim`, `brew`, etc. resolve.
+///
+/// A configured `[shell] program` is launched **as given, with no extra flags** - the same as a
+/// direct `exec`. We deliberately don't force `-l`: the config value can be any shell, wrapper, or
+/// launcher, and many don't accept a login flag; if a user wants login semantics for a custom
+/// program they can point it at a login-shell invocation themselves.
+fn build_shell_command(program: Option<&str>) -> CommandBuilder {
+    let mut cmd = match program.map(str::trim).filter(|p| !p.is_empty()) {
+        Some(prog) => CommandBuilder::new(prog),
+        None => CommandBuilder::new_default_prog(),
+    };
+    cmd.env("TERM", "xterm-256color");
+    if let Some(dir) = resolve_start_dir(
+        std::env::current_dir().ok(),
+        std::env::var_os("HOME").map(PathBuf::from),
+    ) {
+        cmd.cwd(dir);
+    }
+    cmd
 }
 
 /// A terminal color, independent of any palette: the default foreground, a palette
@@ -253,19 +298,7 @@ impl Terminal {
             })
             .map_err(to_io)?;
 
-        // A configured, non-empty program wins; otherwise the login shell ($SHELL, else bash).
-        let shell = program
-            .map(str::trim)
-            .filter(|p| !p.is_empty())
-            .map_or_else(
-                || std::env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_owned()),
-                ToOwned::to_owned,
-            );
-        let mut cmd = CommandBuilder::new(shell);
-        cmd.env("TERM", "xterm-256color");
-        if let Ok(cwd) = std::env::current_dir() {
-            cmd.cwd(cwd);
-        }
+        let cmd = build_shell_command(program);
         let child = pair.slave.spawn_command(cmd).map_err(to_io)?;
         drop(pair.slave); // close the parent's slave handle so the master sees EOF.
                           // A killer we keep on the UI side so dropping the `Terminal` can stop the shell
@@ -328,6 +361,15 @@ impl Terminal {
         let foreground = u32::try_from(self.master.process_group_leader()?).ok()?;
         let shell = self.shell_pid?;
         (foreground != shell).then_some(foreground)
+    }
+
+    /// The pid of the shell this pane spawned, if it is known. Unlike
+    /// [`foreground_job_pid`](Self::foreground_job_pid) this is valid even while the shell is
+    /// idle at its prompt - the binary reads its working directory (which `cd` changes without
+    /// changing the pid) for the live status-line cwd and cwd-based tab titles.
+    #[must_use]
+    pub fn shell_pid(&self) -> Option<u32> {
+        self.shell_pid
     }
 
     /// Send bytes to the shell (keyboard input, pastes).
@@ -799,4 +841,78 @@ fn read_loop<W: Fn()>(
 /// PTY crate's error type.
 fn to_io<E: std::fmt::Display>(err: E) -> std::io::Error {
     std::io::Error::other(err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{build_shell_command, resolve_start_dir};
+    use std::path::PathBuf;
+
+    #[test]
+    fn start_dir_falls_back_to_home_at_the_filesystem_root() {
+        // A GUI launch hands us `/`; the shell must open in $HOME instead.
+        let home = PathBuf::from("/home/medusa");
+        assert_eq!(
+            resolve_start_dir(Some(PathBuf::from("/")), Some(home.clone())),
+            Some(home),
+        );
+    }
+
+    #[test]
+    fn start_dir_honors_a_real_launch_directory() {
+        // Launched from a project on the CLI: open there, not in $HOME.
+        let launch = PathBuf::from("/work/skelly");
+        assert_eq!(
+            resolve_start_dir(Some(launch.clone()), Some(PathBuf::from("/home/medusa"))),
+            Some(launch),
+        );
+    }
+
+    #[test]
+    fn start_dir_falls_back_to_home_when_there_is_no_launch_dir() {
+        let home = PathBuf::from("/home/medusa");
+        assert_eq!(resolve_start_dir(None, Some(home.clone())), Some(home));
+    }
+
+    #[test]
+    fn start_dir_is_none_when_root_and_no_home() {
+        // Nothing usable: let portable-pty resolve the home dir itself.
+        assert_eq!(resolve_start_dir(Some(PathBuf::from("/")), None), None);
+    }
+
+    #[test]
+    fn default_shell_command_is_a_login_shell() {
+        // No configured program -> portable-pty's default-program path, which runs
+        // $SHELL as a *login* shell (argv0 prefixed with `-`). `is_default_prog()`
+        // marks that path, which the plain `new(prog)` constructor never sets.
+        let cmd = build_shell_command(None);
+        assert!(
+            cmd.is_default_prog(),
+            "the default shell must take the login-shell path"
+        );
+        assert_eq!(
+            cmd.get_env("TERM"),
+            Some(std::ffi::OsStr::new("xterm-256color"))
+        );
+    }
+
+    #[test]
+    fn blank_program_is_treated_as_unconfigured() {
+        // A whitespace-only `[shell] program` is the same as leaving it empty.
+        assert!(build_shell_command(Some("   ")).is_default_prog());
+    }
+
+    #[test]
+    fn configured_program_is_spawned_as_given_with_no_extra_flags() {
+        // A configured program launches exactly as named - no forced `-l`, so wrappers / shells
+        // that don't accept a login flag still work (the default `$SHELL` path handles login).
+        let cmd = build_shell_command(Some("zsh"));
+        assert!(!cmd.is_default_prog());
+        let argv: Vec<_> = cmd
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(argv, vec!["zsh".to_owned()]);
+    }
 }

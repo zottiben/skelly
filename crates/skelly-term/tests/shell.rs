@@ -10,6 +10,42 @@ use std::time::{Duration, Instant};
 use skelly_term::{CellAttrs, CellColor, Terminal};
 
 #[test]
+fn shell_is_spawned_as_a_login_shell() {
+    // A login shell is invoked with argv0 prefixed by `-` (e.g. `-zsh`), which is
+    // what makes it source the user's profile (`~/.zprofile`, and on macOS
+    // `/etc/zprofile` -> `path_helper`) and inherit a full `PATH`. Without it a
+    // GUI-launched Skelly can't find `nvim`, `brew`, etc. `$0` echoes that argv0,
+    // so a leading `-` proves the login spawn; the old non-login spawn printed the
+    // bare shell path (e.g. `/bin/zsh`), which this asserts against.
+    let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while term.snapshot().iter().all(String::is_empty) {
+        assert!(Instant::now() < deadline, "shell never produced a prompt");
+        sleep(Duration::from_millis(50));
+    }
+
+    // The executed output reads `SKELLY_ARGV0=-<shell>`; the echoed input line keeps
+    // `$0` literal, so matching on the `-` right after `=` finds only the result.
+    term.write(b"echo \"SKELLY_ARGV0=$0\"\n");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if term
+            .snapshot()
+            .iter()
+            .any(|line| line.contains("SKELLY_ARGV0=-"))
+        {
+            return; // argv0 begins with `-`: a login shell
+        }
+        assert!(
+            Instant::now() < deadline,
+            "shell was not a login shell (no `-`-prefixed argv0); grid was:\n{}",
+            term.snapshot().join("\n")
+        );
+        sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
 fn shell_exit_is_reported() {
     let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
     // A live shell has not exited yet.

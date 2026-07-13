@@ -461,7 +461,7 @@ impl Renderer {
             (self.config.width, self.config.height),
             &quads,
             view.labels,
-            view.panel,
+            view.clip,
         );
     }
 
@@ -484,7 +484,7 @@ impl Renderer {
             (self.config.width, self.config.height),
             &quads,
             view.labels,
-            view.panel,
+            view.clip,
         );
     }
 

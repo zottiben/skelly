@@ -33,7 +33,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use skelly_config::{Config, SidebarMode};
+use skelly_config::{Config, SidebarMode, TabTitle};
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
 use skelly_render::{
     AnsiPalette, CursorShape, GitDockView, GridCell, OverlayView, PaneView, ProseLabel, PxRect,
@@ -79,13 +79,10 @@ const WORKSPACE_ICONS: [char; 8] = [
 ];
 /// One keyboard resize step, as a fraction of the enclosing split's extent.
 const RESIZE_STEP: f32 = 0.04;
-/// The right dock's header row height (logical px) - matches the docks' status-bar row, for
-/// seating the full-width toggle button.
-const DOCK_HEADER_H: f32 = 26.0;
-/// The dock full-width toggle button's size (logical px) and its right-edge inset (which clears
-/// the header's `esc` hint).
-const DOCK_BUTTON_SIZE: f32 = 18.0;
-const DOCK_BUTTON_INSET: f32 = 46.0;
+/// The dock's expand/collapse toggle: a square handle (logical px) that straddles the dock's
+/// left edge - half over the dock, half over the terminal - vertically centered, so it reads
+/// unmistakably as a "expand this panel" control and sits clear of the header content.
+const DOCK_BUTTON_SIZE: f32 = 22.0;
 /// Logical width (px) of the slim icon rail (`⇧⌘B`), per design §08 ("Icon rail 56px").
 const RAIL_WIDTH: f32 = 56.0;
 /// How long a transient toast stays up before it auto-dismisses (design §12).
@@ -93,6 +90,16 @@ const TOAST_DURATION: Duration = Duration::from_secs(4);
 /// How often the background thread polls the repo's working tree to record edits into the session
 /// timeline (design §10.5). Off the UI thread, so the interval is a battery/freshness trade-off.
 const GIT_POLL_INTERVAL: Duration = Duration::from_secs(4);
+/// How often the background thread re-reads each pane's shell working directory (for the live
+/// status-line cwd, the cwd-based tab title, and the active tab's git dock). `cd` doesn't change
+/// the shell pid, so the cwd is polled on this interval rather than only when the foreground job
+/// changes. The read is a cheap symlink (Linux) or a short `lsof` (macOS), and runs **off the UI
+/// thread** ([`start_cwd_poll`](App::start_cwd_poll)) so a slow read never stalls a repaint.
+const CWD_POLL_INTERVAL: Duration = Duration::from_millis(700);
+/// How long the empty-state mark + hint chips take to fade out once a pristine tab goes live
+/// (the design §10.2 "chips fade the first time the user runs a command", here the moment the
+/// user starts typing). A gentle fade, so the hand-off from empty state to live terminal reads.
+const EMPTY_FADE: Duration = Duration::from_millis(500);
 /// The caret blink half-period (design §06 "caret block blinks", steps(1) ~1.1s = 530ms on/off).
 /// Only applies when the running program requests a blinking cursor (`DECSCUSR`); a steady cursor
 /// (vim normal mode, most shells) never blinks. The phase resets on each keypress.
@@ -109,6 +116,13 @@ const DOCK_WIDTH_MAX: f32 = 560.0;
 const DOCK_GRAB: f32 = 5.0;
 /// Diff lines scrolled per `PageUp`/`PageDown` in the git dock.
 const DIFF_SCROLL_LINES: i32 = 10;
+/// The command palette's width as a fraction of the window (design: ~half-width, centered),
+/// floored at the palette's comfortable minimum and capped clear of the window edges.
+const PALETTE_WIDTH_FRAC: f32 = 0.5;
+/// The command palette's maximum height as a fraction of the window. The fixed input/count/footer
+/// chrome is always shown; the results region caps to what is left, so a long list scrolls
+/// instead of running off the card (design §10.8).
+const PALETTE_MAX_HEIGHT_FRAC: f32 = 0.72;
 /// Terminal font-size bounds + reset default (the `⌘=/-/0` bindings, §11), matching the
 /// `[appearance] font_size` valid range (8..=32) and its spec default (14).
 const MIN_FONT_SIZE: u16 = 8;
@@ -121,6 +135,7 @@ const DEFAULT_FONT_SIZE: u16 = 14;
 enum Wakeup {
     Shell,
     GitPoll,
+    CwdPoll,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -217,6 +232,17 @@ struct Tab {
     job_name: Option<String>,
     /// The pid `job_name` was resolved for, so the cache is invalidated on a job change.
     job_pid: Option<u32>,
+    /// The empty-state fade-out (design §10.2): started when this pristine tab first goes live
+    /// (the user starts typing), it tweens the mark + hint chips from full to gone. `None` when
+    /// the tab is still pristine (mark shown solid) or long past its hand-off (nothing drawn).
+    empty_fade: Option<motion::Anim>,
+    /// Each pane's live working directory (home-collapsed for display), refreshed on a throttle
+    /// from the pane's shell process. Backs the status-line cwd (§10.3) and the cwd-based tab
+    /// title (§10.3), so both track `cd` instead of showing a stale process-cwd snapshot.
+    pane_cwd: HashMap<PaneId, String>,
+    /// The cwd-basename tab title captured once, for `[tabs] follow_cwd = false` (title does not
+    /// re-title as the pane `cd`s). `None` until first captured; ignored when `follow_cwd` is on.
+    frozen_cwd_title: Option<String>,
     /// Whether this tab is pinned to the sidebar's 3-up pinned grid (design §08 #4). Pinned
     /// tabs show as icon tiles above the tab list instead of in it.
     pinned: bool,
@@ -270,6 +296,9 @@ impl Tab {
             activated: false,
             job_name: None,
             job_pid: None,
+            empty_fade: None,
+            pane_cwd: HashMap::new(),
+            frozen_cwd_title: None,
             pinned: false,
             custom_title: None,
             group: None,
@@ -320,15 +349,26 @@ struct App {
     /// surfaces as they migrate) in the guide's fonts - GPU-free, so hit-testing and
     /// rendering agree on glyph widths. Kept in step with the DPI scale.
     measure: TextMeasure,
-    /// The per-pane status line's process-level context (cwd · branch · shell), cached at
-    /// startup. Per-pane cwd + live branch-switch tracking are follow-ups (the same blocker
-    /// as cwd-based tab titles).
+    /// The active pane's live working directory (home-collapsed), mirrored from its tab's
+    /// `pane_cwd` on each status poll - the sidebar group label + the fallback for a pane with
+    /// no tracked cwd read it. Per-pane cwds live on each [`Tab`].
     status_cwd: String,
     status_branch: Option<String>,
     /// The process repo's working-tree diff `(added, removed)` lines for the status-line dirty
     /// indicator (§10.3); refreshed at startup + when the git dock refreshes.
     status_dirty: Option<(u32, u32)>,
     status_shell: String,
+    /// The pids the background cwd-poll thread should read next cycle (each pane's shell pid),
+    /// written cheaply by the UI thread ([`refresh_poll_pids`](App::refresh_poll_pids)) whenever
+    /// the pane set changes. The `lsof`/`/proc` reads happen on the thread, never in a repaint.
+    poll_pids: Arc<Mutex<Vec<u32>>>,
+    /// The latest `pid -> absolute cwd` map the poll thread produced; drained on the UI thread
+    /// ([`drain_cwd_poll`](App::drain_cwd_poll)) into each pane's cwd. A pid absent from the map
+    /// (a dead shell / failed read) keeps that pane's last known cwd rather than clearing it.
+    pending_cwds: Arc<Mutex<HashMap<u32, std::path::PathBuf>>>,
+    /// The active tab's focused-pane cwd the git dock last scoped to (absolute), so a tab switch
+    /// or `cd` that changes the active repo re-points the open dock at it. `None` until first poll.
+    active_cwd: Option<std::path::PathBuf>,
     /// The per-repo git diff dock (right dock) state.
     git_dock: GitDock,
     /// The session-timeline dock (right dock; mutually exclusive with the git dock).
@@ -483,6 +523,9 @@ impl App {
             status_branch: None,
             status_dirty: None,
             status_shell: String::new(),
+            poll_pids: Arc::new(Mutex::new(Vec::new())),
+            pending_cwds: Arc::new(Mutex::new(HashMap::new())),
+            active_cwd: None,
             git_dock: GitDock::new(),
             timeline: TimelineDock::new(),
             confirm: None,
@@ -666,21 +709,60 @@ impl App {
         }
     }
 
-    /// The full-width toggle button's rect in the dock header (physical px), or `None` when no
-    /// dock is open. A small square in the top-right, left of the `esc` hint.
+    /// The open dock's *content* rect (physical px): the full panel, but with its top aligned to
+    /// the pane viewport (so the header sits level with the terminal content, not pushed down by
+    /// the full title strip - the dock is on the right, clear of the traffic lights). The panel's
+    /// opaque fill still spans the full height ([`dock_panel_rect`](Self::dock_panel_rect)), so a
+    /// full-width dock covers the panes with no sliver; only the content is inset.
+    fn dock_content_rect(&self) -> PxRect {
+        let panel = self.dock_panel_rect();
+        let top = self.viewport_rect().y;
+        PxRect {
+            x: panel.x,
+            y: top,
+            w: panel.w,
+            h: (panel.y + panel.h - top).max(1.0),
+        }
+    }
+
+    /// The expand/collapse toggle's rect (physical px), or `None` when no dock is open. On the
+    /// narrow side dock it **straddles the dock's left edge** (half over the dock, half over the
+    /// terminal) as a drawer-handle; when full-width, that edge is the sidebar's right-resize grab,
+    /// so the toggle sits just *inside* the dock instead - clear of the grab so the sidebar stays
+    /// resizable. Vertically centered on the dock body either way.
     fn dock_button_rect(&self) -> Option<PxRect> {
         if !(self.git_dock.open || self.timeline.open) {
             return None;
         }
         let panel = self.dock_panel_rect();
+        let content = self.dock_content_rect();
         let scale = scale32(self.scale);
         let size = DOCK_BUTTON_SIZE * scale;
+        let x = if self.dock_full_width {
+            panel.x + DOCK_GRAB * scale // just past the sidebar's resize grab zone
+        } else {
+            panel.x - size * 0.5 // straddle the terminal-side edge
+        };
         Some(PxRect {
-            x: panel.x + panel.w - (DOCK_BUTTON_INSET + DOCK_BUTTON_SIZE) * scale,
-            y: panel.y + (DOCK_HEADER_H * scale - size) * 0.5,
+            x,
+            y: content.y + (content.h - size) * 0.5,
             w: size,
             h: size,
         })
+    }
+
+    /// The dock layer's label clip (physical px): the panel, widened leftward by the toggle's
+    /// overhang so the handle's glyph - which straddles the left edge - isn't clipped away. All
+    /// other dock labels start well inside the panel, so the wider clip never lets them bleed.
+    fn dock_clip_rect(&self) -> PxRect {
+        let panel = self.dock_panel_rect();
+        let overhang = DOCK_BUTTON_SIZE * 0.5 * scale32(self.scale);
+        PxRect {
+            x: panel.x - overhang,
+            y: panel.y,
+            w: panel.w + overhang,
+            h: panel.h,
+        }
     }
 
     /// Whether the pointer is over the open right dock's body (used to give the dock keyboard
@@ -878,6 +960,8 @@ impl App {
                 }
             }
         }
+        // The pane set may have changed (spawned/closed shells); republish pids to the poll thread.
+        self.refresh_poll_pids();
     }
 
     /// Build the owned per-pane frame data for the active tab: each visible pane's
@@ -953,6 +1037,60 @@ impl App {
             .collect()
     }
 
+    /// The opacity to paint the active tab's empty-state mark + hint chips at, or `None` when it
+    /// shows no empty state: `1.0` while the tab is still pristine, then an eased fade to `0` over
+    /// [`EMPTY_FADE`] once it goes live (the user starts typing). Shared by the paint and the
+    /// animation loop so the two agree on when the hand-off is over.
+    fn empty_alpha(&self, now: Instant) -> Option<f32> {
+        let ws = self.active_tab();
+        if ws.is_empty_state() {
+            return Some(1.0);
+        }
+        let fade = ws.empty_fade?;
+        (!fade.done(now)).then(|| 1.0 - motion::ACCELERATE.ease(fade.progress(now)))
+    }
+
+    /// Paint the empty-state mark + hint chips into the pane-overlay display list at `alpha`
+    /// opacity, seated in pane `rect`. While `pristine` the mark is the watermark drawn *behind*
+    /// the glyphs (via `PaneView::logo`), so only the chips are added here; during the fade the
+    /// tab is no longer pristine, so the fading mark is drawn here too. `alpha < 1.0` dissolves
+    /// the lockup: each pill's alpha scales and each label blends toward the pane background.
+    fn push_empty_state(
+        &mut self,
+        quads: &mut Vec<skelly_render::ChromeQuad>,
+        labels: &mut Vec<ProseLabel>,
+        rect: PxRect,
+        alpha: f32,
+        pristine: bool,
+        scale: f32,
+    ) {
+        let Some(logo) = emptystate::logo_bounds(rect, scale) else {
+            return;
+        };
+        if !pristine {
+            quads.extend(skelly_render::logo_chrome_quads(
+                logo.x,
+                logo.y,
+                logo.w,
+                &self.theme,
+                skelly_render::LOGO_WATERMARK_OPACITY * alpha,
+            ));
+        }
+        let (mut q, mut l) =
+            emptystate::chips_paint(logo, rect, scale, &self.theme, &mut self.measure);
+        if alpha < 1.0 {
+            let bg = self.theme.bg_base.to_srgb();
+            for quad in &mut q {
+                quad.alpha *= alpha;
+            }
+            for label in &mut l {
+                label.color = label.color.over(bg, alpha);
+            }
+        }
+        quads.extend(q);
+        labels.extend(l);
+    }
+
     /// Build the pane-level overlay display list drawn above the terminal text: a `bg.base`
     /// scrim + centered "shell exited" message for each pane whose shell ended, and - on a
     /// pristine single-pane tab - the empty-state hint chips beneath the vertebra mark. Empty
@@ -983,6 +1121,7 @@ impl App {
             (usize, usize),
             Option<&'static str>,
             Option<&'static str>,
+            Option<String>,
         )> = ws
             .tree
             .layout(viewport)
@@ -1007,14 +1146,17 @@ impl App {
                 } else {
                     (None, None)
                 };
-                Some((px, term.exit_status(), term.cursor(), mode, filetype))
+                // This pane's live working directory (from the throttled status poll), owned so
+                // the tab borrow can end before the measurer's mutable borrow below.
+                let cwd = ws.pane_cwd.get(&id).cloned();
+                Some((px, term.exit_status(), term.cursor(), mode, filetype, cwd))
             })
             .collect();
 
         let mut scrims = Vec::new();
         let mut quads = Vec::new();
         let mut labels = Vec::new();
-        for (rect, status, cursor, mode, filetype) in &panes {
+        for (rect, status, cursor, mode, filetype, cwd) in &panes {
             if let Some(status) = status {
                 scrims.push(*rect);
                 labels.extend(deadpane::message_labels(
@@ -1030,7 +1172,9 @@ impl App {
                 // only the mark + chips, no strip.
                 let (q, l) = statusline::paint(
                     &statusline::Info {
-                        cwd: &self.status_cwd,
+                        // A pane with no polled cwd yet (just split) shows a neutral `~` rather
+                        // than borrowing the active pane's path (which would be wrong for it).
+                        cwd: cwd.as_deref().unwrap_or("~"),
                         branch: self.status_branch.as_deref(),
                         dirty: self.status_dirty,
                         mode: *mode,
@@ -1047,14 +1191,19 @@ impl App {
                 labels.extend(l);
             }
         }
-        // The empty state (a pristine single-pane tab, no exited panes): the hint chips.
-        if empty_state && scrims.is_empty() {
-            if let Some((rect, None, _, _, _)) = panes.first() {
-                if let Some(logo) = emptystate::logo_bounds(*rect, scale) {
-                    let (q, l) =
-                        emptystate::chips_paint(logo, *rect, scale, &self.theme, &mut self.measure);
-                    quads.extend(q);
-                    labels.extend(l);
+        // The empty state (design §10.2): a pristine single-pane tab shows the mark + hint chips,
+        // which fade out together once the tab goes live (`empty_alpha` drives the fade).
+        if let Some(alpha) = self.empty_alpha(Instant::now()) {
+            if scrims.is_empty() {
+                if let Some((rect, None, _, _, _, _)) = panes.first() {
+                    self.push_empty_state(
+                        &mut quads,
+                        &mut labels,
+                        *rect,
+                        alpha,
+                        empty_state,
+                        scale,
+                    );
                 }
             }
         }
@@ -1161,6 +1310,121 @@ impl App {
         });
     }
 
+    /// Publish the current panes' shell pids for the background cwd-poll thread to read next
+    /// cycle. Cheap (no subprocess) - just collects pids under a short lock, so it can run on the
+    /// UI thread whenever the pane set changes (e.g. from [`sync_layout`](Self::sync_layout)).
+    fn refresh_poll_pids(&self) {
+        let pids: Vec<u32> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| tab.panes.values())
+            .filter_map(Terminal::shell_pid)
+            .collect();
+        if let Ok(mut guard) = self.poll_pids.lock() {
+            *guard = pids;
+        }
+    }
+
+    /// Start the background thread that reads each pane's shell working directory (for the live
+    /// status-line cwd, cwd-based tab titles, and the active git dock). It reads the pids the UI
+    /// published in [`poll_pids`](Self::poll_pids), does the `lsof`/`/proc` reads **off the UI
+    /// thread**, stores the results in [`pending_cwds`](Self::pending_cwds), and wakes the loop via
+    /// `Wakeup::CwdPoll` - so a slow read (e.g. a hung mount) can never stall a repaint.
+    fn start_cwd_poll(&mut self) {
+        let pids_slot = Arc::clone(&self.poll_pids);
+        let cwds_slot = Arc::clone(&self.pending_cwds);
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || loop {
+            std::thread::sleep(CWD_POLL_INTERVAL);
+            let pids: Vec<u32> = pids_slot.lock().map(|g| g.clone()).unwrap_or_default();
+            if pids.is_empty() {
+                continue;
+            }
+            let results: HashMap<u32, std::path::PathBuf> = pids
+                .into_iter()
+                .filter_map(|pid| process_cwd(pid).map(|dir| (pid, dir)))
+                .collect();
+            if let Ok(mut guard) = cwds_slot.lock() {
+                *guard = results;
+            }
+            if proxy.send_event(Wakeup::CwdPoll).is_err() {
+                break; // the event loop is gone; stop polling.
+            }
+        });
+    }
+
+    /// Apply the latest `pid -> cwd` map from the poll thread to each pane's tracked cwd, and
+    /// follow the active tab's repo. A pid missing from the map (dead shell / failed read) keeps
+    /// that pane's last known cwd - so a transient miss never blanks the status line or re-scopes
+    /// the git dock to the launch dir (Hard rule 3: rewind stays put, so we also skip while
+    /// rewound). Repaints only when a cwd actually changed, so idle polls stay free.
+    fn drain_cwd_poll(&mut self) {
+        let cwds = match self.pending_cwds.lock() {
+            Ok(guard) => guard.clone(),
+            Err(_) => return,
+        };
+        let active_focused = (self.active, self.active_tab().tree.focused());
+        let mut active_abs: Option<std::path::PathBuf> = None;
+        let mut changed = false;
+        for (ti, tab) in self.tabs.iter_mut().enumerate() {
+            let live: HashSet<PaneId> = tab.tree.panes().into_iter().collect();
+            tab.pane_cwd.retain(|id, _| live.contains(id));
+            for (&id, term) in &tab.panes {
+                if let Some(dir) = term.shell_pid().and_then(|pid| cwds.get(&pid)) {
+                    if (ti, id) == active_focused {
+                        active_abs = Some(dir.clone());
+                    }
+                    let display = home_relative(dir);
+                    if tab.pane_cwd.get(&id) != Some(&display) {
+                        changed = true;
+                        tab.pane_cwd.insert(id, display);
+                    }
+                }
+            }
+        }
+        // Mirror the active pane's cwd to the app-level field (sidebar group label + fallback),
+        // and re-scope the open git dock when the active repo actually changes (a real `cd`).
+        // Only a successful (Some) read updates these - a None keeps the last known repo.
+        if let Some(dir) = active_abs {
+            self.status_cwd = home_relative(&dir);
+            if self.active_cwd.as_ref() != Some(&dir) {
+                self.active_cwd = Some(dir);
+                if self.git_dock.open && self.shadow.is_none() {
+                    self.refresh_git();
+                }
+            }
+        }
+        if changed {
+            self.request_redraw();
+        }
+    }
+
+    /// Re-scope the open git dock to the active tab's focused-pane cwd from the *already-polled*
+    /// cache (no subprocess), for an immediate follow on a tab switch or pane-focus change - the
+    /// cwds don't change on a focus switch, so the cached value is current. Skipped while rewound.
+    fn rescope_dock_to_active(&mut self) {
+        if !self.git_dock.open || self.shadow.is_some() {
+            return;
+        }
+        let ws = self.active_tab();
+        let dir = ws
+            .panes
+            .get(&ws.tree.focused())
+            .and_then(Terminal::shell_pid)
+            .and_then(|pid| {
+                self.pending_cwds
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.get(&pid).cloned())
+            });
+        if let Some(dir) = dir {
+            if self.active_cwd.as_ref() != Some(&dir) {
+                self.active_cwd = Some(dir);
+                self.refresh_git();
+            }
+        }
+    }
+
     /// Repaint every visible pane from its terminal grid, resolving cell colors and
     /// overlaying the selection and the focused-pane ring.
     fn redraw(&mut self) {
@@ -1210,10 +1474,6 @@ impl App {
             .then(|| self.build_confirm_frame())
             .flatten();
         let settings = self.settings.open.then(|| self.build_settings_frame());
-        // Write the clamped diff scroll back so repeated paging past the end settles.
-        if let Some(frame) = &git_dock {
-            self.git_dock.set_scroll(frame.diff_scroll);
-        }
 
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_panes(&views);
@@ -1229,6 +1489,7 @@ impl App {
             match &git_dock {
                 Some(frame) => renderer.set_git_dock(Some(&GitDockView {
                     panel: frame.panel,
+                    clip: frame.clip,
                     quads: &frame.quads,
                     labels: &frame.labels,
                 })),
@@ -1237,6 +1498,7 @@ impl App {
             match &timeline {
                 Some(frame) => renderer.set_timeline(Some(&TimelineView {
                     panel: frame.panel,
+                    clip: frame.clip,
                     quads: &frame.quads,
                     labels: &frame.labels,
                 })),
@@ -1286,11 +1548,28 @@ impl App {
     fn build_palette_frame(&mut self) -> PaletteFrame {
         let scale = scale32(self.scale);
         let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
-        let (mut panel_w, panel_h) = self.palette.natural_size(scale, &mut self.measure);
-        panel_w = panel_w.min(surface_w * 0.9);
+
+        // Width: half the window, floored at the palette's comfortable minimum and capped clear
+        // of the window edges (so a narrow window still leaves a margin).
+        let edge_cap = surface_w * 0.9;
+        let panel_w = (surface_w * PALETTE_WIDTH_FRAC)
+            .max((palette::MIN_WIDTH * scale).min(edge_cap))
+            .min(edge_cap);
+
+        // Height: the input + count chrome and the footer are fixed; the results region between
+        // them caps to a fraction of the window so a long list scrolls. The panel shrinks to its
+        // content when the list is short.
+        let (top_chrome, bottom_chrome) = palette::Palette::chrome_heights(scale);
+        let max_results_h =
+            (surface_h * PALETTE_MAX_HEIGHT_FRAC - top_chrome - bottom_chrome).max(0.0);
+        let results_h = self.palette.results_height(scale).min(max_results_h);
+        let panel_h = top_chrome + results_h + bottom_chrome;
+        // Keep the selected row within the (now capped) results region before painting it.
+        self.palette.ensure_selected_visible(results_h, scale);
+
         let x = ((surface_w - panel_w) / 2.0).max(0.0);
         let max_y = (surface_h - panel_h).max(0.0);
-        let rest_y = (surface_h * 0.16).min(max_y);
+        let rest_y = ((surface_h - panel_h) / 2.0).max(0.0); // vertically centered
         let offset = overlay_rise_offset(self.palette_anim, Instant::now(), scale);
         let y = overlay_panel_top(rest_y, offset, max_y);
         let panel = PxRect {
@@ -1301,7 +1580,7 @@ impl App {
         };
         let paint = self
             .palette
-            .build(panel, scale, &self.theme, &mut self.measure);
+            .build(panel, results_h, scale, &self.theme, &mut self.measure);
         PaletteFrame {
             panel,
             quads: paint.quads,
@@ -1429,10 +1708,12 @@ impl App {
             .collect()
     }
 
-    /// The tab titles (design §10.3): each tab's focused-pane running-command name (e.g.
-    /// `nvim`), else `Tab N`. Refreshes the per-tab job-name cache first, re-reading the
-    /// command via `ps` only when a tab's foreground pid changes (so idle frames are cheap).
+    /// The tab titles per config (design §10.3, `[tabs] title` + `follow_cwd`). Refreshes the
+    /// per-tab job-name cache and captures the frozen-cwd title (for `follow_cwd = false`) first,
+    /// then resolves each title via [`resolved_tab_title`](Self::resolved_tab_title) so the sidebar
+    /// list and the rail tooltip agree.
     fn tab_titles(&mut self) -> Vec<String> {
+        let follow_cwd = self.config.tabs.follow_cwd;
         for tab in &mut self.tabs {
             let id = tab.tree.focused();
             let pid = tab.panes.get(&id).and_then(Terminal::foreground_job_pid);
@@ -1440,18 +1721,46 @@ impl App {
                 tab.job_pid = pid;
                 tab.job_name = pid.and_then(process_name);
             }
+            // With `follow_cwd = false`, the cwd title is captured once and never re-titles on a
+            // later `cd`; with it on, the live `pane_cwd` is used and this stays cleared.
+            if follow_cwd {
+                tab.frozen_cwd_title = None;
+            } else if tab.frozen_cwd_title.is_none() {
+                tab.frozen_cwd_title = tab.pane_cwd.get(&id).map(|cwd| dir_basename(cwd));
+            }
         }
-        self.tabs
-            .iter()
-            .enumerate()
-            .map(|(i, tab)| {
-                // A user-set custom name (F2) wins; else the running-command name; else `Tab N`.
-                tab.custom_title
-                    .clone()
-                    .or_else(|| tab.job_name.clone())
-                    .unwrap_or_else(|| format!("Tab {}", i + 1))
-            })
+        (0..self.tabs.len())
+            .map(|i| self.resolved_tab_title(i))
             .collect()
+    }
+
+    /// Resolve tab `i`'s title honoring `[tabs] title` (Hard rule 1). A manual `F2` rename always
+    /// wins; otherwise the configured source is used - `command` the running-command name,
+    /// `cwd` the focused pane's directory basename (frozen when `follow_cwd = false`), `custom`
+    /// only the rename - each falling back to `Tab N` when its source is absent. Shared by the
+    /// sidebar tab list and the rail/pinned tooltip so the two never diverge.
+    fn resolved_tab_title(&self, i: usize) -> String {
+        let Some(tab) = self.tabs.get(i) else {
+            return format!("Tab {}", i + 1);
+        };
+        if let Some(custom) = &tab.custom_title {
+            return custom.clone();
+        }
+        let cwd_title = || {
+            if self.config.tabs.follow_cwd {
+                tab.pane_cwd
+                    .get(&tab.tree.focused())
+                    .map(|c| dir_basename(c))
+            } else {
+                tab.frozen_cwd_title.clone()
+            }
+        };
+        match self.config.tabs.title {
+            TabTitle::Command => tab.job_name.clone().or_else(cwd_title),
+            TabTitle::Cwd => cwd_title().or_else(|| tab.job_name.clone()),
+            TabTitle::Custom => None,
+        }
+        .unwrap_or_else(|| format!("Tab {}", i + 1))
     }
 
     /// The workspace chip glyphs: a curated set of distinct geometric marks assigned by position
@@ -1591,16 +1900,20 @@ impl App {
     /// list clipped to the panel.
     fn build_git_dock_frame(&mut self) -> GitDockFrame {
         let scale = scale32(self.scale);
+        // The opaque fill/divider span the full panel; the content is inset below the title strip.
         let panel = self.dock_panel_rect();
+        let content = self.dock_content_rect();
         let mut paint = self
             .git_dock
-            .build(panel, scale, &self.theme, &mut self.measure);
+            .build(content, scale, &self.theme, &mut self.measure);
         self.push_dock_button(&mut paint.quads, &mut paint.labels, scale);
+        // Write the clamped diff scroll back so repeated paging past the end settles.
+        self.git_dock.set_scroll(paint.diff_scroll);
         GitDockFrame {
             panel,
+            clip: self.dock_clip_rect(),
             quads: paint.quads,
             labels: paint.labels,
-            diff_scroll: paint.diff_scroll,
         }
     }
 
@@ -1608,13 +1921,16 @@ impl App {
     /// banner + event list + foot as a proportional display list clipped to the panel.
     fn build_timeline_frame(&mut self) -> TimelineFrame {
         let scale = scale32(self.scale);
+        // The opaque fill/divider span the full panel; the content is inset below the title strip.
         let panel = self.dock_panel_rect();
+        let content = self.dock_content_rect();
         let mut paint = self
             .timeline
-            .build(panel, scale, &self.theme, &mut self.measure);
+            .build(content, scale, &self.theme, &mut self.measure);
         self.push_dock_button(&mut paint.quads, &mut paint.labels, scale);
         TimelineFrame {
             panel,
+            clip: self.dock_clip_rect(),
             quads: paint.quads,
             labels: paint.labels,
         }
@@ -1988,12 +2304,32 @@ impl App {
         }
     }
 
-    /// Refresh the dock from the repository of the process working directory (a v1
-    /// limitation: real per-pane cwd tracking is a follow-up, the same blocker as
-    /// cwd-based tab titles). Caches the repo, loads the working status, then the selected
-    /// file's diff.
+    /// The active tab's focused-pane working directory (absolute) - the repo the git diff dock
+    /// scopes to (design §10.4 "Scoped to the active tab's repo"). Read from the pane's shell
+    /// process; falls back to the process cwd when it can't be read or there is no focused pane.
+    /// Only used to seed the very first git refresh (before the poll thread has filled the cache);
+    /// steady state reads the cached [`active_cwd`](Self::active_cwd) instead.
+    fn active_pane_cwd(&self) -> std::path::PathBuf {
+        let ws = self.active_tab();
+        ws.panes
+            .get(&ws.tree.focused())
+            .and_then(Terminal::shell_pid)
+            .and_then(process_cwd)
+            .unwrap_or_else(|| {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            })
+    }
+
+    /// Refresh the git diff dock from the active tab's focused-pane repo (design §10.4), so it
+    /// follows the selected tab / its cwd. Scopes to the cached [`active_cwd`](Self::active_cwd)
+    /// (the last *successfully* polled cwd, so a transient read failure never re-points the dock at
+    /// the launch dir), seeding it from a fresh read only before the first poll lands. Caches the
+    /// repo, loads the working status, then the selected file's diff.
     fn refresh_git(&mut self) {
-        let start = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let start = self
+            .active_cwd
+            .clone()
+            .unwrap_or_else(|| self.active_pane_cwd());
         match Repo::discover(&start) {
             Ok(Some(repo)) => match repo.status() {
                 Ok(status) => {
@@ -2021,11 +2357,11 @@ impl App {
         }
     }
 
-    /// Initialize a git repository in the process cwd (the git dock's "Init repo"
-    /// empty-state action, design §12 "Not a git repo") and refresh the dock to show the
+    /// Initialize a git repository in the active tab's focused-pane cwd (the git dock's "Init
+    /// repo" empty-state action, design §12 "Not a git repo") and refresh the dock to show the
     /// new, empty repo. A failure surfaces in the dock's error line.
     fn init_repo(&mut self) {
-        let start = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let start = self.active_pane_cwd();
         match Repo::init(&start) {
             Ok(_) => self.refresh_git(),
             Err(err) => self.git_dock.set_error(err.to_string()),
@@ -2217,6 +2553,9 @@ impl App {
             ws.selection = None;
             ws.activated = true; // operating on panes means the tab is in use; clear its empty state
             self.sync_layout();
+            // A focus/close/zoom may have changed which pane is focused; follow its repo at once
+            // (a differently-`cd`'d pane) instead of lagging the next poll.
+            self.rescope_dock_to_active();
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
@@ -2400,6 +2739,9 @@ impl App {
         if index < self.tabs.len() && index != self.active {
             self.active = index;
             self.selecting = false;
+            // Immediately follow the switched-to tab's repo from the cached cwds (no wait for the
+            // next poll); the status-line cwd catches up on the next drain.
+            self.rescope_dock_to_active();
             // The now-visible tab may have been sized for an earlier window; re-fit it.
             self.sync_layout();
             self.request_redraw();
@@ -2597,11 +2939,8 @@ impl App {
             sidebar::Hit::Tab(i)
                 if self.sidebar_rail_now() || self.tabs.get(i).is_some_and(|t| t.pinned) =>
             {
-                let tab = self.tabs.get(i)?;
-                tab.custom_title
-                    .clone()
-                    .or_else(|| tab.job_name.clone())
-                    .unwrap_or_else(|| format!("Tab {}", i + 1))
+                // Same resolver the sidebar list uses, so the tooltip never diverges from the title.
+                self.resolved_tab_title(i)
             }
             _ => return None,
         };
@@ -3820,11 +4159,14 @@ impl App {
                 term.scroll_to_bottom();
                 term.write(&bytes);
             }
+            let now = Instant::now();
             let ws = self.active_tab_mut();
             ws.selection = None; // typing clears the selection
-                                 // Running a command (submitting with Enter) retires the empty state (§10.2:
-                                 // "chips fade the first time the user runs a command").
-            if is_enter {
+                                 // The empty state retires the moment the user starts typing:
+                                 // kick off the mark + chips fade-out (§10.2) and mark the tab
+                                 // in use. Any real keystroke counts, Enter included.
+            if ws.is_empty_state() {
+                ws.empty_fade = Some(motion::Anim::start(now, EMPTY_FADE));
                 ws.activated = true;
             }
         }
@@ -3950,6 +4292,15 @@ impl App {
         }
         match state {
             ElementState::Pressed => {
+                // The expand toggle straddles the dock's left edge, so check it *before* the
+                // resize-edge grab - a click on the handle flips the dock width, not a resize.
+                if let Some(btn) = self.dock_button_rect() {
+                    let (px, py) = point_f32(self.pointer);
+                    if px >= btn.x && px < btn.x + btn.w && py >= btn.y && py < btn.y + btn.h {
+                        self.toggle_dock_full_width();
+                        return;
+                    }
+                }
                 // Grabbing the open dock's left edge starts a resize drag (consumes the press).
                 if self.on_dock_edge() {
                     self.dock_resizing = true;
@@ -3959,14 +4310,6 @@ impl App {
                 if self.on_sidebar_edge() {
                     self.sidebar_resizing = true;
                     return;
-                }
-                // Clicking the dock's full-width toggle button flips its width (consumes the click).
-                if let Some(btn) = self.dock_button_rect() {
-                    let (px, py) = point_f32(self.pointer);
-                    if px >= btn.x && px < btn.x + btn.w && py >= btn.y && py < btn.y + btn.h {
-                        self.toggle_dock_full_width();
-                        return;
-                    }
                 }
                 // Clicking the open right dock focuses it (its keyboard controls take over);
                 // clicking anywhere else returns keyboard focus to the terminal panes.
@@ -4123,15 +4466,17 @@ struct SettingsFrame {
 /// Owned git-dock frame data the borrowed [`GitDockView`] points at.
 struct GitDockFrame {
     panel: PxRect,
+    /// The label clip (panel widened left for the edge-straddling toggle glyph).
+    clip: PxRect,
     quads: Vec<skelly_render::ChromeQuad>,
     labels: Vec<skelly_render::ProseLabel>,
-    /// The clamped diff scroll the view actually used, written back to the dock.
-    diff_scroll: usize,
 }
 
 /// Owned timeline-dock frame data the borrowed [`TimelineView`] points at.
 struct TimelineFrame {
     panel: PxRect,
+    /// The label clip (panel widened left for the edge-straddling toggle glyph).
+    clip: PxRect,
     quads: Vec<skelly_render::ChromeQuad>,
     labels: Vec<skelly_render::ProseLabel>,
 }
@@ -4336,6 +4681,49 @@ fn process_name(pid: u32) -> Option<String> {
     (!base.is_empty()).then(|| base.to_owned())
 }
 
+/// The working directory of process `pid`, best-effort (for the live status-line cwd + the
+/// cwd-based tab title). On Linux this reads the `/proc/<pid>/cwd` symlink; macOS has no
+/// `/proc`, so it shells `lsof` for the process's `cwd` descriptor. `None` on any failure - the
+/// caller keeps the pane's last known cwd.
+#[cfg(target_os = "linux")]
+fn process_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+/// See [`process_cwd`]. macOS build: `lsof -a -p <pid> -d cwd -Fn` prints field-prefixed lines;
+/// the working directory is the one prefixed with `n`.
+#[cfg(target_os = "macos")]
+fn process_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    let output = std::process::Command::new("lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .find_map(|line| line.strip_prefix('n'))
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// See [`process_cwd`]. Fallback for platforms without a known cwd source (Skelly targets macOS
+/// and Linux; this keeps the build honest elsewhere).
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_cwd(_pid: u32) -> Option<std::path::PathBuf> {
+    None
+}
+
+/// The final path component of a (possibly home-collapsed) directory string, for the cwd-based
+/// tab title (design §10.3): `~/Developer/skelly` -> `skelly`, `~` -> `~`, `/` -> `/`.
+fn dir_basename(cwd: &str) -> String {
+    cwd.rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(cwd)
+        .to_owned()
+}
+
 /// Resolve a terminal cell into a render cell against the active ANSI palette,
 /// folding in the palette-dependent SGR effects: *dim* reduces the foreground
 /// intensity and *reverse video* swaps foreground and background (using the
@@ -4464,6 +4852,9 @@ impl ApplicationHandler<Wakeup> for App {
         self.record_session_start();
         // Start recording working-tree edits into the timeline (design §10.5).
         self.start_git_poll();
+        // Publish the initial panes' pids and start the off-thread cwd poll (status line + titles).
+        self.refresh_poll_pids();
+        self.start_cwd_poll();
         tracing::info!(
             panes = self.active_tab().panes.len(),
             "window, GPU, and shell ready"
@@ -4476,6 +4867,8 @@ impl ApplicationHandler<Wakeup> for App {
             Wakeup::Shell => self.request_redraw(),
             // A fresh working-tree status; record any new edits (repaints only if it changed).
             Wakeup::GitPoll => self.drain_git_poll(),
+            // Fresh per-pane cwds from the poll thread; apply them (status line, titles, git dock).
+            Wakeup::CwdPoll => self.drain_cwd_poll(),
         }
     }
 
@@ -4667,7 +5060,22 @@ impl App {
                 self.request_redraw();
             }
         }
-        self.palette_anim.is_some() || self.confirm_anim.is_some()
+        // The active tab's empty-state fade-out (going live): keep ticking until it settles,
+        // then drop it so the mark + chips stop being drawn.
+        let fade_done = self
+            .tabs
+            .get(self.active)
+            .and_then(|tab| tab.empty_fade)
+            .is_some_and(|fade| fade.done(now));
+        if fade_done {
+            self.tabs[self.active].empty_fade = None;
+            self.request_redraw();
+        }
+        let fading = self
+            .tabs
+            .get(self.active)
+            .is_some_and(|tab| tab.empty_fade.is_some());
+        self.palette_anim.is_some() || self.confirm_anim.is_some() || fading
     }
 }
 

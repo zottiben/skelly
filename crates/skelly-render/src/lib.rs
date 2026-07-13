@@ -32,7 +32,7 @@ pub use capture::{
     CaptureOverlay, CapturePane, CaptureSettings, CaptureSidebar, CaptureTimeline, Chrome,
     PaneOverlay,
 };
-pub use cells::logo_chrome_quads;
+pub use cells::{logo_chrome_quads, LOGO_WATERMARK_OPACITY};
 pub use error::RenderError;
 pub use fonts::FontRole;
 pub use prose::{ProseLabel, TextMeasure};
@@ -209,6 +209,9 @@ pub struct SidebarView<'a> {
 pub struct GitDockView<'a> {
     /// The dock rectangle on the surface (right edge, full height), physical px.
     pub panel: PxRect,
+    /// The rect the dock's labels clip to (physical px) - normally the panel, but widened
+    /// leftward for the edge-straddling expand toggle's glyph. Defaults to `panel`.
+    pub clip: PxRect,
     /// The content quads over the dock frame (diff add/del/hunk line backgrounds, the
     /// selected-file + focused-hunk fills, the commit caret).
     pub quads: &'a [ChromeQuad],
@@ -228,6 +231,9 @@ pub struct GitDockView<'a> {
 pub struct TimelineView<'a> {
     /// The dock rectangle on the surface (right edge, full height), physical px.
     pub panel: PxRect,
+    /// The rect the dock's labels clip to (physical px) - normally the panel, but widened
+    /// leftward for the edge-straddling expand toggle's glyph. Defaults to `panel`.
+    pub clip: PxRect,
     /// The content quads over the dock frame (selected-event fill, the viewing accent bar).
     pub quads: &'a [ChromeQuad],
     /// The positioned proportional text labels (banner, events, legend, summary).

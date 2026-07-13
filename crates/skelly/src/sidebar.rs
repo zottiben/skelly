@@ -24,8 +24,9 @@ use skelly_render::{
 /// the guide's §08 sidebar: a compact group header, comfortable 13px `label` tab rows, and
 /// a matching "+ New tab" action.
 const PAD_TOP: f32 = 10.0;
-/// Left inset (logical px) of the brand lockup in the title strip - clears the traffic lights.
-const LOGO_INSET: f32 = 84.0;
+/// Height (logical px) of the brand-lockup row seated *below* the macOS traffic-light strip -
+/// the mark + "skelly" wordmark sit under the lights (left-aligned), not beside them.
+const BRAND_BLOCK: f32 = 30.0;
 /// Gap between the vertebra mark and the "skelly" wordmark.
 const LOGO_GAP: f32 = 8.0;
 /// Workspace-switcher chips (design §08 #2): 26px rounded tiles, `gap:7px`, inset `13px`.
@@ -188,11 +189,9 @@ const UTIL_ICONS: [(UtilAction, &str); 4] = [
     (UtilAction::Timeline, "\u{27F2}"),
     (UtilAction::Git, "\u{2442}"),
 ];
-/// Left padding of the full-panel utility row (the guide's `padding:0 15px`).
+/// Horizontal padding of the full-panel utility row from the sidebar edges; the four icons
+/// spread evenly across the inner width between these pads.
 const UTIL_PAD_X: f32 = 15.0;
-/// Per-icon step in the full-panel utility row (icon box + the guide's `gap:16px`); also the
-/// icon's click box, so draw and hit coincide.
-const UTIL_STEP: f32 = 34.0;
 
 /// The persistent left sidebar's state: its display mode (a mirror of
 /// `config.sidebar.mode`, the source of truth per Hard rule 1) plus the visible mode to
@@ -445,7 +444,7 @@ pub(crate) fn hit(view: &View, panel: PxRect, scale: f32, px: f32, py: f32) -> O
             .find(|(_, slot)| px >= slot.x && px < slot.x + slot.w)
             .map(|(action, _)| Hit::Util(action));
     }
-    let top_inset = view.top_inset + chips_block_h(view);
+    let top_inset = view.top_inset + brand_block_h(view) + chips_block_h(view);
     let y_logical = (py - panel.y) / scale;
     let layout_groups: &[GroupSpan] = if view.rail { &[] } else { view.groups };
     for row in rows_layout(
@@ -478,16 +477,19 @@ pub(crate) fn hit(view: &View, panel: PxRect, scale: f32, px: f32, py: f32) -> O
 }
 
 /// The full-panel utility bar's per-icon hit slots (physical px), each returning its action +
-/// click box: the icons left-cluster (the guide's `padding:0 15px; gap:16px`) in fixed
-/// `UTIL_STEP` boxes from `UTIL_PAD_X`. Shared by [`hit`] and [`build`] so the drawn glyph and
-/// its click target coincide.
+/// click box: the four icons are spread evenly across the footer, each occupying (and centered
+/// in) an equal slot spanning the sidebar's padded inner width, rather than left-clustered.
+/// Shared by [`hit`] and [`build`] so the drawn glyph and its click target coincide.
 #[allow(
     clippy::cast_precision_loss,
-    reason = "the icon index is a tiny fixed range (0..4)"
+    reason = "the icon count/index is a tiny fixed range (0..4)"
 )]
 fn utility_slots(panel: PxRect, scale: f32) -> Vec<(UtilAction, PxRect)> {
     let top = panel.y + panel.h - UTIL_H * scale;
     let h = UTIL_H * scale;
+    let pad = UTIL_PAD_X * scale;
+    let inner = (panel.w - 2.0 * pad).max(0.0);
+    let slot_w = inner / UTIL_ICONS.len() as f32;
     UTIL_ICONS
         .iter()
         .enumerate()
@@ -495,9 +497,9 @@ fn utility_slots(panel: PxRect, scale: f32) -> Vec<(UtilAction, PxRect)> {
             (
                 *action,
                 PxRect {
-                    x: panel.x + (UTIL_PAD_X + i as f32 * UTIL_STEP) * scale,
+                    x: panel.x + pad + i as f32 * slot_w,
                     y: top,
-                    w: UTIL_STEP * scale,
+                    w: slot_w,
                     h,
                 },
             )
@@ -529,20 +531,23 @@ pub(crate) fn build(
     let mut quads = vec![ChromeQuad::fill(panel, theme.bg_sidebar)];
     let mut labels = Vec::new();
 
-    // The brand lockup (design §02): the vertebra mark + "skelly" wordmark, seated in the title
-    // strip to the right of the macOS traffic lights. Full panel only, and only where a strip is
-    // reserved (macOS) - the slim rail and non-macOS builds have no room for it.
-    if !view.rail && view.top_inset > 1.0 {
-        let strip_h = view.top_inset * scale;
-        let mark = (view.top_inset - 16.0).clamp(14.0, 22.0) * scale;
-        let mark_x = panel.x + LOGO_INSET * scale;
-        let mark_y = panel.y + (strip_h - mark) * 0.5;
+    // The brand lockup (design §02): the vertebra mark + "skelly" wordmark, seated in its own row
+    // just *below* the macOS traffic-light strip (left-aligned under the lights, not beside them).
+    // Full panel only, and only where a strip is reserved (macOS) - the slim rail and non-macOS
+    // builds have no room for it.
+    if brand_block_h(view) > 0.0 {
+        let block_top = panel.y + view.top_inset * scale;
+        let block_h = BRAND_BLOCK * scale;
+        // The vertebra mark is a tall vertical spine; keep it close to the 12px wordmark's height.
+        let mark = 16.0 * scale;
+        let mark_x = panel.x + CHIP_INSET * scale;
+        let mark_y = block_top + (block_h - mark) * 0.5;
         quads.extend(logo_chrome_quads(mark_x, mark_y, mark, theme, 1.0));
         let line = measure.line_height(FontRole::Mono);
         labels.push(ProseLabel {
             text: "skelly".to_owned(),
             x: mark_x + mark + LOGO_GAP * scale,
-            y: panel.y + (strip_h - line) * 0.5,
+            y: block_top + (block_h - line) * 0.5,
             role: FontRole::Mono,
             color: theme.fg_primary,
             weight: None,
@@ -574,7 +579,7 @@ pub(crate) fn build(
         view.tab_count,
         view.active_tab,
         panel.h / scale,
-        view.top_inset + chips_block,
+        view.top_inset + brand_block_h(view) + chips_block,
         layout_groups,
         pinned_block_h(view, panel, scale),
     ) {
@@ -869,6 +874,17 @@ fn push_command_well(
     }
 }
 
+/// The logical height reserved for the brand-lockup row below the traffic-light strip, or 0
+/// where no brand is drawn (the slim rail, or a build with no title strip). Everything below the
+/// strip - chips, command well, tab list - shifts down by this so the lockup gets its own row.
+fn brand_block_h(view: &View) -> f32 {
+    if !view.rail && view.top_inset > 1.0 {
+        BRAND_BLOCK
+    } else {
+        0.0
+    }
+}
+
 /// The logical height the workspace-chip block occupies above the command well (its 26px row
 /// plus the gap), or 0 when there are no chips or in the rail.
 fn chips_block_h(view: &View) -> f32 {
@@ -890,7 +906,7 @@ fn chip_slots(view: &View, panel: PxRect, scale: f32) -> Vec<PxRect> {
     if view.chips.is_empty() {
         return Vec::new();
     }
-    let y = panel.y + (view.top_inset + PAD_TOP) * scale;
+    let y = panel.y + (view.top_inset + brand_block_h(view) + PAD_TOP) * scale;
     let size = CHIP_SIZE * scale;
     let step = (CHIP_SIZE + CHIP_GAP) * scale;
     let x0 = panel.x + CHIP_INSET * scale;
@@ -1160,14 +1176,18 @@ fn push_utility_bar(
         },
         theme.border_subtle,
     ));
-    let line_h = measure.line_height(FontRole::Body);
+    // Larger than default UI text (§05 `h2`, 20px) so the toggles read as real touch targets,
+    // each centered in its evenly-spread slot.
+    let role = FontRole::H2;
+    let line_h = measure.line_height(role);
     let cy = top + (UTIL_H * scale - line_h) * 0.5;
     for ((_, glyph), (_, slot)) in UTIL_ICONS.iter().zip(utility_slots(panel, scale)) {
+        let gw = measure.width(glyph, role, None);
         labels.push(ProseLabel {
             text: (*glyph).to_owned(),
-            x: slot.x,
+            x: slot.x + (slot.w - gw) * 0.5,
             y: cy,
-            role: FontRole::Body,
+            role,
             color: theme.fg_muted,
             weight: None,
             max_w: f32::MAX,
@@ -1316,12 +1336,12 @@ mod tests {
 
     #[test]
     fn hit_maps_the_footer_icons_to_their_utility_actions() {
-        // The full-panel footer left-clusters four fixed UTIL_STEP(34) boxes from
-        // UTIL_PAD_X(15): icon i spans [15 + i·34, +34] logical. Probe each box center at a y
-        // inside the 40px footer.
+        // The full-panel footer spreads four equal slots across the padded inner width: with a
+        // 240-logical sidebar and UTIL_PAD_X(15), inner = 210 and each slot is 52.5 logical, so
+        // icon i is centered at 15 + i·52.5 + 26.25. Probe each center inside the 40px footer.
         let p = panel();
         let y = p.h - 20.0 * 2.0; // 20 logical up from the bottom
-        let center = |i: f32| (15.0 + i * 34.0 + 17.0) * 2.0;
+        let center = |i: f32| (15.0 + i * 52.5 + 26.25) * 2.0;
         assert_eq!(
             hit(&view(3, 0, false), p, 2.0, center(0.0), y),
             Some(Hit::Util(UtilAction::Settings))

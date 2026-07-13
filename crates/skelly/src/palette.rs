@@ -21,7 +21,7 @@ const PAD: f32 = 14.0;
 const ROW_INSET: f32 = 10.0;
 /// The palette's minimum width (logical px), so it stays a comfortable, stable size instead of
 /// shrinking to hug narrow content as the query filters the results (design §10.8 palette card).
-const MIN_WIDTH: f32 = 540.0;
+pub(crate) const MIN_WIDTH: f32 = 540.0;
 /// Input row height.
 const INPUT_H: f32 = 34.0;
 /// Result-count row height.
@@ -36,8 +36,6 @@ const ICON_GAP: f32 = 12.0;
 const SPACER_H: f32 = 8.0;
 /// Footer row height.
 const FOOTER_H: f32 = 24.0;
-/// Minimum gap between a command label and its right-anchored key hint.
-const HINT_GAP: f32 = 24.0;
 /// Corner radius (logical px) of the selected-row pill (the guide's `md` radius).
 const PILL_RADIUS: f32 = 8.0;
 
@@ -317,6 +315,10 @@ pub(crate) struct Palette {
     pub(crate) open: bool,
     query: String,
     selected: usize,
+    /// Index of the first row painted in the (capped) results region - the scroll position.
+    /// [`ensure_selected_visible`](Self::ensure_selected_visible) advances it to keep the
+    /// selection on-screen; typing (which resets the selection) resets it to the top.
+    scroll: usize,
     tabs: Vec<String>,
     /// Working-directory files, snapshotted at open, for the `/` files mode (design §10.8).
     files: Vec<String>,
@@ -329,6 +331,7 @@ impl Palette {
             open: false,
             query: String::new(),
             selected: 0,
+            scroll: 0,
             tabs: Vec::new(),
             files: Vec::new(),
         }
@@ -340,6 +343,7 @@ impl Palette {
         self.open = true;
         self.query.clear();
         self.selected = 0;
+        self.scroll = 0;
         self.tabs = tabs;
         self.files = files;
     }
@@ -431,16 +435,18 @@ impl Palette {
         self.selected = usize::try_from(next).unwrap_or(0);
     }
 
-    /// Append a typed character to the query and reset the selection.
+    /// Append a typed character to the query and reset the selection (and scroll to the top).
     pub(crate) fn push_char(&mut self, c: char) {
         self.query.push(c);
         self.selected = 0;
+        self.scroll = 0;
     }
 
-    /// Delete the last query character and reset the selection.
+    /// Delete the last query character and reset the selection (and scroll to the top).
     pub(crate) fn backspace(&mut self) {
         self.query.pop();
         self.selected = 0;
+        self.scroll = 0;
     }
 
     /// The action of the currently selected row, if any (run a command, or switch to a tab).
@@ -472,23 +478,22 @@ impl Palette {
         }
     }
 
-    /// The palette's natural panel size in **physical** px (including the card padding),
-    /// for the binary to center + animate the card. Width is the widest content row (a
-    /// command's label + gap + hint, the footer, or the input) plus insets; height is the
-    /// sum of the fixed row heights.
-    pub(crate) fn natural_size(&self, scale: f32, measure: &mut TextMeasure) -> (f32, f32) {
+    /// The fixed chrome heights (physical px) above and below the results region, as
+    /// `(top, bottom)`. `top` covers the padding, input, and result-count rows; `bottom` covers
+    /// the spacer, footer, and bottom padding. The binary adds the (capped) results height
+    /// between them for the panel height, matching the footer position [`build`](Self::build)
+    /// computes.
+    pub(crate) fn chrome_heights(scale: f32) -> (f32, f32) {
+        let top = (PAD + INPUT_H + COUNT_H) * scale;
+        let bottom = (SPACER_H + FOOTER_H + PAD) * scale;
+        (top, bottom)
+    }
+
+    /// The natural (uncapped) height of the results region in physical px: every command row
+    /// plus a category header wherever the group changes. The binary caps this to a fraction of
+    /// the window so a long list scrolls instead of overflowing (design §10.8 palette card).
+    pub(crate) fn results_height(&self, scale: f32) -> f32 {
         let rows = self.rows();
-        let inset = (PAD + ROW_INSET) * scale;
-        // The footer must fit its left hints + a gap + the right-anchored `esc close`.
-        let mut content_w = measure.width(self.footer_hints(), FontRole::Caption, None)
-            + FOOTER_GAP * scale
-            + measure.width(FOOTER_CLOSE, FontRole::Caption, None);
-        // The input line (prompt + term or placeholder).
-        let (_, term) = self.mode_and_term();
-        let shown = if term.is_empty() { PLACEHOLDER } else { term };
-        content_w = content_w.max(
-            measure.width("> ", FontRole::Body, None) + measure.width(shown, FontRole::Body, None),
-        );
         let mut current_category = "";
         let mut categories = 0_usize;
         for row in &rows {
@@ -496,26 +501,61 @@ impl Palette {
                 current_category = row.category;
                 categories += 1;
             }
-            let w = measure.width(row.icon, FontRole::Body, None)
-                + ICON_GAP * scale
-                + measure.width(&row.label, FontRole::Body, None)
-                + HINT_GAP * scale
-                + measure.width(row.hint, FontRole::Micro, None);
-            content_w = content_w.max(w);
         }
-        let width = (content_w + 2.0 * inset).max(MIN_WIDTH * scale);
         #[allow(
             clippy::cast_precision_loss,
-            reason = "the match + category counts are small, exact values"
+            reason = "row + category counts are small, exact values"
         )]
-        let rows_h = INPUT_H
-            + COUNT_H
-            + categories as f32 * CAT_H
-            + rows.len() as f32 * CMD_H
-            + SPACER_H
-            + FOOTER_H;
-        let height = rows_h * scale + 2.0 * PAD * scale;
-        (width, height)
+        let h = categories as f32 * CAT_H + rows.len() as f32 * CMD_H;
+        h * scale
+    }
+
+    /// The number of rows (starting at `start`) that fully fit in a `results_h`-tall region,
+    /// counting the category header emitted for the first visible row and wherever the group
+    /// changes among them. Whole rows only, so nothing bleeds past the region into the footer.
+    fn rows_that_fit(rows: &[Row], start: usize, results_h: f32, scale: f32) -> usize {
+        let mut used = 0.0;
+        let mut count = 0;
+        let mut category = "";
+        let mut first = true;
+        for row in rows.iter().skip(start) {
+            let mut need = CMD_H * scale;
+            if first || row.category != category {
+                need += CAT_H * scale;
+            }
+            if used + need > results_h {
+                break;
+            }
+            used += need;
+            category = row.category;
+            first = false;
+            count += 1;
+        }
+        count
+    }
+
+    /// Advance or retreat [`scroll`](Self::scroll) so the selected row stays within the
+    /// `results_h`-tall results region. Called each frame before [`build`](Self::build) with the
+    /// same `results_h`, so the two agree on which rows are visible. Height-only (no text
+    /// measurement), so the binary can call it without borrowing its glyph measurer.
+    pub(crate) fn ensure_selected_visible(&mut self, results_h: f32, scale: f32) {
+        let rows = self.rows();
+        if rows.is_empty() {
+            self.scroll = 0;
+            return;
+        }
+        self.selected = self.selected.min(rows.len() - 1);
+        // Selection above the window: pull the top down to it.
+        self.scroll = self.scroll.min(self.selected);
+        // Selection below the window: push the top down until the selection fits (or we run out
+        // of rows to reveal, when the region is too short for even one row).
+        while self.scroll < rows.len() - 1 {
+            let fit = Self::rows_that_fit(&rows, self.scroll, results_h, scale);
+            if fit == 0 || self.selected < self.scroll + fit {
+                break;
+            }
+            self.scroll += 1;
+        }
     }
 
     /// Build the palette's content display list within `panel` (the renderer draws the card
@@ -525,6 +565,7 @@ impl Palette {
     pub(crate) fn build(
         &self,
         panel: PxRect,
+        results_h: f32,
         scale: f32,
         theme: &Theme,
         measure: &mut TextMeasure,
@@ -562,10 +603,15 @@ impl Palette {
         );
         y += COUNT_H * scale;
 
-        // Rows, grouped under a category header whenever the category changes.
+        // Results region: only the rows that fit, starting at the scroll offset, so a long
+        // list scrolls (the selection is kept on-screen by `ensure_selected_visible`, called
+        // with this same `results_h`) instead of overflowing the card. Whole rows only, each
+        // under its category header, so nothing bleeds past the region into the footer.
+        let fit = Self::rows_that_fit(&rows, self.scroll, results_h, scale);
         let mut current_category = "";
-        for (index, row) in rows.iter().enumerate() {
-            if row.category != current_category {
+        let mut first = true;
+        for (index, row) in rows.iter().enumerate().skip(self.scroll).take(fit) {
+            if first || row.category != current_category {
                 current_category = row.category;
                 push_line(
                     &mut labels,
@@ -580,6 +626,7 @@ impl Palette {
                 );
                 y += CAT_H * scale;
             }
+            first = false;
             let selected = index == self.selected;
             if selected {
                 let inset = ROW_INSET * 0.5 * scale;
@@ -600,15 +647,16 @@ impl Palette {
             y += CMD_H * scale;
         }
 
-        y += SPACER_H * scale;
-        // Footer: navigation/run hints left-clustered, `esc close` right-anchored (design §10.8).
+        // Footer, anchored at the bottom of the (capped) card below the results region, not
+        // flowed after the last visible row - so it stays put as the list scrolls.
+        let footer_y = panel.y + (PAD + INPUT_H + COUNT_H) * scale + results_h + SPACER_H * scale;
         push_line(
             &mut labels,
             self.footer_hints(),
             FontRole::Caption,
             theme.fg_muted,
             prompt_x,
-            y,
+            footer_y,
             FOOTER_H,
             scale,
             measure,
@@ -620,7 +668,7 @@ impl Palette {
             FontRole::Caption,
             theme.fg_muted,
             cx + cw - ROW_INSET * scale - close_w,
-            y,
+            footer_y,
             FOOTER_H,
             scale,
             measure,
@@ -739,8 +787,6 @@ const FOOTER_HINTS: &str = "\u{2195} navigate    \u{23CE} run";
 /// path into the focused pane, `⌘↵` opens it in a fresh split pane.
 const FOOTER_HINTS_FILES: &str = "\u{2195} navigate    \u{23CE} run    \u{2318}\u{23CE} new pane";
 const FOOTER_CLOSE: &str = "esc close";
-/// The minimum gap (logical px) kept between the left hints and the right `esc close`.
-const FOOTER_GAP: f32 = 24.0;
 /// The empty-input placeholder.
 const PLACEHOLDER: &str = "search commands";
 /// The most file rows the `/` files mode shows (keeps the list snappy for a big tree).
@@ -778,6 +824,37 @@ fn push_line(
     });
 }
 
+/// Truncate `label` to fit `max_w` physical px, keeping the tail behind a leading `…` (the
+/// informative end of a file path), and remap its fuzzy-match `positions` onto the kept tail.
+/// Returns the label unchanged when it already fits or there is no room to truncate.
+fn fit_label(
+    label: &str,
+    positions: &[usize],
+    max_w: f32,
+    measure: &mut TextMeasure,
+) -> (String, Vec<usize>) {
+    if max_w <= 0.0 || measure.width(label, FontRole::Body, None) <= max_w {
+        return (label.to_owned(), positions.to_vec());
+    }
+    let chars: Vec<char> = label.chars().collect();
+    // Grow the dropped prefix until "…{tail}" fits; drop match positions in the dropped prefix and
+    // shift the kept ones past the single ellipsis char.
+    for start in 1..chars.len() {
+        let candidate: String = std::iter::once('\u{2026}')
+            .chain(chars[start..].iter().copied())
+            .collect();
+        if measure.width(&candidate, FontRole::Body, None) <= max_w {
+            let remapped = positions
+                .iter()
+                .filter(|&&p| p >= start)
+                .map(|&p| p - start + 1)
+                .collect();
+            return (candidate, remapped);
+        }
+    }
+    ("\u{2026}".to_owned(), Vec::new())
+}
+
 /// A command row: the `icon` (accent when `selected`, else `fg.muted`), then the `label`
 /// left-aligned with matched `positions` in `accent` (the rest `fg.primary`), and the key
 /// `hint` right-anchored in muted `micro` mono.
@@ -810,9 +887,19 @@ fn push_command(
         weight: None,
         max_w: f32::MAX,
     });
-    // The label, split into matched / unmatched runs so matched chars draw in accent.
-    let mut x = icon_x + measure.width(row.icon, FontRole::Body, None) + ICON_GAP * scale;
-    for (text, matched) in matched_runs(&row.label, &row.positions) {
+    // The label, split into matched / unmatched runs so matched chars draw in accent. A label
+    // wider than the row (a deep file path in `/` mode) is truncated with a leading `…`, keeping
+    // the tail (the filename) - the renderer would otherwise clip it to the panel with no ellipsis.
+    let label_start = icon_x + measure.width(row.icon, FontRole::Body, None) + ICON_GAP * scale;
+    let hint_reserve = if row.hint.is_empty() {
+        0.0
+    } else {
+        measure.width(row.hint, FontRole::Micro, None) + ICON_GAP * scale
+    };
+    let label_max_w = (cx + cw - ROW_INSET * scale - hint_reserve - label_start).max(0.0);
+    let (label, positions) = fit_label(&row.label, &row.positions, label_max_w, measure);
+    let mut x = label_start;
+    for (text, matched) in matched_runs(&label, &positions) {
         let color = if matched {
             theme.accent
         } else {
@@ -901,14 +988,16 @@ mod tests {
         for c in "zm".chars() {
             p.push_char(c);
         }
-        let (w, h) = p.natural_size(2.0, &mut m);
+        let (top, bottom) = Palette::chrome_heights(2.0);
+        let results_h = p.results_height(2.0);
+        p.ensure_selected_visible(results_h, 2.0);
         let panel = PxRect {
             x: 0.0,
             y: 0.0,
-            w,
-            h,
+            w: 600.0,
+            h: top + results_h + bottom,
         };
-        let paint = p.build(panel, 2.0, &theme, &mut m);
+        let paint = p.build(panel, results_h, 2.0, &theme, &mut m);
         // The sole match is selected, so a pill quad plus the input caret are emitted.
         assert!(paint.quads.len() >= 2);
         // Some label draws in accent (the matched characters).
