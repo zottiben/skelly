@@ -86,6 +86,7 @@ const SESSION: Group = Group {
         b("Fast-forward one step", "\u{2325}\u{2318}\u{2192}"),
         b("Return to now (HEAD)", "\u{2325}\u{2318}0"),
         b("Stage hunk (in diff)", "\u{2318}\u{21a9}"),
+        b("Full-width dock", "\u{21e7}\u{2318}F"),
     ],
 };
 

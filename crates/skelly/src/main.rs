@@ -78,6 +78,13 @@ const WORKSPACE_ICONS: [char; 8] = [
 ];
 /// One keyboard resize step, as a fraction of the enclosing split's extent.
 const RESIZE_STEP: f32 = 0.04;
+/// The right dock's header row height (logical px) - matches the docks' status-bar row, for
+/// seating the full-width toggle button.
+const DOCK_HEADER_H: f32 = 26.0;
+/// The dock full-width toggle button's size (logical px) and its right-edge inset (which clears
+/// the header's `esc` hint).
+const DOCK_BUTTON_SIZE: f32 = 18.0;
+const DOCK_BUTTON_INSET: f32 = 46.0;
 /// Logical width (px) of the slim icon rail (`⇧⌘B`), per design §08 ("Icon rail 56px").
 const RAIL_WIDTH: f32 = 56.0;
 /// How long a transient toast stays up before it auto-dismisses (design §12).
@@ -386,6 +393,9 @@ struct App {
     /// keep typing); clicking the dock focuses it for its own keyboard controls, clicking a pane
     /// returns focus to the terminal.
     dock_focused: bool,
+    /// Whether the open right dock is expanded to full width, overlaying the panes (toggled by
+    /// its header button or `⇧⌘F`). The panes keep their normal layout underneath.
+    dock_full_width: bool,
     /// The tab index currently being drag-reordered in the sidebar (updated as it moves), or
     /// `None` when no tab drag is in progress.
     dragging_tab: Option<usize>,
@@ -493,6 +503,7 @@ impl App {
             dock_resizing: false,
             sidebar_resizing: false,
             dock_focused: false,
+            dock_full_width: false,
             dragging_tab: None,
             rail_expanded: false,
             context_menu: None,
@@ -603,19 +614,70 @@ impl App {
         }
     }
 
+    /// The open right dock's panel rect (physical px). Normally right-anchored at `dock_width`;
+    /// when [`dock_full_width`](Self::dock_full_width) it spans from the sidebar to the right edge,
+    /// overlaying the panes. `w = 0` when no dock is open.
+    fn dock_panel_rect(&self) -> PxRect {
+        let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
+        if !(self.git_dock.open || self.timeline.open) {
+            return PxRect {
+                x: surface_w,
+                y: 0.0,
+                w: 0.0,
+                h: surface_h,
+            };
+        }
+        if self.dock_full_width {
+            let x = self.sidebar_footprint_px();
+            PxRect {
+                x,
+                y: 0.0,
+                w: (surface_w - x).max(1.0),
+                h: surface_h,
+            }
+        } else {
+            let dock_w = self.right_dock_width_px();
+            PxRect {
+                x: (surface_w - dock_w).max(0.0),
+                y: 0.0,
+                w: dock_w,
+                h: surface_h,
+            }
+        }
+    }
+
+    /// The full-width toggle button's rect in the dock header (physical px), or `None` when no
+    /// dock is open. A small square in the top-right, left of the `esc` hint.
+    fn dock_button_rect(&self) -> Option<PxRect> {
+        if !(self.git_dock.open || self.timeline.open) {
+            return None;
+        }
+        let panel = self.dock_panel_rect();
+        let scale = scale32(self.scale);
+        let size = DOCK_BUTTON_SIZE * scale;
+        Some(PxRect {
+            x: panel.x + panel.w - (DOCK_BUTTON_INSET + DOCK_BUTTON_SIZE) * scale,
+            y: panel.y + (DOCK_HEADER_H * scale - size) * 0.5,
+            w: size,
+            h: size,
+        })
+    }
+
     /// Whether the pointer is over the open right dock's body (used to give the dock keyboard
     /// focus on click). `false` when no dock is open.
     fn pointer_in_right_dock(&self) -> bool {
         if !(self.git_dock.open || self.timeline.open) {
             return false;
         }
+        let panel = self.dock_panel_rect();
         let (px, _) = point_f32(self.pointer);
-        px >= dim_f32(self.size.0) - self.right_dock_width_px()
+        px >= panel.x
     }
 
-    /// Whether the pointer sits on the open right dock's left edge (its resize grab zone).
+    /// Whether the pointer sits on the open right dock's left edge (its resize grab zone). Only
+    /// the normal (non-full-width) dock is resizable.
     fn on_dock_edge(&self) -> bool {
-        if !(self.git_dock.open || self.timeline.open) {
+        if !(self.git_dock.open || self.timeline.open) || self.dock_full_width {
             return false;
         }
         let (px, _) = point_f32(self.pointer);
@@ -1509,17 +1571,11 @@ impl App {
     /// list clipped to the panel.
     fn build_git_dock_frame(&mut self) -> GitDockFrame {
         let scale = scale32(self.scale);
-        let dock_w = self.right_dock_width_px();
-        let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
-        let panel = PxRect {
-            x: (surface_w - dock_w).max(0.0),
-            y: 0.0,
-            w: dock_w,
-            h: surface_h,
-        };
-        let paint = self
+        let panel = self.dock_panel_rect();
+        let mut paint = self
             .git_dock
             .build(panel, scale, &self.theme, &mut self.measure);
+        self.push_dock_button(&mut paint.quads, &mut paint.labels, scale);
         GitDockFrame {
             panel,
             quads: paint.quads,
@@ -1532,22 +1588,53 @@ impl App {
     /// banner + event list + foot as a proportional display list clipped to the panel.
     fn build_timeline_frame(&mut self) -> TimelineFrame {
         let scale = scale32(self.scale);
-        let dock_w = self.right_dock_width_px();
-        let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
-        let panel = PxRect {
-            x: (surface_w - dock_w).max(0.0),
-            y: 0.0,
-            w: dock_w,
-            h: surface_h,
-        };
-        let paint = self
+        let panel = self.dock_panel_rect();
+        let mut paint = self
             .timeline
             .build(panel, scale, &self.theme, &mut self.measure);
+        self.push_dock_button(&mut paint.quads, &mut paint.labels, scale);
         TimelineFrame {
             panel,
             quads: paint.quads,
             labels: paint.labels,
         }
+    }
+
+    /// Draw the dock's full-width toggle button (a `bg.surface` tile with an expand / collapse
+    /// glyph) into the dock's display list, seated in the header via [`dock_button_rect`].
+    fn push_dock_button(
+        &mut self,
+        quads: &mut Vec<skelly_render::ChromeQuad>,
+        labels: &mut Vec<ProseLabel>,
+        scale: f32,
+    ) {
+        let Some(rect) = self.dock_button_rect() else {
+            return;
+        };
+        quads.push(skelly_render::ChromeQuad::rounded(
+            rect,
+            self.theme.bg_surface,
+            4.0 * scale,
+        ));
+        // `⤢` expands to full width; `⤡` collapses back to the side dock.
+        let glyph = if self.dock_full_width {
+            "\u{2921}"
+        } else {
+            "\u{2922}"
+        };
+        let gw = self
+            .measure
+            .width(glyph, skelly_render::FontRole::Caption, None);
+        let line = self.measure.line_height(skelly_render::FontRole::Caption);
+        labels.push(ProseLabel {
+            text: glyph.to_owned(),
+            x: rect.x + (rect.w - gw) * 0.5,
+            y: rect.y + (rect.h - line) * 0.5,
+            role: skelly_render::FontRole::Caption,
+            color: self.theme.fg_secondary,
+            weight: None,
+            max_w: f32::MAX,
+        });
     }
 
     /// Open the settings view (`⌘,` or the palette command).
@@ -1607,6 +1694,30 @@ impl App {
         self.request_redraw();
     }
 
+    /// `⇧⌘F` while a dock is open toggles its full-width; returns whether it handled the key.
+    fn on_dock_fullwidth_chord(&mut self, key_event: &KeyEvent) -> bool {
+        let is_f = matches!(key_event.logical_key.as_ref(), Key::Character(c) if c.eq_ignore_ascii_case("f"));
+        if (self.git_dock.open || self.timeline.open)
+            && self.modifiers.super_key()
+            && self.modifiers.shift_key()
+            && is_f
+        {
+            self.toggle_dock_full_width();
+            return true;
+        }
+        false
+    }
+
+    /// Toggle the open right dock between its normal right-side width and full-width (overlaying
+    /// the panes). A no-op when no dock is open. The panes keep their layout underneath, so no
+    /// re-fit is needed - just a repaint.
+    fn toggle_dock_full_width(&mut self) {
+        if self.git_dock.open || self.timeline.open {
+            self.dock_full_width = !self.dock_full_width;
+            self.request_redraw();
+        }
+    }
+
     /// Show or hide the sidebar (`⌘B`). The pane viewport changes width, so re-fit the
     /// shells; the chosen mode persists (design §08, Hard rule 1).
     fn toggle_sidebar(&mut self) {
@@ -1650,6 +1761,7 @@ impl App {
         }
         // Opening keeps keyboard focus on the terminal; closing clears the dock focus.
         self.dock_focused = false;
+        self.dock_full_width = false;
         self.sync_layout();
         self.request_redraw();
     }
@@ -1670,6 +1782,7 @@ impl App {
         }
         // Opening keeps keyboard focus on the terminal; closing clears the dock focus.
         self.dock_focused = false;
+        self.dock_full_width = false;
         self.sync_layout();
         self.request_redraw();
     }
@@ -3497,6 +3610,11 @@ impl App {
             self.on_palette_key(event_loop, key_event);
             return;
         }
+        // `⇧⌘F` toggles the open dock's full-width, whether or not the dock is focused (so it
+        // works alongside typing in the panes). Checked before the focus-gated dock capture.
+        if self.on_dock_fullwidth_chord(key_event) {
+            return;
+        }
         // The right docks (git diff / timeline) capture keys only while *focused* (clicked into);
         // otherwise they are passive layers over a live terminal (Hard rule 4) and keys reach the
         // focused pane. The toggle chords (⇧⌘G / ⇧⌘H) and session chords stay global below, so a
@@ -3738,6 +3856,14 @@ impl App {
                 if self.on_sidebar_edge() {
                     self.sidebar_resizing = true;
                     return;
+                }
+                // Clicking the dock's full-width toggle button flips its width (consumes the click).
+                if let Some(btn) = self.dock_button_rect() {
+                    let (px, py) = point_f32(self.pointer);
+                    if px >= btn.x && px < btn.x + btn.w && py >= btn.y && py < btn.y + btn.h {
+                        self.toggle_dock_full_width();
+                        return;
+                    }
                 }
                 // Clicking the open right dock focuses it (its keyboard controls take over);
                 // clicking anywhere else returns keyboard focus to the terminal panes.
