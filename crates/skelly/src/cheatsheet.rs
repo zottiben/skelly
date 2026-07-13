@@ -25,76 +25,73 @@ const fn b(action: &'static str, chord: &'static str) -> Bind {
     Bind { action, chord }
 }
 
-/// The left column's groups (design §11), top to bottom.
-const LEFT: &[Group] = &[
-    Group {
-        title: "Global",
-        note: "",
-        binds: &[
-            b("Command palette", "\u{2318}K"),
-            b("Settings", "\u{2318},"),
-            b("Show / hide sidebar", "\u{2318}B"),
-            b("Cycle sidebar / rail", "\u{21e7}\u{2318}B"),
-            b("Keybinding cheatsheet", "\u{2318}/"),
-            b("Find in scrollback", "\u{2318}F"),
-            b("Quit", "\u{2318}Q"),
-        ],
-    },
-    Group {
-        title: "Panes",
-        note: "Leader = Ctrl A (tmux-style). Direct chords also work.",
-        binds: &[
-            b("Split right / down", "\u{2325}| \u{2325}-"),
-            b("Move focus", "\u{2325}\u{2190}\u{2193}\u{2191}\u{2192}"),
-            b("Resize pane", "\u{2303}\u{2325} arrows"),
-            b("Swap pane", "\u{2325}\u{21e7} arrows"),
-            b("Zoom / unzoom", "\u{2325}Z"),
-            b("Close pane", "\u{2325}W"),
-            b("Cycle layout preset", "\u{2325}Space"),
-            b("Even out splits", "\u{2325}="),
-        ],
-    },
-    Group {
-        title: "Terminal",
-        note: "",
-        binds: &[
-            b("Copy / paste", "\u{2318}C / V"),
-            b("Clear scrollback", "\u{2318}L"),
-            b("Font larger / smaller", "\u{2318}= / -"),
-            b("Reset font size", "\u{2318}0"),
-        ],
-    },
-];
+const GLOBAL: Group = Group {
+    title: "Global",
+    note: "",
+    binds: &[
+        b("Command palette", "\u{2318}K"),
+        b("Settings", "\u{2318},"),
+        b("Show / hide sidebar", "\u{2318}B"),
+        b("Cycle sidebar / rail", "\u{21e7}\u{2318}B"),
+        b("Keybinding cheatsheet", "\u{2318}/"),
+        b("Find in scrollback", "\u{2318}F"),
+        b("Quit", "\u{2318}Q"),
+    ],
+};
+const PANES: Group = Group {
+    title: "Panes",
+    note: "Leader = \u{2303}A (tmux-style).",
+    binds: &[
+        b("Split right / down", "\u{2325}| \u{2325}-"),
+        b("Move focus", "\u{2325}\u{2190}\u{2193}\u{2191}\u{2192}"),
+        b("Resize pane", "\u{2303}\u{2325} arrows"),
+        b("Swap pane", "\u{2325}\u{21e7} arrows"),
+        b("Zoom / unzoom", "\u{2325}Z"),
+        b("Close pane", "\u{2325}W"),
+        b("Cycle layout preset", "\u{2325}Space"),
+        b("Even out splits", "\u{2325}="),
+    ],
+};
+const TERMINAL: Group = Group {
+    title: "Terminal",
+    note: "",
+    binds: &[
+        b("Copy / paste", "\u{2318}C / V"),
+        b("Clear scrollback", "\u{2318}L"),
+        b("Font larger / smaller", "\u{2318}= / -"),
+        b("Reset font size", "\u{2318}0"),
+    ],
+};
+const TABS: Group = Group {
+    title: "Tabs",
+    note: "",
+    binds: &[
+        b("New tab", "\u{2318}T"),
+        b("Close tab", "\u{2318}W"),
+        b("Next / prev tab", "\u{2325}\u{21e7} ] / ["),
+        b("Go to tab 1-9", "\u{2318}1\u{2026}9"),
+        b("Pin / unpin", "\u{21e7}\u{2318}P"),
+        b("New group", "\u{21e7}\u{2318}N"),
+        b("Rename tab", "F2"),
+        b("Reopen closed", "\u{21e7}\u{2318}T"),
+    ],
+};
+const SESSION: Group = Group {
+    title: "Session & Git",
+    note: "",
+    binds: &[
+        b("Session timeline", "\u{21e7}\u{2318}H"),
+        b("Git diff panel", "\u{21e7}\u{2318}G"),
+        b("Rewind one step", "\u{2325}\u{2318}\u{2190}"),
+        b("Fast-forward one step", "\u{2325}\u{2318}\u{2192}"),
+        b("Return to now (HEAD)", "\u{2325}\u{2318}0"),
+        b("Stage hunk (in diff)", "\u{2318}\u{21a9}"),
+    ],
+};
 
-/// The right column's groups (design §11), top to bottom.
-const RIGHT: &[Group] = &[
-    Group {
-        title: "Tabs",
-        note: "",
-        binds: &[
-            b("New tab", "\u{2318}T"),
-            b("Close tab", "\u{2318}W"),
-            b("Next / prev tab", "\u{2325}\u{21e7} ] / ["),
-            b("Go to tab 1-9", "\u{2318}1\u{2026}9"),
-            b("Pin / unpin", "\u{21e7}\u{2318}P"),
-            b("New group", "\u{21e7}\u{2318}N"),
-            b("Rename tab", "F2"),
-            b("Reopen closed", "\u{21e7}\u{2318}T"),
-        ],
-    },
-    Group {
-        title: "Session & Git",
-        note: "",
-        binds: &[
-            b("Session timeline", "\u{21e7}\u{2318}H"),
-            b("Git diff panel", "\u{21e7}\u{2318}G"),
-            b("Rewind one step", "\u{2325}\u{2318}\u{2190}"),
-            b("Fast-forward one step", "\u{2325}\u{2318}\u{2192}"),
-            b("Return to now (HEAD)", "\u{2325}\u{2318}0"),
-            b("Stage hunk (in diff)", "\u{2318}\u{21a9}"),
-        ],
-    },
-];
+/// The three columns (design §11), balanced by row count so the card fits the window without
+/// clipping: `Global + Session` | `Tabs + Terminal` | `Panes`.
+const COLUMNS: [&[Group]; 3] = [&[GLOBAL, SESSION], &[TABS, TERMINAL], &[PANES]];
 
 // --- layout metrics (logical px) ---
 const PAD: f32 = 28.0;
@@ -108,12 +105,19 @@ const HEADER_H: f32 = 40.0;
 /// The card's natural size (**physical** px) for the binary to center it: two columns of the
 /// group stacks plus the header. All values are physical (the measurer's widths are too).
 #[must_use]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "the column count is a tiny fixed value"
+)]
 pub(crate) fn card_size(scale: f32, measure: &mut TextMeasure) -> (f32, f32) {
     let col_w = column_width(scale, measure);
-    let w = 2.0 * col_w + (COL_GAP + 2.0 * PAD) * scale;
-    let h = (HEADER_H + PAD) * scale
-        + column_height(LEFT, scale).max(column_height(RIGHT, scale))
-        + PAD * scale;
+    let cols = COLUMNS.len() as f32;
+    let w = cols * col_w + ((cols - 1.0) * COL_GAP + 2.0 * PAD) * scale;
+    let tallest = COLUMNS
+        .iter()
+        .map(|c| column_height(c, scale))
+        .fold(0.0_f32, f32::max);
+    let h = (HEADER_H + PAD) * scale + tallest + PAD * scale;
     (w, h)
 }
 
@@ -140,12 +144,15 @@ fn column_height(groups: &[Group], scale: f32) -> f32 {
 /// The physical width of one column, sized to its widest `action  chord` row (the measurer's
 /// widths are already physical).
 fn column_width(scale: f32, measure: &mut TextMeasure) -> f32 {
-    let mut w = 240.0 * scale;
-    for group in LEFT.iter().chain(RIGHT) {
+    let mut w = 210.0 * scale;
+    for group in COLUMNS.iter().copied().flatten() {
+        if !group.note.is_empty() {
+            w = w.max(measure.width(group.note, FontRole::Caption, None) + 8.0 * scale);
+        }
         for bind in group.binds {
             let aw = measure.width(bind.action, FontRole::Body, None);
             let cw = measure.width(bind.chord, FontRole::Mono, None);
-            w = w.max(aw + cw + 40.0 * scale);
+            w = w.max(aw + cw + 32.0 * scale);
         }
     }
     w
@@ -188,29 +195,30 @@ pub(crate) fn build(
     });
 
     let body_top = panel.y + (HEADER_H + PAD) * scale;
-    let col_w = (panel.w - 2.0 * pad - COL_GAP * scale) / 2.0;
-    push_column(
-        &mut quads,
-        &mut labels,
-        LEFT,
-        x0,
-        body_top,
-        col_w,
-        scale,
-        theme,
-        measure,
-    );
-    push_column(
-        &mut quads,
-        &mut labels,
-        RIGHT,
-        x0 + col_w + COL_GAP * scale,
-        body_top,
-        col_w,
-        scale,
-        theme,
-        measure,
-    );
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the column count is a tiny fixed value"
+    )]
+    let col_w = (panel.w - 2.0 * pad - (COLUMNS.len() as f32 - 1.0) * COL_GAP * scale)
+        / COLUMNS.len() as f32;
+    for (i, groups) in COLUMNS.iter().enumerate() {
+        #[allow(
+            clippy::cast_precision_loss,
+            reason = "the column index is a tiny fixed value"
+        )]
+        let x = x0 + i as f32 * (col_w + COL_GAP * scale);
+        push_column(
+            &mut quads,
+            &mut labels,
+            groups,
+            x,
+            body_top,
+            col_w,
+            scale,
+            theme,
+            measure,
+        );
+    }
     (quads, labels)
 }
 
@@ -292,13 +300,13 @@ fn push_column(
 
 #[cfg(test)]
 mod tests {
-    use super::{build, card_size, LEFT, RIGHT};
+    use super::{build, card_size, COLUMNS};
     use skelly_render::{PxRect, TextMeasure, Theme};
 
     #[test]
     fn covers_every_group_and_renders_bindings() {
-        // All five §11 groups are present across the two columns.
-        let titles: Vec<&str> = LEFT.iter().chain(RIGHT).map(|g| g.title).collect();
+        // All five §11 groups are present across the columns.
+        let titles: Vec<&str> = COLUMNS.iter().copied().flatten().map(|g| g.title).collect();
         for expected in ["Global", "Tabs", "Panes", "Session & Git", "Terminal"] {
             assert!(titles.contains(&expected), "missing group {expected}");
         }
