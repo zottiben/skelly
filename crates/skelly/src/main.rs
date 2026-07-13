@@ -65,6 +65,7 @@ const PANE_INSET: f32 = 6.0;
 /// (design §08 anatomy #1). The window uses a transparent, full-size-content-view title bar
 /// (the standard native-terminal look), so app content reserves this band at the top; it is
 /// zero where the platform keeps native decorations.
+#[cfg(target_os = "macos")]
 const TITLE_STRIP: f32 = 38.0;
 /// Logical width (px) spanned by the macOS traffic lights at the top-left. When the sidebar is
 /// at least this wide it covers them; when it is narrower (hidden, or the slim rail) the pane
@@ -546,6 +547,10 @@ impl App {
     /// The height (physical px) of the top control strip reserved for the macOS traffic
     /// lights (design §08 anatomy #1). Zero on platforms that keep native window decorations,
     /// so their layout is unchanged.
+    #[cfg_attr(
+        not(target_os = "macos"),
+        allow(clippy::unused_self, reason = "the strip is macOS-only; 0 elsewhere")
+    )]
     fn content_top(&self) -> f32 {
         #[cfg(target_os = "macos")]
         {

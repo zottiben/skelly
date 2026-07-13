@@ -41,18 +41,6 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
 
-  msrv:
-    name: msrv (1.82)
-    runs-on: ubuntu-latest
-    # Overrides the pinned rust-toolchain.toml so we actually build on the MSRV.
-    env:
-      RUSTUP_TOOLCHAIN: "1.82.0"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.82.0
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --all-features
-
   supply-chain:
     name: supply-chain
     runs-on: ubuntu-latest

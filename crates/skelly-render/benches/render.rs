@@ -57,7 +57,7 @@ fn busy_grid() -> Vec<Vec<GridCell>> {
                 c: '@',
                 fg,
                 bg: Some(fg),
-                bold: n % 2 == 0,
+                bold: n.is_multiple_of(2),
                 italic: false,
                 underline: true,
             });

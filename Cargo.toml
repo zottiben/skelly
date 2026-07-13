@@ -5,7 +5,11 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+# MSRV tracks the pinned toolchain (rust-toolchain.toml): Skelly is an application
+# with a self-contained GUI dependency stack (wgpu / cosmic-text / alacritty_terminal)
+# whose own MSRVs already require recent stable, so there is no lower floor to support.
+# Bump this together with rust-toolchain.toml.
+rust-version = "1.97"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/zottiben/skelly"
 authors = ["the Skelly authors"]
