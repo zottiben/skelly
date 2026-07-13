@@ -2244,12 +2244,17 @@ impl App {
             Key::Named(NamedKey::Escape) => self.close_palette(),
             Key::Named(NamedKey::Enter) => {
                 // A file entry (files mode) types its path into the focused pane; otherwise run
-                // the selected command / tab action.
+                // the selected command / tab action. `⌘↵` "runs in a new pane" (design §11): it
+                // first splits a fresh pane (respecting the 8-pane cap) so the path lands there.
                 let file = self.palette.selected_file();
                 let action = self.palette.selected_action();
+                let new_pane = self.modifiers.super_key();
                 self.palette.close();
                 self.palette_anim = None;
                 if let Some(path) = file {
+                    if new_pane {
+                        self.apply_pane_action(PaneAction::Split(Dir::Right));
+                    }
                     self.type_into_focused(&format!("{path} "));
                 } else if let Some(action) = action {
                     self.run_palette_action(event_loop, action);

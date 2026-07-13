@@ -459,6 +459,16 @@ impl Palette {
         }
     }
 
+    /// The footer's left hint cluster: the files mode adds the `⌘↵ run in new pane` action
+    /// (design §10.8), which the binary honors when `⌘` is held over a file entry.
+    fn footer_hints(&self) -> &'static str {
+        if self.mode_and_term().0 == Mode::Files {
+            FOOTER_HINTS_FILES
+        } else {
+            FOOTER_HINTS
+        }
+    }
+
     /// The palette's natural panel size in **physical** px (including the card padding),
     /// for the binary to center + animate the card. Width is the widest content row (a
     /// command's label + gap + hint, the footer, or the input) plus insets; height is the
@@ -467,7 +477,7 @@ impl Palette {
         let rows = self.rows();
         let inset = (PAD + ROW_INSET) * scale;
         // The footer must fit its left hints + a gap + the right-anchored `esc close`.
-        let mut content_w = measure.width(FOOTER_HINTS, FontRole::Caption, None)
+        let mut content_w = measure.width(self.footer_hints(), FontRole::Caption, None)
             + FOOTER_GAP * scale
             + measure.width(FOOTER_CLOSE, FontRole::Caption, None);
         // The input line (prompt + term or placeholder).
@@ -591,7 +601,7 @@ impl Palette {
         // Footer: navigation/run hints left-clustered, `esc close` right-anchored (design §10.8).
         push_line(
             &mut labels,
-            FOOTER_HINTS,
+            self.footer_hints(),
             FontRole::Caption,
             theme.fg_muted,
             prompt_x,
@@ -722,6 +732,9 @@ fn fuzzy_match(query: &str, label: &str) -> Option<(i32, Vec<usize>)> {
 /// The footer hint clusters (design §10.8): navigation/run hints left, `esc close`
 /// right-anchored, using key glyphs (`↕` arrows, `⏎` return) like the guide.
 const FOOTER_HINTS: &str = "\u{2195} navigate    \u{23CE} run";
+/// The files-mode footer adds the `⌘↵ run in new pane` action (design §10.8/§11): `↵` types the
+/// path into the focused pane, `⌘↵` opens it in a fresh split pane.
+const FOOTER_HINTS_FILES: &str = "\u{2195} navigate    \u{23CE} run    \u{2318}\u{23CE} new pane";
 const FOOTER_CLOSE: &str = "esc close";
 /// The minimum gap (logical px) kept between the left hints and the right `esc close`.
 const FOOTER_GAP: f32 = 24.0;

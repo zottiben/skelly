@@ -57,6 +57,12 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Palette `⌘↵` run in new pane (§10.8/§11).** The palette footer now shows
+  `⌘↵ run in new pane` in files mode, and `⌘↵` on a file entry splits a fresh pane (Dir::Right,
+  respecting the 8-pane cap) before typing the path there, so the command runs in a new pane
+  rather than the focused one; plain `↵` still types into the focused pane. This was the last
+  deferred §11 binding (previously left because the palette runs app actions, not shell
+  commands - the file-entry path gives it a clean, faithful mapping).
 - 2026-07-13 - **Sidebar deferred interactions built: drag-reorder tabs + rail hover-to-expand
   (§08).** (a) A sidebar tab can be **dragged to reorder** it - press a tab, drag over another,
   and the list reorders live (the dragged tab stays active); release ends the drag. (b) The
