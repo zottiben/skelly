@@ -39,7 +39,7 @@ use skelly_render::{
     AnsiPalette, CursorShape, GitDockView, GridCell, OverlayView, PaneView, ProseLabel, PxRect,
     Renderer, SettingsView, SidebarView, Srgb, TextMeasure, Theme, TimelineView,
 };
-use skelly_session::{Actor, Repo, SessionEvent, ShadowWorktree, Status};
+use skelly_session::{Actor, Repo, SessionEvent, ShadowWorktree, Status, Timeline};
 use skelly_term::{CellAttrs, CellColor, ExitStatus, TermCell, Terminal};
 
 use confirm::{CloseTarget, Confirm};
@@ -327,11 +327,92 @@ struct Workspace {
     stash: Option<(Vec<Tab>, usize, Vec<TabGroup>)>,
 }
 
+/// One repo's session-timeline state, keyed by repo root in [`App::timelines`]. Edits are
+/// working-tree changes, which belong to a repo (not a tab), so tabs sharing a repo share this;
+/// a tab that `cd`s across a repo boundary switches which one the dock renders (design §10.5).
+#[derive(Default)]
+struct RepoTimeline {
+    /// The append-only event log for this repo.
+    timeline: Timeline,
+    /// Repo-relative paths known dirty, the baseline that distinguishes a *session* edit from
+    /// pre-session changes.
+    tracked_dirty: HashSet<String>,
+    /// Whether the per-repo "session started" anchor has been recorded (lazy on first sight).
+    started: bool,
+    /// Last-known working-tree `(added, removed)` totals - the status-line dirty projection source.
+    dirty: Option<(u32, u32)>,
+    /// Last-known branch - the status-line branch projection source.
+    branch: Option<String>,
+}
+
+/// One repo's freshly-polled status, posted from the git-poll thread. `head` (short SHA) is
+/// computed on the thread so the UI never shells out for a repo's session-start anchor.
+struct RepoStatus {
+    status: Status,
+    head: Option<String>,
+}
+
+/// The active repo's event log from the per-repo map, or the empty fallback outside a repo. A free
+/// function (not a method) so a caller borrows only these three fields and can still `&mut` the
+/// dock / measurer in the same statement (field-disjoint borrows the borrow checker accepts).
+fn active_log<'a>(
+    active_root: Option<&std::path::Path>,
+    timelines: &'a HashMap<std::path::PathBuf, RepoTimeline>,
+    empty: &'a Timeline,
+) -> &'a Timeline {
+    active_root
+        .and_then(|r| timelines.get(r))
+        .map_or(empty, |rt| &rt.timeline)
+}
+
+/// The set of dirty working-tree paths (repo-relative) in `status` - the timeline's edit baseline.
+fn dirty_paths(status: &Status) -> HashSet<String> {
+    status
+        .files
+        .iter()
+        .map(|f| f.path.to_string_lossy().into_owned())
+        .collect()
+}
+
+/// The `(added, removed)` line totals across `status`, or `None` when the tree is clean.
+fn dirty_totals(status: &Status) -> Option<(u32, u32)> {
+    let (a, r) = status
+        .files
+        .iter()
+        .fold((0u32, 0u32), |(a, r), f| (a + f.added, r + f.removed));
+    (a > 0 || r > 0).then_some((a, r))
+}
+
+/// The timeline edit event's `(title, detail)` for the files `(path, added, removed)` newly dirty
+/// since the last poll, or `None` when nothing is new. A single file names itself; several collapse
+/// to a count + combined totals (design §10.5).
+fn edit_text(newly: &[(String, u32, u32)]) -> Option<(String, String)> {
+    match newly {
+        [] => None,
+        [(path, added, removed)] => {
+            let name = path.rsplit('/').next().unwrap_or(path);
+            Some((
+                format!("Edited {name}"),
+                format!("+{added} \u{2212}{removed} \u{b7} {path}"),
+            ))
+        }
+        many => {
+            let (a, r) = many
+                .iter()
+                .fold((0u32, 0u32), |(a, r), (_, add, rem)| (a + add, r + rem));
+            Some((
+                format!("Edited {} files", many.len()),
+                format!("+{a} \u{2212}{r}"),
+            ))
+        }
+    }
+}
+
 /// Application state driven by the winit event loop. The window and renderer are
 /// `None` until the platform signals `resumed`; the tab list exists from the start.
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "independent UI-mode flags (selecting, leader-pending, cheatsheet, session-started)"
+    reason = "independent UI-mode flags (selecting, leader-pending, cheatsheet, dock-focused)"
 )]
 struct App {
     config: Config,
@@ -371,8 +452,18 @@ struct App {
     active_cwd: Option<std::path::PathBuf>,
     /// The per-repo git diff dock (right dock) state.
     git_dock: GitDock,
-    /// The session-timeline dock (right dock; mutually exclusive with the git dock).
+    /// The session-timeline dock (right dock; mutually exclusive with the git dock) - view state
+    /// only; it renders the active repo's log from [`timelines`](Self::timelines).
     timeline: TimelineDock,
+    /// Per-repo session event logs, keyed by repo root. Every open tab's repo gets one (the git
+    /// poll records edits into all of them); the dock + rewind scope to [`active_root`].
+    timelines: HashMap<std::path::PathBuf, RepoTimeline>,
+    /// The active tab's focused-pane repo root (`Repo::discover(active_cwd).root()`), or `None`
+    /// outside a repo. The dock renders `timelines[active_root]`; rewind + status project from it.
+    active_root: Option<std::path::PathBuf>,
+    /// An always-empty log the dock renders when the active tab is in no repo (so the view methods
+    /// can take a `&Timeline` without a special case).
+    empty_timeline: Timeline,
     /// A pending "close with a running job" confirm modal (design §12), if any. While set,
     /// it captures input; `Enter` / a second close-press confirms, `Esc` cancels.
     confirm: Option<Confirm>,
@@ -399,9 +490,6 @@ struct App {
     shadow: Option<ShadowWorktree>,
     /// When the session began, for the timeline's session-relative event times.
     session_start: Instant,
-    /// Whether the "session started" timeline event has been recorded yet (once, on the
-    /// first window activation, when a repo is known).
-    session_started: bool,
     /// The repository backing the dock (from the process cwd), cached while it is open so
     /// moving the file selection re-diffs without re-discovering.
     git_repo: Option<Repo>,
@@ -472,12 +560,10 @@ struct App {
     /// The last-applied blink "off" state, so the loop repaints only when the phase actually
     /// flips (edge-triggered), never in a redraw loop.
     blink_phase: bool,
-    /// The latest working-tree status produced by the background git-poll thread, drained on the
-    /// UI thread to record timeline edit events. `None` until a fresh poll lands.
-    pending_status: Arc<Mutex<Option<Status>>>,
-    /// The set of working-tree paths already known to be dirty (repo-relative). A path appearing
-    /// here that wasn't before is a fresh edit, recorded once into the timeline (design §10.5).
-    tracked_dirty: HashSet<String>,
+    /// The latest per-repo working-tree status produced by the background git-poll thread (keyed
+    /// by repo root), drained on the UI thread to record timeline edit events for every watched
+    /// repo. Empty until the first poll lands.
+    pending_status: Arc<Mutex<HashMap<std::path::PathBuf, RepoStatus>>>,
     /// The command palette's open / close animation (design §03 motion), live only while it
     /// plays. While any animation is set the event loop polls + redraws each frame; it clears
     /// itself when done (finalizing the close), returning the loop to its idle `Wait`.
@@ -528,6 +614,9 @@ impl App {
             active_cwd: None,
             git_dock: GitDock::new(),
             timeline: TimelineDock::new(),
+            timelines: HashMap::new(),
+            active_root: None,
+            empty_timeline: Timeline::new(),
             confirm: None,
             // Fresh install (no config file yet) -> show the first-run onboarding (design §10.1).
             onboarding: Config::is_first_run().then(onboarding::Onboarding::new),
@@ -538,7 +627,6 @@ impl App {
             find: None,
             shadow: None,
             session_start: Instant::now(),
-            session_started: false,
             git_repo: None,
             clipboard: arboard::Clipboard::new().ok(),
             window: None,
@@ -570,8 +658,7 @@ impl App {
             tooltip_visible: false,
             blink_epoch: Instant::now(),
             blink_phase: false,
-            pending_status: Arc::new(Mutex::new(None)),
-            tracked_dirty: HashSet::new(),
+            pending_status: Arc::new(Mutex::new(HashMap::new())),
             palette_anim: None,
             confirm_anim: None,
         }
@@ -725,26 +812,21 @@ impl App {
         }
     }
 
-    /// The expand/collapse toggle's rect (physical px), or `None` when no dock is open. On the
-    /// narrow side dock it **straddles the dock's left edge** (half over the dock, half over the
-    /// terminal) as a drawer-handle; when full-width, that edge is the sidebar's right-resize grab,
-    /// so the toggle sits just *inside* the dock instead - clear of the grab so the sidebar stays
-    /// resizable. Vertically centered on the dock body either way.
+    /// The expand/collapse toggle's rect (physical px), or `None` when no dock is open. It always
+    /// **straddles the dock's left edge** (half over the dock, half over whatever is left of it) as
+    /// a drawer-handle sitting on the border line, vertically centered on the dock body. When
+    /// full-width that edge coincides with the sidebar's right-resize grab, so a drag started in
+    /// the toggle's 22px band toggles the dock instead of resizing the sidebar (resize still works
+    /// everywhere else on the edge) - the on-the-border look is worth that small overlap.
     fn dock_button_rect(&self) -> Option<PxRect> {
         if !(self.git_dock.open || self.timeline.open) {
             return None;
         }
         let panel = self.dock_panel_rect();
         let content = self.dock_content_rect();
-        let scale = scale32(self.scale);
-        let size = DOCK_BUTTON_SIZE * scale;
-        let x = if self.dock_full_width {
-            panel.x + DOCK_GRAB * scale // just past the sidebar's resize grab zone
-        } else {
-            panel.x - size * 0.5 // straddle the terminal-side edge
-        };
+        let size = DOCK_BUTTON_SIZE * scale32(self.scale);
         Some(PxRect {
-            x,
+            x: panel.x - size * 0.5,
             y: content.y + (content.h - size) * 0.5,
             w: size,
             h: size,
@@ -1382,16 +1464,14 @@ impl App {
                 }
             }
         }
-        // Mirror the active pane's cwd to the app-level field (sidebar group label + fallback),
-        // and re-scope the open git dock when the active repo actually changes (a real `cd`).
-        // Only a successful (Some) read updates these - a None keeps the last known repo.
+        // Mirror the active pane's cwd to the app-level field (sidebar group label + fallback), and
+        // follow the active repo when the focused pane's cwd changes (a `cd`). Only a successful
+        // (Some) read updates these - a None keeps the last known repo.
         if let Some(dir) = active_abs {
             self.status_cwd = home_relative(&dir);
             if self.active_cwd.as_ref() != Some(&dir) {
                 self.active_cwd = Some(dir);
-                if self.git_dock.open && self.shadow.is_none() {
-                    self.refresh_git();
-                }
+                self.rescope_active();
             }
         }
         if changed {
@@ -1399,29 +1479,48 @@ impl App {
         }
     }
 
-    /// Re-scope the open git dock to the active tab's focused-pane cwd from the *already-polled*
-    /// cache (no subprocess), for an immediate follow on a tab switch or pane-focus change - the
-    /// cwds don't change on a focus switch, so the cached value is current. Skipped while rewound.
-    fn rescope_dock_to_active(&mut self) {
-        if !self.git_dock.open || self.shadow.is_some() {
+    /// Follow the active tab's focused-pane repo: recompute `active_root` from `active_cwd`; if it
+    /// changed, discard any rewind (decision 2: a tab switch / cross-repo `cd` returns to now -
+    /// Hard rule 3 keeps HEAD/refs untouched), reset the timeline cursor to the new repo's now,
+    /// re-project the status line, and re-scope the git dock. Idempotent - a no-op when the active
+    /// repo is unchanged (a within-repo `cd` keeps any rewind), so it is safe to over-call from
+    /// every tab/focus/workspace switch.
+    fn rescope_active(&mut self) {
+        // Adopt the active focused pane's cwd from the already-polled cache, so a tab / focus switch
+        // follows immediately (the cwd poll's own drain also calls this after updating active_cwd).
+        let pid = {
+            let ws = self.active_tab();
+            ws.panes
+                .get(&ws.tree.focused())
+                .and_then(Terminal::shell_pid)
+        };
+        if let Some(dir) = pid.and_then(|pid| {
+            self.pending_cwds
+                .lock()
+                .ok()
+                .and_then(|g| g.get(&pid).cloned())
+        }) {
+            self.active_cwd = Some(dir);
+        }
+        let root = self
+            .active_cwd
+            .as_deref()
+            .and_then(|c| Repo::discover(c).ok().flatten())
+            .map(|r| r.root().to_path_buf());
+        if root == self.active_root {
             return;
         }
-        let ws = self.active_tab();
-        let dir = ws
-            .panes
-            .get(&ws.tree.focused())
-            .and_then(Terminal::shell_pid)
-            .and_then(|pid| {
-                self.pending_cwds
-                    .lock()
-                    .ok()
-                    .and_then(|g| g.get(&pid).cloned())
-            });
-        if let Some(dir) = dir {
-            if self.active_cwd.as_ref() != Some(&dir) {
-                self.active_cwd = Some(dir);
-                self.refresh_git();
-            }
+        self.active_root = root;
+        self.discard_shadow();
+        let branch = self
+            .active_root
+            .as_ref()
+            .and_then(|r| self.timelines.get(r))
+            .and_then(|rt| rt.branch.clone());
+        self.timeline_reset_to_now(branch);
+        self.sync_active_status();
+        if self.git_dock.open {
+            self.refresh_git();
         }
     }
 
@@ -1924,9 +2023,14 @@ impl App {
         // The opaque fill/divider span the full panel; the content is inset below the title strip.
         let panel = self.dock_panel_rect();
         let content = self.dock_content_rect();
+        let log = active_log(
+            self.active_root.as_deref(),
+            &self.timelines,
+            &self.empty_timeline,
+        );
         let mut paint = self
             .timeline
-            .build(content, scale, &self.theme, &mut self.measure);
+            .build(log, content, scale, &self.theme, &mut self.measure);
         self.push_dock_button(&mut paint.quads, &mut paint.labels, scale);
         TimelineFrame {
             panel,
@@ -2081,33 +2185,43 @@ impl App {
         self.persist_config();
     }
 
-    /// Start the background thread that watches the repo's working tree, so the session timeline
-    /// records the user's edits (design §10.5) - which happen inside the panes (vim), invisible to
-    /// Skelly otherwise. Polling runs off the UI thread and posts each status via `Wakeup::GitPoll`
-    /// (drained in [`drain_git_poll`](Self::drain_git_poll)); a non-repo cwd simply records nothing.
+    /// Start the background thread that watches **every open tab's repo** working tree, so the
+    /// session timeline records the user's edits (design §10.5) - which happen inside the panes
+    /// (vim), invisible to Skelly otherwise. It reads the panes' cwds (`pending_cwds`, filled by the
+    /// cwd thread), discovers + `status()`es each distinct repo off the UI thread, and posts a
+    /// per-repo map via `Wakeup::GitPoll`. A non-repo cwd contributes nothing.
     fn start_git_poll(&mut self) {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let Ok(Some(repo)) = Repo::discover(&cwd) else {
-            return;
-        };
-        // Seed the known-dirty set from the current tree, so changes made *before* this session
-        // aren't re-reported as edits - only new edits during the session become timeline events.
-        if let Ok(status) = repo.status() {
-            self.tracked_dirty = status
-                .files
-                .iter()
-                .map(|f| f.path.to_string_lossy().into_owned())
-                .collect();
-        }
-        let slot = Arc::clone(&self.pending_status);
+        let cwds_slot = Arc::clone(&self.pending_cwds);
+        let status_slot = Arc::clone(&self.pending_status);
         let proxy = self.proxy.clone();
         std::thread::spawn(move || loop {
             std::thread::sleep(GIT_POLL_INTERVAL);
-            let Ok(status) = repo.status() else {
-                continue;
-            };
-            if let Ok(mut guard) = slot.lock() {
-                *guard = Some(status);
+            // The working set: every pane's cwd (covers background tabs). Before the first cwd poll
+            // fills the map, fall back to the process cwd so the launch repo is watched from cycle 1.
+            let mut cwds: Vec<std::path::PathBuf> = cwds_slot
+                .lock()
+                .map(|g| g.values().cloned().collect())
+                .unwrap_or_default();
+            if cwds.is_empty() {
+                cwds.extend(std::env::current_dir());
+            }
+            // Discover + status each distinct repo once (dedup cwds that share a repo root).
+            let mut result: HashMap<std::path::PathBuf, RepoStatus> = HashMap::new();
+            for cwd in cwds {
+                let Ok(Some(repo)) = Repo::discover(&cwd) else {
+                    continue;
+                };
+                let root = repo.root().to_path_buf();
+                if result.contains_key(&root) {
+                    continue; // another cwd already statused this repo this cycle
+                }
+                if let Ok(status) = repo.status() {
+                    let head = repo.head_short().ok();
+                    result.insert(root, RepoStatus { status, head });
+                }
+            }
+            if let Ok(mut guard) = status_slot.lock() {
+                *guard = result;
             }
             if proxy.send_event(Wakeup::GitPoll).is_err() {
                 break; // the event loop is gone; stop polling.
@@ -2115,50 +2229,54 @@ impl App {
         });
     }
 
-    /// Drain the latest working-tree status from the poll thread: record any file that became
-    /// dirty since the last poll as a timeline edit event, and refresh the status-line dirty
-    /// totals. Repaints only when something changed (so idle polls cost nothing).
+    /// Drain the latest per-repo statuses from the poll thread: for each repo, seed its "session
+    /// started" anchor on first sight, else record any file that became dirty since its last poll as
+    /// an edit event into *its* timeline, and refresh its cached dirty/branch. Then project the
+    /// active repo's status to the status line. Repaints only when something changed.
     fn drain_git_poll(&mut self) {
-        let Some(status) = self.pending_status.lock().ok().and_then(|mut g| g.take()) else {
-            return;
+        let statuses = match self.pending_status.lock() {
+            Ok(mut g) => std::mem::take(&mut *g),
+            Err(_) => return,
         };
-        let key = |f: &skelly_session::ChangedFile| f.path.to_string_lossy().into_owned();
-        let current: HashSet<String> = status.files.iter().map(&key).collect();
-        // Files newly dirty since the last poll = edits made this session; record one event.
-        let newly: Vec<&skelly_session::ChangedFile> = status
-            .files
-            .iter()
-            .filter(|f| !self.tracked_dirty.contains(&key(f)))
-            .collect();
-        if !newly.is_empty() {
-            let (title, detail) = if let [f] = newly.as_slice() {
-                let path = key(f);
-                let name = path.rsplit('/').next().unwrap_or(&path).to_owned();
-                (
-                    format!("Edited {name}"),
-                    format!("+{} \u{2212}{} \u{b7} {path}", f.added, f.removed),
-                )
+        let mut changed = false;
+        for (root, RepoStatus { status, head }) in statuses {
+            let current = dirty_paths(&status);
+            let totals = dirty_totals(&status);
+            let branch = status.branch.clone();
+            if self.timelines.get(&root).is_some_and(|rt| rt.started) {
+                // Files newly dirty since this repo's last poll = edits made this session.
+                let newly: Vec<(String, u32, u32)> = {
+                    let tracked = self.timelines.get(&root).map(|rt| &rt.tracked_dirty);
+                    status
+                        .files
+                        .iter()
+                        .filter(|f| {
+                            tracked.is_none_or(|t| !t.contains(f.path.to_string_lossy().as_ref()))
+                        })
+                        .map(|f| (f.path.to_string_lossy().into_owned(), f.added, f.removed))
+                        .collect()
+                };
+                if let Some((title, detail)) = edit_text(&newly) {
+                    tracing::debug!(files = newly.len(), %title, "timeline: recorded edit");
+                    let event =
+                        SessionEvent::new(Actor::Human, self.elapsed_label(), title, detail);
+                    self.record_edit(&root, event);
+                    changed = true;
+                }
+                if let Some(rt) = self.timelines.get_mut(&root) {
+                    changed |= rt.tracked_dirty != current || rt.dirty != totals;
+                    rt.tracked_dirty = current;
+                    rt.dirty = totals;
+                    rt.branch = branch;
+                }
             } else {
-                let (a, r) = newly
-                    .iter()
-                    .fold((0u32, 0u32), |(a, r), f| (a + f.added, r + f.removed));
-                (
-                    format!("Edited {} files", newly.len()),
-                    format!("+{a} \u{2212}{r}"),
-                )
-            };
-            tracing::debug!(files = newly.len(), %title, "timeline: recorded edit");
-            self.record_event(Actor::Human, title, detail, None);
+                // First sight: anchor + baseline (pre-session dirt is not counted as an edit).
+                self.seed_repo(&root, branch, head, current, totals);
+                changed = true;
+            }
         }
-        // Refresh the status-line dirty totals + the tracked set from the fresh status.
-        let (total_a, total_r) = status
-            .files
-            .iter()
-            .fold((0u32, 0u32), |(a, r), f| (a + f.added, r + f.removed));
-        let new_dirty = (total_a > 0 || total_r > 0).then_some((total_a, total_r));
-        let changed = new_dirty != self.status_dirty || current != self.tracked_dirty;
-        self.status_dirty = new_dirty;
-        self.tracked_dirty = current;
+        // The active repo's dirty/branch may have moved; keep the status line coherent (F3).
+        self.sync_active_status();
         if changed {
             self.request_redraw();
         }
@@ -2194,9 +2312,13 @@ impl App {
         } else {
             self.git_dock.close();
             self.git_repo = None;
-            self.record_session_start();
-            let branch = current_branch();
-            self.timeline.open(branch);
+            self.ensure_active_seeded();
+            let branch = self
+                .active_root
+                .as_ref()
+                .and_then(|r| self.timelines.get(r))
+                .and_then(|rt| rt.branch.clone());
+            self.timeline_open(branch);
             self.reconcile_shadow();
         }
         // Opening keeps keyboard focus on the terminal; closing clears the dock focus.
@@ -2215,36 +2337,31 @@ impl App {
         self.discard_shadow();
     }
 
-    /// Record the one-time "session started" event, anchored to the launch HEAD (so the
-    /// pre-session state is restorable). Discovers the process-cwd repo once; a non-repo or
-    /// a repo with no commits simply records a non-restorable anchor.
-    fn record_session_start(&mut self) {
-        if self.session_started {
-            return;
-        }
-        self.session_started = true;
-        let start = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let (detail, restore) = match Repo::discover(&start) {
-            Ok(Some(repo)) => {
-                let branch = repo.status().ok().and_then(|s| s.branch);
-                let head = repo.head_short().ok();
-                (branch.unwrap_or_else(|| "(detached)".to_owned()), head)
-            }
-            _ => ("no repository".to_owned(), None),
+    /// Append `event` to `root`'s repo timeline (creating it if new). When `root` is the active
+    /// repo and the dock cursor was already at now, re-pin it to the new newest, so recording keeps
+    /// you at HEAD unless you have scrubbed to a past state. Field-disjoint borrows keep this legal.
+    fn record_edit(&mut self, root: &std::path::Path, event: SessionEvent) {
+        let active = self.active_root.as_deref() == Some(root);
+        // Decide the pin from immutable borrows of disjoint fields, before mutating the map.
+        let was_at_now = active && {
+            let cursor = self.timeline.selected();
+            self.timelines
+                .get(root)
+                .is_none_or(|rt| rt.timeline.newest().is_none_or(|n| cursor == n))
         };
-        let mut event = SessionEvent::new(
-            Actor::System,
-            self.elapsed_label(),
-            "Session started",
-            detail,
-        );
-        if let Some(sha) = restore {
-            event = event.restoring(sha);
+        let rt = self.timelines.entry(root.to_path_buf()).or_default();
+        rt.timeline.record(event);
+        let len = rt.timeline.len();
+        if active {
+            self.timeline.set_duration(self.session_start.elapsed());
+            if was_at_now {
+                self.timeline.snap_to_newest(len);
+            }
         }
-        self.timeline.record(self.session_start.elapsed(), event);
     }
 
-    /// Record a timeline event now, stamping it with the session-relative elapsed time.
+    /// Record a git-action event (commit / stage / …) into the *active* repo's timeline, stamped
+    /// with the session-relative elapsed time. A no-op outside a repo.
     fn record_event(
         &mut self,
         actor: Actor,
@@ -2252,11 +2369,66 @@ impl App {
         detail: impl Into<String>,
         restore: Option<String>,
     ) {
+        let Some(root) = self.active_root.clone() else {
+            return;
+        };
         let mut event = SessionEvent::new(actor, self.elapsed_label(), title, detail);
         if let Some(sha) = restore {
             event = event.restoring(sha);
         }
-        self.timeline.record(self.session_start.elapsed(), event);
+        self.record_edit(&root, event);
+    }
+
+    /// Record `root`'s one-time "session started" anchor (restorable to its then-HEAD) and seed its
+    /// dirty baseline, so pre-session changes aren't mistaken for edits (design §10.5).
+    fn seed_repo(
+        &mut self,
+        root: &std::path::Path,
+        branch: Option<String>,
+        head: Option<String>,
+        tracked: HashSet<String>,
+        dirty: Option<(u32, u32)>,
+    ) {
+        let detail = branch.clone().unwrap_or_else(|| "no repository".to_owned());
+        let mut event = SessionEvent::new(
+            Actor::System,
+            self.elapsed_label(),
+            "Session started",
+            detail,
+        );
+        if let Some(sha) = head {
+            event = event.restoring(sha);
+        }
+        self.record_edit(root, event);
+        let rt = self.timelines.entry(root.to_path_buf()).or_default();
+        rt.started = true;
+        rt.tracked_dirty = tracked;
+        rt.dirty = dirty;
+        rt.branch = branch;
+    }
+
+    /// Synchronously seed the active repo if it has not been (so opening the timeline shows its
+    /// anchor before the first background poll for that repo lands). Reads the repo once.
+    fn ensure_active_seeded(&mut self) {
+        let Some(root) = self.active_root.clone() else {
+            return;
+        };
+        if self.timelines.get(&root).is_some_and(|rt| rt.started) {
+            return;
+        }
+        let (branch, head, tracked, dirty) = match Repo::discover(&root) {
+            Ok(Some(repo)) => {
+                let status = repo.status().ok();
+                let branch = status.as_ref().and_then(|s| s.branch.clone());
+                let (tracked, dirty) = status.map_or_else(
+                    || (HashSet::new(), None),
+                    |s| (dirty_paths(&s), dirty_totals(&s)),
+                );
+                (branch, repo.head_short().ok(), tracked, dirty)
+            }
+            _ => (None, None, HashSet::new(), None),
+        };
+        self.seed_repo(&root, branch, head, tracked, dirty);
     }
 
     /// A short session-relative time label (`M:SS` into the session) for a recorded event.
@@ -2265,16 +2437,87 @@ impl App {
         format!("{}:{:02}", secs / 60, secs % 60)
     }
 
-    /// Reconcile the shadow worktree to the timeline's current selection: at now, discard
-    /// any worktree; on a past state, ensure a shadow worktree is checked out to its commit
-    /// (Hard rule 3 - never touches HEAD/refs). A git failure is logged and treated as
+    /// Open the dock over the active repo's log (borrow contained to disjoint fields).
+    fn timeline_open(&mut self, branch: Option<String>) {
+        let log = active_log(
+            self.active_root.as_deref(),
+            &self.timelines,
+            &self.empty_timeline,
+        );
+        self.timeline.open(log, branch);
+    }
+
+    /// Reset the dock cursor to the active repo's now, adopting its branch for the summary.
+    fn timeline_reset_to_now(&mut self, branch: Option<String>) {
+        let log = active_log(
+            self.active_root.as_deref(),
+            &self.timelines,
+            &self.empty_timeline,
+        );
+        self.timeline.reset_to_now(log, branch);
+    }
+
+    /// Move the timeline selection by `delta` over the active repo's log. Returns whether it moved.
+    fn timeline_move_selection(&mut self, delta: i32) -> bool {
+        let log = active_log(
+            self.active_root.as_deref(),
+            &self.timelines,
+            &self.empty_timeline,
+        );
+        self.timeline.move_selection(log, delta)
+    }
+
+    /// Snap the timeline selection to now over the active repo's log. Returns whether it moved.
+    fn timeline_select_now(&mut self) -> bool {
+        let log = active_log(
+            self.active_root.as_deref(),
+            &self.timelines,
+            &self.empty_timeline,
+        );
+        self.timeline.select_now(log)
+    }
+
+    /// Whether the timeline selection is at now (HEAD) over the active repo's log.
+    fn timeline_at_now(&self) -> bool {
+        let log = active_log(
+            self.active_root.as_deref(),
+            &self.timelines,
+            &self.empty_timeline,
+        );
+        self.timeline.selection_is_now(log)
+    }
+
+    /// The restorable commit for the current timeline selection over the active repo's log.
+    fn timeline_restore(&self) -> Option<String> {
+        let log = active_log(
+            self.active_root.as_deref(),
+            &self.timelines,
+            &self.empty_timeline,
+        );
+        self.timeline.selected_restore(log)
+    }
+
+    /// Project the status-line branch + dirty from the active repo's last-known status - the single
+    /// source (F3), so the status line always describes the same repo as the shown cwd.
+    fn sync_active_status(&mut self) {
+        let rt = self
+            .active_root
+            .as_ref()
+            .and_then(|r| self.timelines.get(r));
+        self.status_dirty = rt.and_then(|t| t.dirty);
+        self.status_branch = rt.and_then(|t| t.branch.clone());
+    }
+
+    /// Reconcile the shadow worktree to the timeline's current selection **in the active repo**: at
+    /// now, discard any worktree; on a past state, ensure a shadow worktree is checked out to its
+    /// commit (Hard rule 3 - never touches HEAD/refs). A git failure is logged and treated as
     /// "stay at now" rather than left half-applied.
     fn reconcile_shadow(&mut self) {
-        if self.timeline.selection_is_now() {
+        if self.timeline_at_now() {
             self.discard_shadow();
             return;
         }
-        let Some(sha) = self.timeline.selected_restore() else {
+        let Some(sha) = self.timeline_restore() else {
             self.discard_shadow();
             return;
         };
@@ -2283,8 +2526,11 @@ impl App {
             return;
         }
         self.discard_shadow();
-        let start = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        match Repo::discover(&start) {
+        let Some(root) = self.active_root.clone() else {
+            tracing::warn!("cannot rewind: no active repository");
+            return;
+        };
+        match Repo::discover(&root) {
             Ok(Some(repo)) => match repo.shadow_checkout(&sha) {
                 Ok(worktree) => self.shadow = Some(worktree),
                 Err(err) => tracing::warn!(%err, %sha, "shadow checkout failed"),
@@ -2333,10 +2579,8 @@ impl App {
         match Repo::discover(&start) {
             Ok(Some(repo)) => match repo.status() {
                 Ok(status) => {
-                    // Refresh the status-line dirty indicator from the same status (§10.3).
-                    let added: u32 = status.files.iter().map(|f| f.added).sum();
-                    let removed: u32 = status.files.iter().map(|f| f.removed).sum();
-                    self.status_dirty = (added > 0 || removed > 0).then_some((added, removed));
+                    // The status-line dirty/branch are projected from the git-poll thread's per-repo
+                    // cache (`sync_active_status`), not written here - the dock owns only the dock.
                     self.git_dock.load(status);
                     self.git_repo = Some(repo);
                     self.load_selected_diff();
@@ -2555,7 +2799,7 @@ impl App {
             self.sync_layout();
             // A focus/close/zoom may have changed which pane is focused; follow its repo at once
             // (a differently-`cd`'d pane) instead of lagging the next poll.
-            self.rescope_dock_to_active();
+            self.rescope_active();
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
@@ -2741,7 +2985,7 @@ impl App {
             self.selecting = false;
             // Immediately follow the switched-to tab's repo from the cached cwds (no wait for the
             // next poll); the status-line cwd catches up on the next drain.
-            self.rescope_dock_to_active();
+            self.rescope_active();
             // The now-visible tab may have been sized for an earlier window; re-fit it.
             self.sync_layout();
             self.request_redraw();
@@ -3891,7 +4135,7 @@ impl App {
 
     /// Move the timeline selection by `delta` and reconcile the shadow worktree to it.
     fn timeline_step(&mut self, delta: i32) {
-        if self.timeline.move_selection(delta) {
+        if self.timeline_move_selection(delta) {
             self.reconcile_shadow();
         }
         self.request_redraw();
@@ -3899,7 +4143,7 @@ impl App {
 
     /// Snap the timeline selection back to now (HEAD), discarding any shadow worktree.
     fn timeline_return_to_now(&mut self) {
-        if self.timeline.select_now() {
+        if self.timeline_select_now() {
             self.reconcile_shadow();
         }
         self.request_redraw();
@@ -4481,23 +4725,6 @@ struct TimelineFrame {
     labels: Vec<skelly_render::ProseLabel>,
 }
 
-/// The current branch of the process-cwd repo (for the timeline summary), best-effort.
-fn current_branch() -> Option<String> {
-    let start = std::env::current_dir().ok()?;
-    Repo::discover(&start).ok().flatten()?.status().ok()?.branch
-}
-
-/// The working-tree diff size `(added, removed)` lines of the process-cwd repo, for the status
-/// line's dirty indicator (design §10.3 `●+2 −1`). `None` outside a repo or when there are no
-/// line changes (a clean tree, or only untracked files).
-fn repo_dirty() -> Option<(u32, u32)> {
-    let start = std::env::current_dir().ok()?;
-    let status = Repo::discover(&start).ok().flatten()?.status().ok()?;
-    let added: u32 = status.files.iter().map(|f| f.added).sum();
-    let removed: u32 = status.files.iter().map(|f| f.removed).sum();
-    (added > 0 || removed > 0).then_some((added, removed))
-}
-
 /// `path` with the home directory collapsed to `~` (for the status line), else the path
 /// as-is. Best-effort; falls back to the lossy string form.
 fn home_relative(path: &std::path::Path) -> String {
@@ -4825,10 +5052,9 @@ impl ApplicationHandler<Wakeup> for App {
         self.scale = window.scale_factor();
         self.measure.set_scale(scale32(self.scale));
         self.size = (size.width, size.height);
-        // Cache the status-line context (cwd · branch · shell) once at startup.
+        // Seed the status-line context (cwd · shell) for the first paint; branch/dirty come from
+        // the active repo's timeline projection once seeded (below).
         self.status_cwd = home_relative(&std::env::current_dir().unwrap_or_default());
-        self.status_branch = current_branch();
-        self.status_dirty = repo_dirty();
         self.status_shell = shell_name();
         let renderer = Renderer::new(
             window.clone(),
@@ -4847,10 +5073,16 @@ impl ApplicationHandler<Wakeup> for App {
             event_loop.exit();
             return;
         }
-        // Seed the session timeline with its "session started" anchor, so it is the first
-        // event even if the user commits before ever opening the timeline (guarded to once).
-        self.record_session_start();
-        // Start recording working-tree edits into the timeline (design §10.5).
+        // Seed the launch repo's timeline with its "session started" anchor (so it exists even if
+        // the user commits before opening the timeline) and project its branch/dirty to the status
+        // line. `rescope_active` later re-points active_root to the active tab's repo.
+        self.active_root = Repo::discover(&std::env::current_dir().unwrap_or_default())
+            .ok()
+            .flatten()
+            .map(|r| r.root().to_path_buf());
+        self.ensure_active_seeded();
+        self.sync_active_status();
+        // Start recording working-tree edits into every tab's repo timeline (design §10.5).
         self.start_git_poll();
         // Publish the initial panes' pids and start the off-thread cwd poll (status line + titles).
         self.refresh_poll_pids();

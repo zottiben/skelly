@@ -68,6 +68,21 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Session timeline + status branch/dirty are per-repo, following the active tab
+  (resolves the deferred 10-12 follow-ups).** Event logs are keyed by **repo root**, not tab: an
+  edit is a working-tree change, so tabs sharing a repo share one history and a tab that `cd`s
+  across a repo boundary shows the other repo's timeline. The background git poll now watches
+  **every open tab's repo** (all pane cwds, off the UI thread) and records edits into each repo's
+  log (**decision: all tabs record always**, not just the active one). The dock renders the active
+  repo's log; rewind scopes to the active repo and **returns to now on a tab switch / cross-repo
+  `cd`** (**decision: one shadow worktree at a time**, HEAD/refs still untouched - Hard rule 3).
+  Status-line branch + dirty are a single projection of the active repo's polled status
+  (`sync_active_status`), ending the three-writer conflict, so they always match the shown cwd. The
+  per-repo "session started" anchor is lazy (a repo first seen mid-session anchors at its then-HEAD,
+  labelled at first-sight elapsed). `Terminal::shell_pid()` now returns `None` after the shell
+  exits, so a reused pid never mis-scopes a pane's cwd. _Open follow-up: per-tab **persistent**
+  rewind (leaving several tabs rewound at once) is intentionally out - switching returns to now._
+
 - 2026-07-13 - **Per-pane cwd via OS process introspection (resolves the tab-title / status-line
   cwd blocker); GUI-launch shell fixes; empty-state fades on first keystroke.** Each pane's live
   working directory is now read from its shell process on a 600ms throttle (`/proc/<pid>/cwd` on

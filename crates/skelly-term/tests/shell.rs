@@ -46,6 +46,29 @@ fn shell_is_spawned_as_a_login_shell() {
 }
 
 #[test]
+fn shell_pid_goes_none_after_exit() {
+    // A live shell exposes its pid (for reading the pane's cwd); once it exits, the pid is stale
+    // and the OS may reuse it, so `shell_pid` must report `None` rather than a reusable pid.
+    let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
+    assert!(term.shell_pid().is_some(), "a live shell exposes its pid");
+
+    term.write(b"exit 0\n");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if term.exit_status().is_some() {
+            assert_eq!(
+                term.shell_pid(),
+                None,
+                "an exited shell reports no pid (it is stale / reusable)"
+            );
+            return;
+        }
+        assert!(Instant::now() < deadline, "shell exit was never reported");
+        sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
 fn shell_exit_is_reported() {
     let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
     // A live shell has not exited yet.

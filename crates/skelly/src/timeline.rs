@@ -35,40 +35,38 @@ const FOOT_H: f32 = 60.0;
 /// Gap (logical px) between an event's title and the badge / actor tag on its right.
 const RIGHT_GAP: f32 = 10.0;
 
-/// The session-timeline dock's state: the open flag, the event log, and the selected
-/// event. The binary records events into [`Self::record`] and drives the rewind from the
-/// selection.
+/// The session-timeline dock's **view state**: the open flag, the scrub cursor, and the summary
+/// context. The event log itself lives on the binary (per repo, keyed by repo root), so every
+/// query/view method takes the active repo's `&Timeline`; there is only ever one visible dock, so
+/// a single cursor suffices (it resets to now when the active repo changes).
 pub(crate) struct TimelineDock {
     /// Whether the dock is showing (captures navigation keys while open).
     pub(crate) open: bool,
-    /// The append-only session event log.
-    timeline: Timeline,
-    /// Index of the selected event (the cursor; defaults to the newest = now).
+    /// Index of the selected event in the active repo's timeline (the cursor; newest = now).
     selected: usize,
     /// The current branch, for the session-summary line (set when the dock opens).
     branch: Option<String>,
-    /// The session's total elapsed at the last event, for the summary duration.
+    /// The active repo timeline's total elapsed at its last event, for the summary duration.
     duration: Duration,
 }
 
 impl TimelineDock {
-    /// A closed, empty dock.
+    /// A closed dock.
     pub(crate) fn new() -> Self {
         Self {
             open: false,
-            timeline: Timeline::new(),
             selected: 0,
             branch: None,
             duration: Duration::ZERO,
         }
     }
 
-    /// Open the dock, snapping the selection to the newest event (now) and recording the
-    /// branch for the summary line.
-    pub(crate) fn open(&mut self, branch: Option<String>) {
+    /// Open the dock over `timeline` (the active repo's log), snapping the selection to now and
+    /// recording the branch for the summary line.
+    pub(crate) fn open(&mut self, timeline: &Timeline, branch: Option<String>) {
         self.open = true;
         self.branch = branch;
-        self.selected = self.timeline.newest().unwrap_or(0);
+        self.selected = timeline.newest().unwrap_or(0);
     }
 
     /// Close the dock.
@@ -76,21 +74,33 @@ impl TimelineDock {
         self.open = false;
     }
 
-    /// Record an event into the session log at `elapsed` into the session, keeping the
-    /// selection pinned to the newest event unless the user has scrubbed to the past.
-    pub(crate) fn record(&mut self, elapsed: Duration, event: SessionEvent) {
-        self.duration = elapsed;
-        let was_at_newest = self.timeline.newest().is_none_or(|n| self.selected == n);
-        self.timeline.record(event);
-        if was_at_newest {
-            self.selected = self.timeline.newest().unwrap_or(0);
-        }
+    /// The scrub cursor index (the binary reads it to re-pin after appending an event).
+    pub(crate) fn selected(&self) -> usize {
+        self.selected
     }
 
-    /// Move the selection by `delta`, clamped to the event list. Returns `true` when it
-    /// actually moved (so the binary reconciles the shadow worktree to the new selection).
-    pub(crate) fn move_selection(&mut self, delta: i32) -> bool {
-        let count = self.timeline.len();
+    /// Set the summary duration (the active repo timeline's elapsed at its last event).
+    pub(crate) fn set_duration(&mut self, duration: Duration) {
+        self.duration = duration;
+    }
+
+    /// Pin the cursor to the newest event of a `len`-event timeline (used after an append when the
+    /// cursor was already at now). No-op keeps it where the user scrubbed to.
+    pub(crate) fn snap_to_newest(&mut self, len: usize) {
+        self.selected = len.saturating_sub(1);
+    }
+
+    /// Reset the dock to now for a newly-active repo's `timeline` (snap to its newest, adopt its
+    /// branch for the summary). Called when the active repo changes so each repo shows at HEAD.
+    pub(crate) fn reset_to_now(&mut self, timeline: &Timeline, branch: Option<String>) {
+        self.branch = branch;
+        self.selected = timeline.newest().unwrap_or(0);
+    }
+
+    /// Move the selection by `delta` within `timeline`, clamped. Returns `true` when it actually
+    /// moved (so the binary reconciles the shadow worktree to the new selection).
+    pub(crate) fn move_selection(&mut self, timeline: &Timeline, delta: i32) -> bool {
+        let count = timeline.len();
         if count == 0 {
             return false;
         }
@@ -104,9 +114,9 @@ impl TimelineDock {
         true
     }
 
-    /// Select the newest event (return to now). Returns `true` if the selection moved.
-    pub(crate) fn select_now(&mut self) -> bool {
-        let newest = self.timeline.newest().unwrap_or(0);
+    /// Select the newest event of `timeline` (return to now). Returns `true` if it moved.
+    pub(crate) fn select_now(&mut self, timeline: &Timeline) -> bool {
+        let newest = timeline.newest().unwrap_or(0);
         if newest == self.selected {
             return false;
         }
@@ -114,19 +124,17 @@ impl TimelineDock {
         true
     }
 
-    /// The restorable commit for the current selection (the event's own SHA, or the nearest
-    /// earlier commit's - see [`Timeline::effective_restore`]). `None` when nothing at or
+    /// The restorable commit for the current selection in `timeline` (the event's own SHA, or the
+    /// nearest earlier commit's - see [`Timeline::effective_restore`]). `None` when nothing at or
     /// before the selection is restorable.
-    pub(crate) fn selected_restore(&self) -> Option<String> {
-        self.timeline
-            .effective_restore(self.selected)
-            .map(str::to_owned)
+    pub(crate) fn selected_restore(&self, timeline: &Timeline) -> Option<String> {
+        timeline.effective_restore(self.selected).map(str::to_owned)
     }
 
-    /// Whether the current selection is "now" (the newest restorable state == HEAD), so the
-    /// binary discards any shadow worktree rather than checking HEAD out again.
-    pub(crate) fn selection_is_now(&self) -> bool {
-        self.timeline.is_now(self.selected)
+    /// Whether the current selection in `timeline` is "now" (the newest restorable state == HEAD),
+    /// so the binary discards any shadow worktree rather than checking HEAD out again.
+    pub(crate) fn selection_is_now(&self, timeline: &Timeline) -> bool {
+        timeline.is_now(self.selected)
     }
 
     /// Build the dock's proportional display list within `panel` (physical px) at DPI
@@ -135,6 +143,7 @@ impl TimelineDock {
     /// one barred), and the foot band (legend + session summary).
     pub(crate) fn build(
         &self,
+        timeline: &Timeline,
         panel: PxRect,
         scale: f32,
         theme: &Theme,
@@ -145,7 +154,7 @@ impl TimelineDock {
         let cx = panel.x + PAD_X * scale;
         let cr = panel.x + panel.w - PAD_X * scale;
 
-        if self.timeline.is_empty() {
+        if timeline.is_empty() {
             push_centered(
                 &mut labels,
                 measure,
@@ -162,7 +171,7 @@ impl TimelineDock {
 
         let mut y = panel.y + PAD_TOP * scale;
         // Status banner.
-        let (banner, banner_fg) = self.status_banner(theme);
+        let (banner, banner_fg) = self.status_banner(timeline, theme);
         push_row(
             &mut labels,
             measure,
@@ -191,7 +200,7 @@ impl TimelineDock {
         push_row(
             &mut labels,
             measure,
-            &format!("TIMELINE - {} EVENTS", self.timeline.len()),
+            &format!("TIMELINE - {} EVENTS", timeline.len()),
             FontRole::Micro,
             theme.fg_muted,
             cx,
@@ -212,8 +221,25 @@ impl TimelineDock {
         );
         y += LABEL_H * scale;
 
-        self.push_events(&mut quads, &mut labels, panel, y, scale, theme, measure);
-        self.push_foot(&mut quads, &mut labels, panel, scale, theme, measure);
+        self.push_events(
+            timeline,
+            &mut quads,
+            &mut labels,
+            panel,
+            y,
+            scale,
+            theme,
+            measure,
+        );
+        self.push_foot(
+            timeline,
+            &mut quads,
+            &mut labels,
+            panel,
+            scale,
+            theme,
+            measure,
+        );
         Paint { quads, labels }
     }
 
@@ -229,6 +255,7 @@ impl TimelineDock {
     )]
     fn push_events(
         &self,
+        timeline: &Timeline,
         quads: &mut Vec<ChromeQuad>,
         labels: &mut Vec<ProseLabel>,
         panel: PxRect,
@@ -245,9 +272,9 @@ impl TimelineDock {
         if visible == 0 {
             return;
         }
-        let offset = scroll_window(self.timeline.len(), visible, self.selected);
-        let newest = self.timeline.newest();
-        let viewing_past = !self.selection_is_now();
+        let offset = scroll_window(timeline.len(), visible, self.selected);
+        let newest = timeline.newest();
+        let viewing_past = !self.selection_is_now(timeline);
         let ctx = EventCtx {
             panel,
             cx,
@@ -260,7 +287,7 @@ impl TimelineDock {
 
         for slot in 0..visible {
             let index = offset + slot;
-            let Some(event) = self.timeline.events().get(index) else {
+            let Some(event) = timeline.events().get(index) else {
                 break;
             };
             let is_selected = index == self.selected;
@@ -300,17 +327,16 @@ impl TimelineDock {
     }
 
     /// The status banner text + color: at HEAD (now) or viewing a past state.
-    fn status_banner(&self, theme: &Theme) -> (String, Srgb) {
-        if self.selection_is_now() {
+    fn status_banner(&self, timeline: &Timeline, theme: &Theme) -> (String, Srgb) {
+        if self.selection_is_now(timeline) {
             ("At HEAD - now".to_owned(), theme.diff_hunk)
         } else {
-            let time = self
-                .timeline
+            let time = timeline
                 .events()
                 .get(self.selected)
                 .map_or("", |e| e.time.as_str());
             let short: String = self
-                .selected_restore()
+                .selected_restore(timeline)
                 .unwrap_or_default()
                 .chars()
                 .take(7)
@@ -321,8 +347,10 @@ impl TimelineDock {
 
     /// The foot band: a `border` divider, the actor legend (each count in its actor color),
     /// and the session summary.
+    #[allow(clippy::too_many_arguments, reason = "one focused foot-band builder")]
     fn push_foot(
         &self,
+        timeline: &Timeline,
         quads: &mut Vec<ChromeQuad>,
         labels: &mut Vec<ProseLabel>,
         panel: PxRect,
@@ -342,7 +370,7 @@ impl TimelineDock {
             theme.border,
         ));
         // Legend.
-        let (human, agent, system) = self.timeline.counts();
+        let (human, agent, system) = timeline.counts();
         let mut lx = cx;
         let legend_y = foot_top + 8.0 * scale;
         for (actor, count) in [
@@ -370,7 +398,7 @@ impl TimelineDock {
         let summary = format!(
             "Session - {} - {} events - {branch}",
             fmt_duration(self.duration),
-            self.timeline.len()
+            timeline.len()
         );
         push_row(
             labels,
@@ -617,8 +645,7 @@ fn scroll_window(len: usize, visible: usize, anchor: usize) -> usize {
 mod tests {
     use super::TimelineDock;
     use skelly_render::{PxRect, TextMeasure, Theme};
-    use skelly_session::{Actor, SessionEvent};
-    use std::time::Duration;
+    use skelly_session::{Actor, SessionEvent, Timeline};
 
     /// A representative dock panel (the 420px right dock) at 2x DPI.
     fn panel() -> PxRect {
@@ -630,19 +657,20 @@ mod tests {
         }
     }
 
-    fn recorded() -> TimelineDock {
-        let mut dock = TimelineDock::new();
-        dock.record(
-            Duration::ZERO,
+    /// A dock pinned to now over a three-event timeline (the event log lives beside the dock now).
+    fn recorded() -> (TimelineDock, Timeline) {
+        let mut timeline = Timeline::new();
+        timeline.record(
             SessionEvent::new(Actor::System, "0:00", "Session started", "main")
                 .restoring("aaaaaaa"),
         );
-        dock.record(
-            Duration::from_secs(90),
-            SessionEvent::new(Actor::Human, "1:30", "Staged 2 files", "a.rs, b.rs"),
-        );
-        dock.record(
-            Duration::from_secs(200),
+        timeline.record(SessionEvent::new(
+            Actor::Human,
+            "1:30",
+            "Staged 2 files",
+            "a.rs, b.rs",
+        ));
+        timeline.record(
             SessionEvent::new(
                 Actor::Human,
                 "3:20",
@@ -651,14 +679,16 @@ mod tests {
             )
             .restoring("bbbbbbb"),
         );
-        dock
+        let mut dock = TimelineDock::new();
+        dock.snap_to_newest(timeline.len());
+        (dock, timeline)
     }
 
-    /// The joined text of every label the dock builds (for content assertions).
-    fn labels_text(dock: &TimelineDock) -> String {
+    /// The joined text of every label the dock builds over `timeline` (for content assertions).
+    fn labels_text(dock: &TimelineDock, timeline: &Timeline) -> String {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
-        dock.build(panel(), 2.0, &theme, &mut m)
+        dock.build(timeline, panel(), 2.0, &theme, &mut m)
             .labels
             .iter()
             .map(|l| l.text.clone())
@@ -668,29 +698,29 @@ mod tests {
 
     #[test]
     fn recording_keeps_the_selection_pinned_to_now() {
-        let dock = recorded();
+        let (dock, tl) = recorded();
         // Three events recorded; the selection tracks the newest, so we are at "now".
-        assert!(dock.selection_is_now());
-        assert_eq!(dock.selected_restore().as_deref(), Some("bbbbbbb"));
+        assert!(dock.selection_is_now(&tl));
+        assert_eq!(dock.selected_restore(&tl).as_deref(), Some("bbbbbbb"));
     }
 
     #[test]
     fn moving_up_rewinds_to_a_past_commit_and_now_returns() {
-        let mut dock = recorded();
-        dock.open(Some("main".to_owned()));
+        let (mut dock, tl) = recorded();
+        dock.open(&tl, Some("main".to_owned()));
         // Up to the stage event: inherits the launch HEAD, so it is a past state.
-        assert!(dock.move_selection(-1));
-        assert!(!dock.selection_is_now());
-        assert_eq!(dock.selected_restore().as_deref(), Some("aaaaaaa"));
+        assert!(dock.move_selection(&tl, -1));
+        assert!(!dock.selection_is_now(&tl));
+        assert_eq!(dock.selected_restore(&tl).as_deref(), Some("aaaaaaa"));
         // Back to now.
-        assert!(dock.select_now());
-        assert!(dock.selection_is_now());
+        assert!(dock.select_now(&tl));
+        assert!(dock.selection_is_now(&tl));
     }
 
     #[test]
     fn build_shows_the_events_status_banner_and_legend() {
-        let dock = recorded();
-        let text = labels_text(&dock);
+        let (dock, tl) = recorded();
+        let text = labels_text(&dock, &tl);
         assert!(text.contains("At HEAD - now"), "at-now banner");
         assert!(text.contains("TIMELINE - 3 EVENTS"));
         assert!(text.contains("Session started"));
@@ -701,12 +731,12 @@ mod tests {
 
     #[test]
     fn build_marks_the_selected_row_and_a_viewing_bar_when_rewound() {
-        let mut dock = recorded();
-        dock.open(Some("main".to_owned()));
-        dock.move_selection(-2); // to the oldest (session start), a past state
+        let (mut dock, tl) = recorded();
+        dock.open(&tl, Some("main".to_owned()));
+        dock.move_selection(&tl, -2); // to the oldest (session start), a past state
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
-        let paint = dock.build(panel(), 2.0, &theme, &mut m);
+        let paint = dock.build(&tl, panel(), 2.0, &theme, &mut m);
         // Rewound: a selected-row accent.subtle fill (opaque, pre-composited over bg.base) plus
         // a solid accent viewing bar.
         let selected_fill = theme.accent_subtle_on(theme.bg_base.to_srgb());
@@ -736,6 +766,7 @@ mod tests {
     #[test]
     fn empty_timeline_shows_a_placeholder() {
         let dock = TimelineDock::new();
-        assert!(labels_text(&dock).contains("No session events yet"));
+        let tl = Timeline::new();
+        assert!(labels_text(&dock, &tl).contains("No session events yet"));
     }
 }

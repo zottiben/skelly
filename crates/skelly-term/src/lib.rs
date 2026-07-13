@@ -367,8 +367,15 @@ impl Terminal {
     /// [`foreground_job_pid`](Self::foreground_job_pid) this is valid even while the shell is
     /// idle at its prompt - the binary reads its working directory (which `cd` changes without
     /// changing the pid) for the live status-line cwd and cwd-based tab titles.
+    ///
+    /// Returns `None` once the shell has exited: the pid is then stale and the OS may reuse it for
+    /// an unrelated process, so reading *its* cwd would silently mis-scope the pane. Callers treat
+    /// `None` as "skip this pane", keeping its last known cwd.
     #[must_use]
     pub fn shell_pid(&self) -> Option<u32> {
+        if self.exit_status().is_some() {
+            return None;
+        }
         self.shell_pid
     }
 
