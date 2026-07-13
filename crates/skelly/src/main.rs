@@ -1616,7 +1616,7 @@ impl App {
     }
 
     /// Draw the dock's full-width toggle button (a `bg.surface` tile with an expand / collapse
-    /// glyph) into the dock's display list, seated in the header via [`dock_button_rect`].
+    /// glyph) into the dock's display list, seated in the header via [`Self::dock_button_rect`].
     fn push_dock_button(
         &mut self,
         quads: &mut Vec<skelly_render::ChromeQuad>,
