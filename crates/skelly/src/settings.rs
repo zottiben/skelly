@@ -301,6 +301,14 @@ static CATEGORIES: &[Category] = &[
                     set: |c, v| c.appearance.opacity = v as f32 / 100.0,
                 },
             },
+            Control {
+                label: "Show pane status line",
+                key: "appearance.show_status_line",
+                kind: Kind::Toggle {
+                    get: |c| c.appearance.show_status_line,
+                    set: |c, v| c.appearance.show_status_line = v,
+                },
+            },
         ],
     },
     Category {
@@ -408,6 +416,33 @@ static CATEGORIES: &[Category] = &[
                 },
             },
         ],
+    },
+    Category {
+        icon: '\u{276f}',
+        label: "Shell & env",
+        controls: &[Control {
+            label: "Shell",
+            key: "shell.program",
+            kind: Kind::Choice {
+                // Index 0 = the login shell (empty `program`); the rest set it explicitly.
+                options: &["Login shell", "zsh", "bash", "fish"],
+                get: |c| match c.shell.program.as_str() {
+                    "zsh" => 1,
+                    "bash" => 2,
+                    "fish" => 3,
+                    _ => 0,
+                },
+                set: |c, i| {
+                    let program = match i {
+                        1 => "zsh",
+                        2 => "bash",
+                        3 => "fish",
+                        _ => "",
+                    };
+                    program.clone_into(&mut c.shell.program);
+                },
+            },
+        }],
     },
     Category {
         icon: '@',

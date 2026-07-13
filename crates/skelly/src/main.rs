@@ -515,7 +515,12 @@ impl App {
             return;
         };
         let inset = self.pane_inset();
-        let status_h = statusline::HEIGHT * scale32(self.scale);
+        // Reserve the status-line strip only when it is shown (design §10.6 toggle).
+        let status_h = if self.config.appearance.show_status_line {
+            statusline::HEIGHT * scale32(self.scale)
+        } else {
+            0.0
+        };
         let viewport = self.viewport_rect();
         let proxy = self.proxy.clone();
         let shell = self.config.shell.program.clone();
@@ -684,9 +689,10 @@ impl App {
                     &self.theme,
                     &mut self.measure,
                 ));
-            } else if !empty_state {
+            } else if !empty_state && self.config.appearance.show_status_line {
                 // A live, in-use pane: seat its status line along the bottom (guide §08 anatomy
-                // #9). The pristine empty state (§10.2) shows only the mark + chips, no strip.
+                // #9), unless the user hid it (§10.6). The pristine empty state (§10.2) shows
+                // only the mark + chips, no strip.
                 let (q, l) = statusline::paint(
                     &statusline::Info {
                         cwd: &self.status_cwd,
@@ -1232,11 +1238,24 @@ impl App {
     fn apply_setting_change(&mut self, key: &str) {
         match key {
             "appearance.theme" => self.set_theme_live(),
+            // A live font change: rebuild the renderer's cell metrics + re-fit the grids.
+            "appearance.font_size" | "appearance.line_height" => {
+                let (size, line) = (
+                    self.config.appearance.font_size,
+                    self.config.appearance.line_height,
+                );
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.set_font_size(size, line);
+                }
+                self.sync_layout();
+            }
             "sidebar.mode" => {
                 self.sidebar.set_mode(self.config.sidebar.mode);
                 self.sync_layout();
             }
-            "sidebar.width" => self.sync_layout(),
+            // Layout-affecting toggles: re-fit the grids. Hiding the status line reclaims its
+            // rows; the sidebar width shifts the pane viewport.
+            "appearance.show_status_line" | "sidebar.width" => self.sync_layout(),
             _ => {}
         }
         self.persist_config();

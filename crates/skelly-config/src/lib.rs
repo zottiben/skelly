@@ -100,6 +100,8 @@ pub struct Appearance {
     pub bg_blur: u8,
     /// Window opacity. Valid range 0.0..=1.0.
     pub opacity: f32,
+    /// Show the per-pane status line (design §08 #9 / §10.6 "Show pane status line").
+    pub show_status_line: bool,
 }
 
 /// Cursor shape for the focused pane.
@@ -232,6 +234,7 @@ impl Default for Appearance {
             bold_is_bright: true,
             bg_blur: 18,
             opacity: 0.98,
+            show_status_line: true,
         }
     }
 }
