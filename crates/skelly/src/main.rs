@@ -24,6 +24,7 @@ mod sidebar;
 mod statusline;
 mod timeline;
 mod toast;
+mod tooltip;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -69,6 +70,8 @@ const RESIZE_STEP: f32 = 0.04;
 const RAIL_WIDTH: f32 = 56.0;
 /// How long a transient toast stays up before it auto-dismisses (design §12).
 const TOAST_DURATION: Duration = Duration::from_secs(4);
+/// How long the pointer must rest on an icon-only element before its tooltip shows (design §09).
+const HOVER_DELAY: Duration = Duration::from_millis(450);
 /// Logical width (px) of the git diff dock - the guide's default (resizable 360-560 is a
 /// later slice, so it is fixed for now).
 const GIT_DOCK_WIDTH: f32 = 420.0;
@@ -377,6 +380,13 @@ struct App {
     toast: Option<Toast>,
     /// When the current toast disappears (only meaningful while `toast` is `Some`).
     toast_expires: Instant,
+    /// The icon-only element the pointer is resting on and when the hover began (design §09
+    /// tooltip): once the rest exceeds `HOVER_DELAY` a tooltip with this label shows. `None` when
+    /// the pointer is not over a tooltip-able element.
+    hover_tip: Option<(String, Instant)>,
+    /// Whether the hover tooltip has crossed its delay and is currently drawn (a one-shot latch so
+    /// the reveal repaints exactly once, not every idle wake).
+    tooltip_visible: bool,
     /// The command palette's open / close animation (design §03 motion), live only while it
     /// plays. While any animation is set the event loop polls + redraws each frame; it clears
     /// itself when done (finalizing the close), returning the loop to its idle `Wait`.
@@ -460,6 +470,8 @@ impl App {
             context_menu: None,
             toast: None,
             toast_expires: Instant::now(),
+            hover_tip: None,
+            tooltip_visible: false,
             palette_anim: None,
             confirm_anim: None,
         }
@@ -1030,6 +1042,11 @@ impl App {
             .is_some()
             .then(|| self.build_toast_frame())
             .flatten();
+        // A hover tooltip (design §09) reuses the overlay card at the very lowest priority.
+        let tooltip = self
+            .tooltip_visible
+            .then(|| self.build_tooltip_frame())
+            .flatten();
         let show_overlay = onboarding.is_none() && cheatsheet.is_none();
         let overlay = (show_overlay && self.palette.open).then(|| self.build_palette_frame());
         // The confirm modal reuses the overlay pass; it never coexists with the palette.
@@ -1082,7 +1099,8 @@ impl App {
                 })
                 .or_else(|| overlay.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
                 .or_else(|| confirm.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
-                .or_else(|| toast.as_ref().map(|f| (f.panel, &f.quads, &f.labels)));
+                .or_else(|| toast.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
+                .or_else(|| tooltip.as_ref().map(|f| (f.panel, &f.quads, &f.labels)));
             match overlay_frame {
                 Some((panel, quads, labels)) => renderer.set_overlay(Some(&OverlayView {
                     panel,
@@ -2234,6 +2252,55 @@ impl App {
         self.toast = Some(Toast::new(message, kind));
         self.toast_expires = Instant::now() + TOAST_DURATION;
         self.request_redraw();
+    }
+
+    /// The tooltip label for the icon-only element under the pointer (design §09), or `None` when
+    /// the pointer is not over one (or over a tab whose title is already visible in the panel).
+    fn tooltip_label_at_pointer(&self) -> Option<String> {
+        let label = match self.sidebar_hit()? {
+            sidebar::Hit::Util(action) => match action {
+                sidebar::UtilAction::Settings => "Settings  \u{2318},",
+                sidebar::UtilAction::Theme => "Toggle theme",
+                sidebar::UtilAction::Timeline => "Session timeline  \u{21e7}\u{2318}H",
+                sidebar::UtilAction::Git => "Git diff  \u{21e7}\u{2318}G",
+            }
+            .to_owned(),
+            sidebar::Hit::CommandInput => "Search or run  \u{2318}K".to_owned(),
+            sidebar::Hit::AddWorkspace => "New workspace".to_owned(),
+            sidebar::Hit::Workspace(i) => self.workspaces.get(i).map(|w| w.name.clone())?,
+            // Tabs only need a tooltip when their title isn't already shown: the slim rail (just a
+            // number) or a pinned icon tile.
+            sidebar::Hit::Tab(i)
+                if self.sidebar_rail_now() || self.tabs.get(i).is_some_and(|t| t.pinned) =>
+            {
+                let tab = self.tabs.get(i)?;
+                tab.custom_title
+                    .clone()
+                    .or_else(|| tab.job_name.clone())
+                    .unwrap_or_else(|| format!("Tab {}", i + 1))
+            }
+            _ => return None,
+        };
+        Some(label)
+    }
+
+    /// Lay out the hover tooltip (design §09) near the pointer once it has crossed its delay, or
+    /// `None` while still within the delay / not hovering an element.
+    fn build_tooltip_frame(&mut self) -> Option<OnboardingFrame> {
+        if !self.tooltip_visible {
+            return None;
+        }
+        let label = self.hover_tip.as_ref()?.0.clone();
+        let scale = scale32(self.scale);
+        let surface = (dim_f32(self.size.0), dim_f32(self.size.1));
+        let size = tooltip::natural_size(&label, scale, &mut self.measure);
+        let panel = tooltip::place(point_f32(self.pointer), size, surface, scale);
+        let (quads, labels) = tooltip::build(&label, panel, scale, &self.theme, &mut self.measure);
+        Some(OnboardingFrame {
+            panel,
+            quads,
+            labels,
+        })
     }
 
     /// Lay out the current toast (design §12) as a bottom-anchored overlay card, or `None`.
@@ -3467,6 +3534,22 @@ impl App {
                 self.request_redraw();
             }
         }
+        // Hover tooltips (design §09): track the icon-only element under the pointer + when the
+        // hover began; the tooltip reveals after `HOVER_DELAY` (in `about_to_wait`). Moving to a
+        // different element (or off) restarts the timer and hides any shown tip.
+        let label = self.tooltip_label_at_pointer();
+        let changed = match (&self.hover_tip, &label) {
+            (Some((cur, _)), Some(new)) => cur != new,
+            (None, None) => false,
+            _ => true,
+        };
+        if changed {
+            if self.tooltip_visible {
+                self.request_redraw(); // repaint to remove the old tooltip
+            }
+            self.tooltip_visible = false;
+            self.hover_tip = label.map(|l| (l, Instant::now()));
+        }
         if !self.selecting {
             return;
         }
@@ -4038,16 +4121,32 @@ impl ApplicationHandler<Wakeup> for App {
             self.toast = None;
             self.request_redraw();
         }
+        // Reveal a hover tooltip once its delay elapses (design §09) - a one-shot repaint.
+        if let Some((_, since)) = &self.hover_tip {
+            if !self.tooltip_visible && now >= *since + HOVER_DELAY {
+                self.tooltip_visible = true;
+                self.request_redraw();
+            }
+        }
         // While any animation is live, poll and repaint each frame so it advances; otherwise idle
-        // in `Wait` until the next real event (shell output, input, resize) - or, when a toast is
-        // up, sleep only until its deadline so the loop wakes to dismiss it.
+        // in `Wait` until the next real event (shell output, input, resize) - or sleep only until
+        // the earliest pending deadline (a toast's expiry, or a tooltip's reveal) so the loop
+        // wakes exactly then.
         if self.animating(now) {
             event_loop.set_control_flow(ControlFlow::Poll);
             self.request_redraw();
-        } else if self.toast.is_some() {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(self.toast_expires));
-        } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+        let mut deadline: Option<Instant> = self.toast.is_some().then_some(self.toast_expires);
+        if let Some((_, since)) = &self.hover_tip {
+            if !self.tooltip_visible {
+                let reveal = *since + HOVER_DELAY;
+                deadline = Some(deadline.map_or(reveal, |d| d.min(reveal)));
+            }
+        }
+        match deadline {
+            Some(d) => event_loop.set_control_flow(ControlFlow::WaitUntil(d)),
+            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
     }
 }

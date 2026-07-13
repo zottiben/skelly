@@ -68,6 +68,15 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-13 - **Hover tooltips (§09 primitive).** The guide's tooltip primitive is built and
+  applied to the icon-only chrome, where a label isn't otherwise visible: the utility-bar icons
+  (⚙ Settings ⌘, / ◐ Toggle theme / ⟲ Session timeline ⇧⌘H / ⑂ Git diff ⇧⌘G), the command well
+  (Search or run ⌘K), the workspace chips (their name / New workspace), the slim rail's numbered
+  tabs, and pinned icon tiles (the tab title). A tooltip reveals after a 450ms hover rest (the
+  loop sleeps to the reveal via `WaitUntil`) and hides the moment the pointer moves off; it reuses
+  the overlay card at the lowest priority and never captures input. Full-panel list tabs already
+  show their titles, so they get no tooltip. Decided: tooltips attach to the obviously-icon-only
+  affordances (not a guess - completing the defined primitive where a name is otherwise hidden).
 - 2026-07-13 - **Sidebar drag-resize + snap-to-rail (§12 "Sidebar collapsed").** The full sidebar
   panel's right edge is now draggable (a 5px grab zone + `EwResize` cursor, mirroring the dock
   resize), applying the guide's snap thresholds live: dragging to >=180 logical keeps the full
