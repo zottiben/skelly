@@ -68,6 +68,13 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-14 - **Standard terminal cursor shortcuts take precedence over horizontal pane-arrow
+  navigation.** `⌥←/→` move by word (Meta-B/F) and `⌘←/→` move to start/end of line (Ctrl-A/E),
+  matching native terminal conventions without shell-specific setup. This supersedes the
+  generated guide's plain `⌥arrows` pane-focus binding for left/right; pane focus remains on
+  `⌥H/J/K/L`, the configurable tmux-style leader, the command palette, and `⌥↑/↓`. The modified
+  pane arrows (`⌃⌥arrows` resize and `⇧⌥arrows` swap) are unchanged.
+
 - 2026-07-13 - **Session timeline + status branch/dirty are per-repo, following the active tab
   (resolves the deferred 10-12 follow-ups).** Event logs are keyed by **repo root**, not tab: an
   edit is a working-tree change, so tabs sharing a repo share one history and a tab that `cd`s

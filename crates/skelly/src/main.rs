@@ -4397,7 +4397,10 @@ impl App {
             }
             return;
         }
-        if let Some(bytes) = key_to_bytes(key_event, self.modifiers) {
+        let application_cursor = self
+            .focused_term_ref()
+            .is_some_and(Terminal::application_cursor_mode);
+        if let Some(bytes) = key_to_bytes(key_event, self.modifiers, application_cursor) {
             if let Some(term) = self.focused_term() {
                 // Typing jumps back to the live prompt.
                 term.scroll_to_bottom();
@@ -5393,6 +5396,7 @@ fn leader_chord(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
 
 fn pane_action(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
     // `⌥` chords only; `⌥⌘arrows` are the global session (timeline) shortcuts, handled first.
+    // Plain ⌥←/→ are intentionally left to the terminal for word-wise cursor movement.
     if !mods.alt_key() || mods.super_key() {
         return None;
     }
@@ -5405,8 +5409,8 @@ fn pane_action(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
         KeyCode::KeyZ => PaneAction::Zoom,
         KeyCode::KeyW => PaneAction::Close,
         KeyCode::Space => PaneAction::CycleLayout,
-        // Arrow keys are the guide's §11 primary pane nav: ⌥arrows move focus, ⌃⌥arrows resize,
-        // ⌥⇧arrows swap (`hjkl` remain as the vim-style aliases below / the leader chords).
+        // Modified arrows retain pane resize/swap. Plain horizontal Option-arrows belong to the
+        // terminal's standard word-wise cursor shortcuts; HJKL (or the leader) moves pane focus.
         KeyCode::ArrowLeft if ctrl => PaneAction::Resize(Dir::Left),
         KeyCode::ArrowDown if ctrl => PaneAction::Resize(Dir::Down),
         KeyCode::ArrowUp if ctrl => PaneAction::Resize(Dir::Up),
@@ -5415,16 +5419,16 @@ fn pane_action(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
         KeyCode::ArrowDown if shift => PaneAction::Swap(Dir::Down),
         KeyCode::ArrowUp if shift => PaneAction::Swap(Dir::Up),
         KeyCode::ArrowRight if shift => PaneAction::Swap(Dir::Right),
-        // `⇧hjkl` resize (the vim aliases, also the leader chords); plain `hjkl` and plain arrows
-        // both move focus.
+        // `⇧hjkl` resize (the vim aliases, also the leader chords); plain `hjkl` moves focus.
+        // Vertical Option-arrows remain focus aliases since word-wise movement is horizontal.
         KeyCode::KeyH if shift => PaneAction::Resize(Dir::Left),
         KeyCode::KeyJ if shift => PaneAction::Resize(Dir::Down),
         KeyCode::KeyK if shift => PaneAction::Resize(Dir::Up),
         KeyCode::KeyL if shift => PaneAction::Resize(Dir::Right),
-        KeyCode::ArrowLeft | KeyCode::KeyH => PaneAction::Focus(Dir::Left),
+        KeyCode::KeyH => PaneAction::Focus(Dir::Left),
         KeyCode::ArrowDown | KeyCode::KeyJ => PaneAction::Focus(Dir::Down),
         KeyCode::ArrowUp | KeyCode::KeyK => PaneAction::Focus(Dir::Up),
-        KeyCode::ArrowRight | KeyCode::KeyL => PaneAction::Focus(Dir::Right),
+        KeyCode::KeyL => PaneAction::Focus(Dir::Right),
         KeyCode::Digit1 => PaneAction::FocusIndex(0),
         KeyCode::Digit2 => PaneAction::FocusIndex(1),
         KeyCode::Digit3 => PaneAction::FocusIndex(2),
@@ -5663,22 +5667,32 @@ fn selection_text(sel: Selection, cells: &[Vec<TermCell>]) -> String {
 
 /// Translate a key press into the bytes a terminal expects, or `None` if it has no
 /// terminal representation. Cursor/edit keys carry an xterm modifier parameter so a program
-/// (vim, readline) can distinguish e.g. Shift+Arrow from a bare arrow.
-fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> {
+/// (vim, readline) can distinguish e.g. Shift+Arrow from a bare arrow. Unmodified cursor keys
+/// honor the program's application-cursor mode, which shell line editors use for history.
+fn key_to_bytes(
+    event: &KeyEvent,
+    modifiers: ModifiersState,
+    application_cursor: bool,
+) -> Option<Vec<u8>> {
+    if let Key::Named(key) = event.logical_key {
+        if let Some(bytes) = cursor_navigation_shortcut(key, modifiers) {
+            return Some(bytes);
+        }
+    }
     let m = xterm_modifier_code(modifiers);
-    let csi_final = |final_byte: u8| Some(csi_cursor(final_byte, m));
+    let cursor = |final_byte: u8| Some(cursor_key(final_byte, m, application_cursor));
     let csi_tilde = |num: u8| Some(csi_edit(num, m));
     match &event.logical_key {
         Key::Named(NamedKey::Enter) => Some(vec![b'\r']),
         Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
         Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
         Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
-        Key::Named(NamedKey::ArrowUp) => csi_final(b'A'),
-        Key::Named(NamedKey::ArrowDown) => csi_final(b'B'),
-        Key::Named(NamedKey::ArrowRight) => csi_final(b'C'),
-        Key::Named(NamedKey::ArrowLeft) => csi_final(b'D'),
-        Key::Named(NamedKey::Home) => csi_final(b'H'),
-        Key::Named(NamedKey::End) => csi_final(b'F'),
+        Key::Named(NamedKey::ArrowUp) => cursor(b'A'),
+        Key::Named(NamedKey::ArrowDown) => cursor(b'B'),
+        Key::Named(NamedKey::ArrowRight) => cursor(b'C'),
+        Key::Named(NamedKey::ArrowLeft) => cursor(b'D'),
+        Key::Named(NamedKey::Home) => cursor(b'H'),
+        Key::Named(NamedKey::End) => cursor(b'F'),
         Key::Named(NamedKey::PageUp) => csi_tilde(5),
         Key::Named(NamedKey::PageDown) => csi_tilde(6),
         Key::Named(NamedKey::Insert) => csi_tilde(2),
@@ -5696,6 +5710,19 @@ fn key_to_bytes(event: &KeyEvent, modifiers: ModifiersState) -> Option<Vec<u8>> 
     }
 }
 
+/// Platform-standard command-line cursor shortcuts. Shell line editors universally bind
+/// Meta-B/F to previous/next word and Ctrl-A/E to start/end of line, so translating the macOS
+/// Option/Command gestures here works without shell-specific integration.
+fn cursor_navigation_shortcut(key: NamedKey, modifiers: ModifiersState) -> Option<Vec<u8>> {
+    match (key, modifiers) {
+        (NamedKey::ArrowLeft, ModifiersState::ALT) => Some(b"\x1bb".to_vec()),
+        (NamedKey::ArrowRight, ModifiersState::ALT) => Some(b"\x1bf".to_vec()),
+        (NamedKey::ArrowLeft, ModifiersState::SUPER) => Some(vec![0x01]),
+        (NamedKey::ArrowRight, ModifiersState::SUPER) => Some(vec![0x05]),
+        _ => None,
+    }
+}
+
 /// The xterm modifier parameter: `1 + Shift + (Alt<<1) + (Ctrl<<2)`. `Super`/`⌘` is an
 /// application modifier (the menu + Skelly's own chords), never encoded into a terminal sequence.
 fn xterm_modifier_code(modifiers: ModifiersState) -> u8 {
@@ -5704,14 +5731,16 @@ fn xterm_modifier_code(modifiers: ModifiersState) -> u8 {
         + (u8::from(modifiers.control_key()) << 2)
 }
 
-/// A cursor key CSI sequence (`ESC[<final>`). Unmodified uses the short form; a modifier `m > 1`
-/// inserts the `1;<m>` parameters (the xterm convention), so a program can tell Shift+Arrow etc.
-/// from a bare arrow.
-fn csi_cursor(final_byte: u8, m: u8) -> Vec<u8> {
-    if m == 1 {
-        vec![0x1b, b'[', final_byte]
-    } else {
+/// Encode an arrow/Home/End key. In application-cursor mode an unmodified key uses SS3
+/// (`ESC O <final>`), matching xterm/terminfo; modified keys always use xterm's parameterized CSI
+/// form so applications can distinguish their modifiers.
+fn cursor_key(final_byte: u8, m: u8, application_cursor: bool) -> Vec<u8> {
+    if m > 1 {
         format!("\x1b[1;{m}{}", char::from(final_byte)).into_bytes()
+    } else if application_cursor {
+        vec![0x1b, b'O', final_byte]
+    } else {
+        vec![0x1b, b'[', final_byte]
     }
 }
 
@@ -5833,28 +5862,61 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        csi_cursor, csi_edit, cycle_index, dim, editor_filetype, editor_mode, index_after_close,
-        leader_chord, order, overlay_panel_top, overlay_rise_offset, pane_action, pane_dims,
-        panic_message, parse_leader, pointer_cell_in, process_name, resolve_cell, selection_cells,
-        selection_text, tab_action, xterm_modifier_code, PaneAction, Selection, TabAction,
+        csi_edit, cursor_key, cursor_navigation_shortcut, cycle_index, dim, editor_filetype,
+        editor_mode, index_after_close, leader_chord, order, overlay_panel_top,
+        overlay_rise_offset, pane_action, pane_dims, panic_message, parse_leader, pointer_cell_in,
+        process_name, resolve_cell, selection_cells, selection_text, tab_action,
+        xterm_modifier_code, PaneAction, Selection, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
     use skelly_term::{CellAttrs, CellColor, CursorShape, TermCell};
-    use winit::keyboard::{KeyCode, ModifiersState};
+    use winit::keyboard::{KeyCode, ModifiersState, NamedKey};
+
+    #[test]
+    fn default_cursor_navigation_shortcuts_use_shell_line_editor_bindings() {
+        assert_eq!(
+            cursor_navigation_shortcut(NamedKey::ArrowLeft, ModifiersState::ALT),
+            Some(b"\x1bb".to_vec())
+        );
+        assert_eq!(
+            cursor_navigation_shortcut(NamedKey::ArrowRight, ModifiersState::ALT),
+            Some(b"\x1bf".to_vec())
+        );
+        assert_eq!(
+            cursor_navigation_shortcut(NamedKey::ArrowLeft, ModifiersState::SUPER),
+            Some(vec![0x01])
+        );
+        assert_eq!(
+            cursor_navigation_shortcut(NamedKey::ArrowRight, ModifiersState::SUPER),
+            Some(vec![0x05])
+        );
+        assert_eq!(
+            cursor_navigation_shortcut(
+                NamedKey::ArrowLeft,
+                ModifiersState::ALT | ModifiersState::SHIFT
+            ),
+            None,
+            "modified variants remain available to applications and pane bindings"
+        );
+    }
 
     #[test]
     fn modified_keys_encode_xterm_modifier_sequences() {
         // Bare arrow: the short form; Super is ignored (an app modifier).
         assert_eq!(xterm_modifier_code(ModifiersState::empty()), 1);
         assert_eq!(xterm_modifier_code(ModifiersState::SUPER), 1);
-        assert_eq!(csi_cursor(b'A', 1), b"\x1b[A");
-        // Shift+Up -> ESC[1;2A, so vim can distinguish it from a bare up-arrow.
+        assert_eq!(cursor_key(b'A', 1, false), b"\x1b[A");
+        // Application cursor mode uses the terminfo-compatible SS3 sequence. This is what shell
+        // line editors expect when cycling through command history with bare Up/Down.
+        assert_eq!(cursor_key(b'A', 1, true), b"\x1bOA");
+        assert_eq!(cursor_key(b'B', 1, true), b"\x1bOB");
+        // Shift+Up -> ESC[1;2A even in application mode, preserving the modifier.
         assert_eq!(xterm_modifier_code(ModifiersState::SHIFT), 2);
-        assert_eq!(csi_cursor(b'A', 2), b"\x1b[1;2A");
+        assert_eq!(cursor_key(b'A', 2, true), b"\x1b[1;2A");
         // Ctrl (code 5) and Ctrl+Shift (6) on a cursor key.
         assert_eq!(xterm_modifier_code(ModifiersState::CONTROL), 5);
-        assert_eq!(csi_cursor(b'D', 5), b"\x1b[1;5D");
+        assert_eq!(cursor_key(b'D', 5, false), b"\x1b[1;5D");
         assert_eq!(
             xterm_modifier_code(ModifiersState::CONTROL | ModifiersState::SHIFT),
             6
@@ -6249,14 +6311,17 @@ mod tests {
     }
 
     #[test]
-    fn alt_arrow_chords_are_the_primary_pane_nav() {
-        // The guide's §11 primary pane nav: ⌥arrows focus, ⌃⌥arrows resize, ⌥⇧arrows swap.
+    fn option_cursor_shortcuts_do_not_conflict_with_pane_nav() {
+        // Plain horizontal Option-arrows belong to terminal word navigation. Modified arrows still
+        // resize/swap panes, and vertical arrows remain convenient focus aliases.
         let alt = ModifiersState::ALT;
         let ctrl_alt = ModifiersState::ALT | ModifiersState::CONTROL;
         let alt_shift = ModifiersState::ALT | ModifiersState::SHIFT;
+        assert_eq!(pane_action(KeyCode::ArrowLeft, alt), None);
+        assert_eq!(pane_action(KeyCode::ArrowRight, alt), None);
         assert_eq!(
-            pane_action(KeyCode::ArrowLeft, alt),
-            Some(PaneAction::Focus(Dir::Left))
+            pane_action(KeyCode::ArrowDown, alt),
+            Some(PaneAction::Focus(Dir::Down))
         );
         assert_eq!(
             pane_action(KeyCode::ArrowRight, ctrl_alt),

@@ -27,7 +27,7 @@ use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
     Color as AnsiColor, CursorShape as VteCursorShape, CursorStyle as VteCursorStyle, Processor,
 };
@@ -474,6 +474,18 @@ impl Terminal {
             // Block / HollowBlock both read as a block cursor for mode purposes.
             VteCursorShape::Block | VteCursorShape::HollowBlock => CursorShape::Block,
         }
+    }
+
+    /// Whether the running program has enabled application cursor-key mode (`DECSET 1`).
+    ///
+    /// In this mode unmodified arrows use SS3 sequences (`ESC O A`, etc.) instead of CSI. Shell
+    /// line editors commonly enable it from terminfo, so honoring it is required for command
+    /// history navigation as well as for full-screen applications.
+    #[must_use]
+    pub fn application_cursor_mode(&self) -> bool {
+        self.term
+            .lock()
+            .is_ok_and(|term| term.mode().contains(TermMode::APP_CURSOR))
     }
 
     /// Whether the running program has requested a *blinking* cursor (via `DECSCUSR`'s blinking

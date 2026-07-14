@@ -40,7 +40,7 @@ const PANES: Group = Group(
     "Leader = \u{2303}A (tmux-style).",
     &[
         Bind("Split right / down", "\u{2325}| \u{2325}-"),
-        Bind("Move focus", "\u{2325}\u{2190}\u{2193}\u{2191}\u{2192}"),
+        Bind("Move focus", "\u{2325}H J K L"),
         Bind("Resize pane", "\u{2303}\u{2325} arrows"),
         Bind("Swap pane", "\u{2325}\u{21e7} arrows"),
         Bind("Zoom / unzoom", "\u{2325}Z"),
@@ -54,6 +54,8 @@ const TERMINAL: Group = Group(
     "",
     &[
         Bind("Copy / paste", "\u{2318}C / V"),
+        Bind("Move by word", "\u{2325}\u{2190} / \u{2192}"),
+        Bind("Start / end of line", "\u{2318}\u{2190} / \u{2192}"),
         Bind("Clear scrollback", "\u{2318}L"),
         Bind("Font larger / smaller", "\u{2318}= / -"),
         Bind("Reset font size", "\u{2318}0"),
