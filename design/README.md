@@ -36,8 +36,10 @@ with the decision + date.
   auto-forks or moves panes into it. Editable rewind / fork-on-edit is deferred._
 - [x] **Persist scope** - _Resolved 2026-07-12: **layout only** (restore tabs +
   pinned on launch), never re-run processes, per the guide's own `[session]
-  persist` comment. The launch-time restore itself is a follow-up, separate from
-  the in-session timeline._
+  persist` comment. **Launch-time restore landed 2026-07-15** (see "Session
+  persistence" below): it restores the full layout - all workspaces, their tabs +
+  collapsible groups, each tab's pane tiling, and per-pane cwd - gated on
+  `session.persist`. Shells are re-spawned in their saved cwd, never re-run._
 - [x] **Scrollback search scope** - _Resolved 2026-07-13: **active pane only** (`⌘F` searches the
   focused pane's scrollback via `Terminal::find`). An all-panes / cross-pane search is a later
   additive option._
@@ -125,13 +127,14 @@ open question>)`.
   round-trips its config key (Hard rule 1). Applied live: `appearance.theme` / `font_size` /
   `line_height` / `show_status_line`, `sidebar.mode` / `width` / `show_pinned`, `appearance.cursor`
   (default cursor shape via alacritty's `default_cursor_style`), `appearance.bold_is_bright`,
-  `panes.max`, `shell.program` (new panes). Still inert - persisted but pending the underlying
-  capability, NOT a regression: `appearance.opacity` / `bg_blur` (need a transparent window +
-  macOS `NSVisualEffectView` compositing - deferred, can't be visually verified headless),
-  `appearance.ligatures` (cosmic-text 0.19 has no clean per-run ligature toggle),
-  `tabs.title` / `follow_cwd` + `panes.split_inherits_cwd` (need OSC-7 per-pane cwd tracking -
-  the same blocker as cwd tab titles), `session.persist` (launch-time restore is a follow-up) /
-  `timeline` / `shadow_worktree`, `git.diff_view = "split"` (side-by-side diff renderer is a
+  `panes.max`, `shell.program` (new panes), `panes.split_inherits_cwd` (a split's new pane opens
+  in the source pane's cwd - see "Split cwd inheritance" below). Still inert - persisted but
+  pending the underlying capability, NOT a regression: `appearance.opacity` / `bg_blur` (need a
+  transparent window + macOS `NSVisualEffectView` compositing - deferred, can't be visually
+  verified headless), `appearance.ligatures` (cosmic-text 0.19 has no clean per-run ligature
+  toggle), `tabs.title` / `follow_cwd`,
+  `session.persist` (now live - see "Session persistence"
+  below) / `timeline` / `shadow_worktree`, `git.diff_view = "split"` (side-by-side diff renderer is a
   follow-up). These stay in the UI so the preference is saved for when the feature lands.
 
 - 2026-07-13 - **Hover tooltips (§09 primitive).** The guide's tooltip primitive is built and
@@ -494,6 +497,34 @@ open question>)`.
   textually; category markers are alignment-safe ASCII glyphs until the fixed-metric
   cell renderer (M2c) can place Nerd-Font icons. Deferred: mouse hit-testing in
   settings, and a debounce on the per-edit file write.
+- 2026-07-15 - **Split cwd inheritance (`[panes] split_inherits_cwd`).** Splitting a
+  pane now opens the new pane in the source (focused) pane's current working directory
+  instead of the default start dir, so `⌥|` / `⌥-` from a pane sitting in
+  `~/Developer/foo` gives a second pane already there. Gated on the config key (default
+  on); off falls back to the default start dir. Mechanism: the source pane's absolute cwd
+  is read from the live cwd-poll cache just before the split (which moves focus to the new
+  pane) and handed to `sync_layout`, which spawns exactly that pane's shell in it via
+  `Terminal::spawn_shell_in`. Because it reuses the existing per-pane cwd poll, a split in
+  the brief window before the first poll (or from a pane whose cwd is unknown) simply falls
+  back to the default dir. Only splits inherit - a fresh tab / workspace still opens in the
+  default start dir.
+- 2026-07-15 - **Session persistence (launch-time layout restore).** Skelly now saves
+  the full window layout on quit and restores it on the next launch, gated on
+  `config.session.persist` (default on). Persisted (design/README.md persist scope:
+  **layout only**, never re-run processes): every workspace (name + which was active),
+  each workspace's tabs + collapsible groups, and per tab its pane tiling (splits,
+  ratios, focus, zoom), pinned state, custom name, group membership, empty/activated
+  flag, and each pane's last-known cwd. On launch each restored pane re-spawns a shell
+  in its saved cwd (a vanished cwd falls back to the default start dir); the prior
+  process is never resurrected. State lives in `$XDG_STATE_HOME/skelly/session.json`
+  (fallback `~/.local/state/skelly/session.json`) - it is *state*, not config, so it
+  stays out of `config.toml` (Hard rule 1). Writes are atomic (temp + rename); a
+  corrupt or absent file is ignored (fresh launch). Mechanism: `skelly-pane` gained a
+  serializable `PaneLayout` (`PaneTree::to_layout` / `from_layout`, ids reallocated on
+  rebuild), `skelly-term` a `spawn_shell_in` cwd variant, and the binary a
+  `session_state` module + `App::session_snapshot` / `restore_session` wired into
+  winit's `exiting` (save) and `resumed` (restore). Deferred: saving on a crash (only
+  a clean quit persists), scrollback contents, and any live/periodic autosave.
 - 2026-07-12 - **Sidebar chrome (second half of "sidebar + tabs").** The persistent
   left dock now renders: a fixed-width panel (config `[sidebar] width`, default 240
   logical px) with a quiet brand header, the open-tab list, and a "+ New tab" action.

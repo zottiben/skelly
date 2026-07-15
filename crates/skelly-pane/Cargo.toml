@@ -12,6 +12,10 @@ publish = false
 [lints]
 workspace = true
 
+[dependencies]
+# Serialize the tiling structure for launch-time session restore (layout only).
+serde.workspace = true
+
 [dev-dependencies]
 # Property-based testing of the tiling invariants: random op sequences must keep the
 # tree well-formed and the layout a gap-free, overlap-free tiling (playbook §4).

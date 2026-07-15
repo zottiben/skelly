@@ -13,6 +13,8 @@
 
 #![doc(test(attr(deny(warnings))))]
 
+use serde::{Deserialize, Serialize};
+
 /// The most panes a single tab may hold (AGENTS Hard rule 4).
 pub const MAX_PANES: usize = 8;
 
@@ -276,6 +278,96 @@ impl Node {
             }
         }
     }
+
+    /// Capture the structure as a serializable [`LayoutNode`], dropping the concrete
+    /// [`PaneId`]s (rebuilt fresh on restore). Leaves are emitted in `panes()` order.
+    fn to_layout(&self) -> LayoutNode {
+        match self {
+            Node::Leaf(_) => LayoutNode::Leaf,
+            Node::Split {
+                axis,
+                ratio,
+                first,
+                second,
+            } => LayoutNode::Split {
+                row: matches!(axis, Axis::Row),
+                ratio: *ratio,
+                first: Box::new(first.to_layout()),
+                second: Box::new(second.to_layout()),
+            },
+        }
+    }
+}
+
+/// A serializable node in a [`PaneLayout`]: the tiling structure without pane ids.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum LayoutNode {
+    Leaf,
+    Split {
+        /// Side-by-side ([`Axis::Row`]) when true, stacked ([`Axis::Col`]) when false.
+        row: bool,
+        ratio: f32,
+        first: Box<LayoutNode>,
+        second: Box<LayoutNode>,
+    },
+}
+
+impl LayoutNode {
+    fn leaf_count(&self) -> usize {
+        match self {
+            LayoutNode::Leaf => 1,
+            LayoutNode::Split { first, second, .. } => first.leaf_count() + second.leaf_count(),
+        }
+    }
+
+    /// Rebuild a [`Node`], assigning fresh sequential ids from `next` in `panes()`
+    /// (first-then-second) order, so a leaf's index matches the caller's per-leaf payload.
+    fn build(&self, next: &mut u32) -> Node {
+        match self {
+            LayoutNode::Leaf => {
+                let id = PaneId(*next);
+                *next += 1;
+                Node::Leaf(id)
+            }
+            LayoutNode::Split {
+                row,
+                ratio,
+                first,
+                second,
+            } => {
+                let first = Box::new(first.build(next));
+                let second = Box::new(second.build(next));
+                Node::Split {
+                    axis: if *row { Axis::Row } else { Axis::Col },
+                    ratio: ratio.clamp(MIN_RATIO, 1.0 - MIN_RATIO),
+                    first,
+                    second,
+                }
+            }
+        }
+    }
+}
+
+/// A serializable snapshot of a pane tree's tiling, for launch-time session restore
+/// (layout only - shells are never re-run). Captures the split structure, which leaf
+/// is focused, and the zoom state. The per-leaf payload (each pane's cwd) is the
+/// caller's concern: leaves serialize in `panes()` order, so the caller pairs them by
+/// index. Round-trips via [`PaneTree::to_layout`] / [`PaneTree::from_layout`].
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PaneLayout {
+    root: LayoutNode,
+    /// The focused leaf's position in `panes()` order.
+    focused: usize,
+    zoomed: bool,
+}
+
+impl PaneLayout {
+    /// The number of panes (leaves) this layout describes, so the caller can pair per-leaf
+    /// payload (cwds) even before rebuilding the tree.
+    #[must_use]
+    pub fn pane_count(&self) -> usize {
+        self.root.leaf_count()
+    }
 }
 
 /// A tab's tiling tree of panes. Always holds at least one pane and exactly one
@@ -503,6 +595,47 @@ impl PaneTree {
         self.root.layout_into(viewport, &mut out);
         out
     }
+
+    /// A serializable snapshot of this tree's tiling for session persistence (layout only).
+    /// Leaves are captured in `panes()` order; the caller records its per-leaf payload
+    /// (each pane's cwd) in that same order to pair them back on restore.
+    #[must_use]
+    pub fn to_layout(&self) -> PaneLayout {
+        let leaves = self.panes();
+        let focused = leaves.iter().position(|&p| p == self.focused).unwrap_or(0);
+        PaneLayout {
+            root: self.root.to_layout(),
+            focused,
+            zoomed: self.zoomed,
+        }
+    }
+
+    /// Rebuild a tree from a persisted [`PaneLayout`], allocating fresh pane ids in
+    /// `panes()` order (so the nth leaf pairs with the nth saved payload). A layout with no
+    /// leaves or more than [`MAX_PANES`] (corrupt / out-of-contract state) falls back to a
+    /// fresh single-pane tree.
+    #[must_use]
+    pub fn from_layout(layout: &PaneLayout) -> Self {
+        let n = layout.root.leaf_count();
+        if n == 0 || n > MAX_PANES {
+            return Self::new();
+        }
+        let mut next = 0;
+        let root = layout.root.build(&mut next);
+        let mut leaves = Vec::new();
+        root.collect_leaves(&mut leaves);
+        let focused = leaves
+            .get(layout.focused)
+            .copied()
+            .unwrap_or_else(|| root.first_leaf());
+        Self {
+            root,
+            focused,
+            zoomed: layout.zoomed,
+            next_id: next,
+            layout_preset: 0,
+        }
+    }
 }
 
 impl Default for PaneTree {
@@ -609,6 +742,52 @@ mod tests {
         let layout = t.layout(VIEWPORT);
         assert_eq!(layout.len(), 1);
         assert_eq!(layout[0].1, VIEWPORT);
+    }
+
+    #[test]
+    fn layout_snapshot_round_trips_geometry_focus_and_zoom() {
+        // A non-trivial tree: split right, then split the new pane down, resize a divider.
+        let mut t = PaneTree::new();
+        t.split(Dir::Right);
+        t.split(Dir::Down);
+        t.resize(Dir::Right, 0.1);
+        let focused_rect = rect_of(&t, t.focused());
+        let before: Vec<Rect> = t.layout(VIEWPORT).into_iter().map(|(_, r)| r).collect();
+
+        let restored = PaneTree::from_layout(&t.to_layout());
+        let after: Vec<Rect> = restored
+            .layout(VIEWPORT)
+            .into_iter()
+            .map(|(_, r)| r)
+            .collect();
+
+        assert_eq!(restored.count(), t.count());
+        assert_eq!(before.len(), after.len());
+        for (b, a) in before.iter().zip(&after) {
+            assert!(approx(b.x, a.x) && approx(b.y, a.y) && approx(b.w, a.w) && approx(b.h, a.h));
+        }
+        // The same pane keeps focus (identified by its rectangle, since ids are reallocated).
+        assert!(approx(
+            rect_of(&restored, restored.focused()).x,
+            focused_rect.x
+        ));
+        assert!(approx(
+            rect_of(&restored, restored.focused()).y,
+            focused_rect.y
+        ));
+
+        // Zoom is preserved too.
+        let mut z = PaneTree::new();
+        z.split(Dir::Right);
+        z.zoom_toggle();
+        assert!(PaneTree::from_layout(&z.to_layout()).is_zoomed());
+    }
+
+    #[test]
+    fn from_layout_rejects_a_degenerate_leaf_count() {
+        // A single-leaf layout round-trips; an over-cap one falls back to a fresh tree.
+        let single = PaneTree::new().to_layout();
+        assert_eq!(PaneTree::from_layout(&single).count(), 1);
     }
 
     #[test]

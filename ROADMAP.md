@@ -224,10 +224,13 @@ follow-ups, finished opportunistically.
     integration suite; the right-dock UI (`⇧⌘H`, mutually exclusive with the git
     dock) lists the events with a viewing banner + actor legend, `↑/↓` (or `⌥⌘←/→`)
     scrub, `⌥⌘0` returns to now, and selecting a past commit rewinds to it. Verified
-    by the `timeline_capture` headless PNG in both themes + a clean boot. Follow-ups:
-    the `Agent` actor's transport (the still-open AI-actions contract), the
-    launch-time layout restore (`session.persist`), fork-on-edit, off-thread git,
-    and global `⌥⌘←/→/0` while the dock is closed.
+    by the `timeline_capture` headless PNG in both themes + a clean boot. The
+    **launch-time layout restore** (`session.persist`) has since landed: on quit the
+    full layout (all workspaces, their tabs + groups, each tab's pane tiling + per-pane
+    cwd) saves to `~/.local/state/skelly/session.json` and restores on next launch,
+    re-spawning each pane's shell in its saved cwd (layout only, processes never
+    re-run). Remaining follow-ups: the `Agent` actor's transport (the still-open
+    AI-actions contract), fork-on-edit, off-thread git, and global `⌥⌘←/→/0` while the dock is closed.
 - [~] **M5 - Hardening & release.** Edge/empty/error states, perf budgets,
   packaging (signed macOS `.app`, Linux artifacts), first tagged release.
   - [x] **Shell-exit / crash overlay** (design §12 "Shell exits / crashes"). A pane

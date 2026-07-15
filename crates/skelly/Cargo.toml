@@ -31,6 +31,9 @@ toml.workspace = true
 
 [dependencies]
 skelly-config = { path = "../skelly-config" }
+serde.workspace = true
+# Persist the workspace/tab/pane layout to a JSON state file for launch-time restore.
+serde_json.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

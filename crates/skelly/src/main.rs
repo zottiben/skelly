@@ -21,6 +21,7 @@ mod menu;
 mod motion;
 mod onboarding;
 mod palette;
+mod session_state;
 mod settings;
 mod sidebar;
 mod statusline;
@@ -450,6 +451,11 @@ struct App {
     /// The active tab's focused-pane cwd the git dock last scoped to (absolute), so a tab switch
     /// or `cd` that changes the active repo re-points the open dock at it. `None` until first poll.
     active_cwd: Option<std::path::PathBuf>,
+    /// The cwd a split's new pane should start in (design §11, `[panes] split_inherits_cwd`): set
+    /// to the split source pane's absolute cwd just before `sync_layout` spawns the new pane, and
+    /// consumed (taken) there so only that one spawn inherits it. `None` = spawn in the default
+    /// start dir (a fresh tab / workspace / restored pane).
+    inherit_cwd: Option<std::path::PathBuf>,
     /// The per-repo git diff dock (right dock) state.
     git_dock: GitDock,
     /// The session-timeline dock (right dock; mutually exclusive with the git dock) - view state
@@ -612,6 +618,7 @@ impl App {
             poll_pids: Arc::new(Mutex::new(Vec::new())),
             pending_cwds: Arc::new(Mutex::new(HashMap::new())),
             active_cwd: None,
+            inherit_cwd: None,
             git_dock: GitDock::new(),
             timeline: TimelineDock::new(),
             timelines: HashMap::new(),
@@ -1004,6 +1011,9 @@ impl App {
         let proxy = self.proxy.clone();
         let shell = self.config.shell.program.clone();
         let cursor = config_cursor_shape(self.config.appearance.cursor);
+        // The cwd a newly-spawned pane inherits this cycle (a split from a pane in that dir);
+        // taken so it applies once, then reverts to the default start dir.
+        let inherit = std::mem::take(&mut self.inherit_cwd);
         let layout = self.active_tab().tree.layout(viewport);
 
         let ws = self.active_tab_mut();
@@ -1023,9 +1033,15 @@ impl App {
                 }
             } else {
                 let proxy = proxy.clone();
-                match Terminal::spawn_shell(target.0, target.1, Some(shell.as_str()), move || {
-                    let _ = proxy.send_event(Wakeup::Shell);
-                }) {
+                match Terminal::spawn_shell_in(
+                    target.0,
+                    target.1,
+                    Some(shell.as_str()),
+                    inherit.as_deref(),
+                    move || {
+                        let _ = proxy.send_event(Wakeup::Shell);
+                    },
+                ) {
                     Ok(term) => {
                         // Apply the configured default cursor shape (appearance.cursor) to the
                         // fresh shell; a program's DECSCUSR still overrides it live.
@@ -2756,6 +2772,23 @@ impl App {
         self.request_redraw();
     }
 
+    /// The focused pane's absolute cwd from the latest cwd poll, falling back to the app-level
+    /// active cwd, or `None` before the first poll. Seeds a split's inherited working directory.
+    fn focused_pane_abs_cwd(&self) -> Option<std::path::PathBuf> {
+        let ws = self.active_tab();
+        let pid = ws
+            .panes
+            .get(&ws.tree.focused())
+            .and_then(Terminal::shell_pid);
+        pid.and_then(|pid| {
+            self.pending_cwds
+                .lock()
+                .ok()
+                .and_then(|g| g.get(&pid).cloned())
+        })
+        .or_else(|| self.active_cwd.clone())
+    }
+
     /// Apply a pane-tree operation, then reconcile terminals and request a repaint.
     fn apply_pane_action(&mut self, action: PaneAction) {
         // Closing the only pane closes the whole tab (design edge state "Close last pane":
@@ -2770,6 +2803,14 @@ impl App {
             self.show_toast(format!("Pane limit reached ({cap} max)"), ToastKind::Info);
             return;
         }
+        // A split inherits the source (focused) pane's cwd, so the new pane opens in the same
+        // directory (design §11, `[panes] split_inherits_cwd`). Captured before the split moves
+        // focus to the new pane; armed only once the split applies, so it can never leak onto an
+        // unrelated later spawn. `sync_layout` consumes it when it spawns that pane's shell.
+        let inherit = (matches!(action, PaneAction::Split(_))
+            && self.config.panes.split_inherits_cwd)
+            .then(|| self.focused_pane_abs_cwd())
+            .flatten();
         let ws = self.active_tab_mut();
         let changed = match action {
             PaneAction::Split(dir) => ws.tree.count() < cap && ws.tree.split(dir).is_some(),
@@ -2793,6 +2834,7 @@ impl App {
             PaneAction::CycleLayout => ws.tree.cycle_layout(),
         };
         if changed {
+            self.inherit_cwd = inherit;
             let ws = self.active_tab_mut();
             ws.selection = None;
             ws.activated = true; // operating on panes means the tab is in use; clear its empty state
@@ -3506,6 +3548,182 @@ impl App {
         self.selecting = false;
         self.sync_layout();
         self.request_redraw();
+    }
+
+    /// Capture the whole window state (all workspaces, their tabs + groups, each pane's tiling
+    /// and cwd) as a [`SessionState`](session_state::SessionState) for launch-time restore
+    /// (design/README.md persist scope: **layout only**). The active workspace's tabs live in
+    /// `self.tabs`/`self.groups`; the others read from their stash.
+    fn session_snapshot(&self) -> session_state::SessionState {
+        let workspaces = self
+            .workspaces
+            .iter()
+            .enumerate()
+            .map(|(i, ws)| {
+                if i == self.active_workspace {
+                    Self::workspace_snapshot(&ws.name, &self.tabs, self.active, &self.groups)
+                } else if let Some((tabs, active, groups)) = &ws.stash {
+                    Self::workspace_snapshot(&ws.name, tabs, *active, groups)
+                } else {
+                    Self::workspace_snapshot(&ws.name, &[], 0, &[])
+                }
+            })
+            .collect();
+        session_state::SessionState {
+            active_workspace: self.active_workspace,
+            workspaces,
+        }
+    }
+
+    fn workspace_snapshot(
+        name: &str,
+        tabs: &[Tab],
+        active: usize,
+        groups: &[TabGroup],
+    ) -> session_state::WorkspaceState {
+        session_state::WorkspaceState {
+            name: name.to_owned(),
+            active,
+            groups: groups
+                .iter()
+                .map(|g| session_state::GroupState {
+                    name: g.name.clone(),
+                    collapsed: g.collapsed,
+                })
+                .collect(),
+            tabs: tabs.iter().map(Self::tab_snapshot).collect(),
+        }
+    }
+
+    fn tab_snapshot(tab: &Tab) -> session_state::TabState {
+        // Leaves serialize in `panes()` order; record each pane's cwd in that same order so
+        // `restore_tab` pairs them back by index.
+        let cwds = tab
+            .tree
+            .panes()
+            .iter()
+            .map(|id| tab.pane_cwd.get(id).cloned())
+            .collect();
+        session_state::TabState {
+            layout: tab.tree.to_layout(),
+            cwds,
+            pinned: tab.pinned,
+            custom_title: tab.custom_title.clone(),
+            group: tab.group,
+            activated: tab.activated,
+        }
+    }
+
+    /// Rebuild all workspaces/tabs/groups from a saved [`SessionState`], spawning a shell per
+    /// restored pane in its saved cwd (layout only - the prior process is never re-run). Called
+    /// once from [`resumed`](Self::resumed) before the initial `sync_layout`, so the renderer
+    /// (hence cell metrics) already exists. A session with no workspaces is ignored.
+    fn restore_session(&mut self, state: session_state::SessionState) {
+        let Some((cell_w, cell_h, _)) = self.renderer.as_ref().map(Renderer::cell_metrics) else {
+            return;
+        };
+        if state.workspaces.is_empty() {
+            return;
+        }
+        let inset = self.pane_inset();
+        let status_h = if self.config.appearance.show_status_line {
+            statusline::HEIGHT * scale32(self.scale)
+        } else {
+            0.0
+        };
+        let viewport = self.viewport_rect();
+        let active_ws = state.active_workspace.min(state.workspaces.len() - 1);
+        let mut workspaces = Vec::with_capacity(state.workspaces.len());
+        let mut live: Option<(Vec<Tab>, usize, Vec<TabGroup>)> = None;
+        for (i, wss) in state.workspaces.into_iter().enumerate() {
+            let groups = wss
+                .groups
+                .into_iter()
+                .map(|g| TabGroup {
+                    name: g.name,
+                    collapsed: g.collapsed,
+                })
+                .collect();
+            let mut tabs: Vec<Tab> = wss
+                .tabs
+                .iter()
+                .map(|ts| self.restore_tab(ts, viewport, cell_w, cell_h, inset, status_h))
+                .collect();
+            if tabs.is_empty() {
+                tabs.push(Tab::new());
+            }
+            let active = wss.active.min(tabs.len() - 1);
+            if i == active_ws {
+                live = Some((tabs, active, groups));
+                workspaces.push(Workspace {
+                    name: wss.name,
+                    stash: None,
+                });
+            } else {
+                workspaces.push(Workspace {
+                    name: wss.name,
+                    stash: Some((tabs, active, groups)),
+                });
+            }
+        }
+        let (tabs, active, groups) = live.expect("the active workspace is always rebuilt");
+        self.tabs = tabs;
+        self.active = active;
+        self.groups = groups;
+        self.workspaces = workspaces;
+        self.active_workspace = active_ws;
+    }
+
+    /// Rebuild one tab from its saved state: reconstruct the pane tiling and spawn a shell per
+    /// leaf in its saved cwd (or the default when the cwd is missing / gone). A pane whose shell
+    /// fails to spawn is left empty; `sync_layout` re-spawns it when the tab next becomes active.
+    fn restore_tab(
+        &self,
+        ts: &session_state::TabState,
+        viewport: Rect,
+        cell_w: f32,
+        cell_h: f32,
+        inset: f32,
+        status_h: f32,
+    ) -> Tab {
+        let shell = self.config.shell.program.clone();
+        let cursor = config_cursor_shape(self.config.appearance.cursor);
+        let mut tab = Tab::new();
+        tab.tree = PaneTree::from_layout(&ts.layout);
+        tab.pinned = ts.pinned;
+        tab.custom_title.clone_from(&ts.custom_title);
+        tab.group = ts.group;
+        tab.activated = ts.activated;
+        let rects: HashMap<PaneId, Rect> = tab.tree.layout(viewport).into_iter().collect();
+        for (i, id) in tab.tree.panes().into_iter().enumerate() {
+            let saved_cwd = ts.cwds.get(i).and_then(Clone::clone);
+            let start = saved_cwd.as_deref().map(expand_home);
+            let rect = rects.get(&id).copied().unwrap_or(viewport);
+            let target = pane_dims(rect, cell_w, cell_h, inset, status_h);
+            let proxy = self.proxy.clone();
+            match Terminal::spawn_shell_in(
+                target.0,
+                target.1,
+                Some(shell.as_str()),
+                start.as_deref(),
+                move || {
+                    let _ = proxy.send_event(Wakeup::Shell);
+                },
+            ) {
+                Ok(term) => {
+                    term.set_default_cursor_shape(cursor);
+                    tab.panes.insert(id, term);
+                    tab.dims.insert(id, target);
+                    if let Some(cwd) = saved_cwd {
+                        tab.pane_cwd.insert(id, cwd);
+                    }
+                }
+                Err(err) => {
+                    tracing::error!(%err, "failed to spawn a restored pane's shell");
+                }
+            }
+        }
+        tab
     }
 
     /// Dispatch a decoded tab chord to its handler.
@@ -4736,6 +4954,23 @@ struct TimelineFrame {
 
 /// `path` with the home directory collapsed to `~` (for the status line), else the path
 /// as-is. Best-effort; falls back to the lossy string form.
+/// Expand a home-collapsed cwd (`~` / `~/rel`, as [`home_relative`] produces) back to an
+/// absolute path, for re-opening a restored pane in its saved directory. A path that is
+/// already absolute (was outside `$HOME`) is returned unchanged.
+fn expand_home(s: &str) -> std::path::PathBuf {
+    if let Some(rest) = s.strip_prefix('~') {
+        if let Some(home) = std::env::var_os("HOME") {
+            let mut path = std::path::PathBuf::from(home);
+            let rest = rest.strip_prefix('/').unwrap_or(rest);
+            if !rest.is_empty() {
+                path.push(rest);
+            }
+            return path;
+        }
+    }
+    std::path::PathBuf::from(s)
+}
+
 fn home_relative(path: &std::path::Path) -> String {
     let full = path.to_string_lossy().into_owned();
     if let Some(home) = std::env::var_os("HOME") {
@@ -5075,6 +5310,14 @@ impl ApplicationHandler<Wakeup> for App {
 
         self.window = Some(window);
         self.renderer = Some(renderer);
+        // Restore the saved workspace / tab / pane layout before the first `sync_layout`, so
+        // its shells are spawned in their saved cwds (design/README.md persist scope: layout
+        // only). `sync_layout` then just re-fits them and heals any that failed to spawn.
+        if self.config.session.persist {
+            if let Some(state) = session_state::SessionState::load_default() {
+                self.restore_session(state);
+            }
+        }
         // Spawn the shell for the initial pane (and size it to the viewport).
         self.sync_layout();
         if self.active_tab().panes.is_empty() {
@@ -5110,6 +5353,16 @@ impl ApplicationHandler<Wakeup> for App {
             Wakeup::GitPoll => self.drain_git_poll(),
             // Fresh per-pane cwds from the poll thread; apply them (status line, titles, git dock).
             Wakeup::CwdPoll => self.drain_cwd_poll(),
+        }
+    }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Persist the current layout so the next launch restores it (design/README.md persist
+        // scope: layout only). Best-effort - a write failure just means a fresh next launch.
+        if self.config.session.persist {
+            if let Err(err) = self.session_snapshot().save_default() {
+                tracing::warn!(%err, "failed to save session state");
+            }
         }
     }
 

@@ -154,16 +154,24 @@ fn resolve_start_dir(launch: Option<PathBuf>, home: Option<PathBuf>) -> Option<P
 /// direct `exec`. We deliberately don't force `-l`: the config value can be any shell, wrapper, or
 /// launcher, and many don't accept a login flag; if a user wants login semantics for a custom
 /// program they can point it at a login-shell invocation themselves.
-fn build_shell_command(program: Option<&str>) -> CommandBuilder {
+fn build_shell_command(program: Option<&str>, cwd: Option<&Path>) -> CommandBuilder {
     let mut cmd = match program.map(str::trim).filter(|p| !p.is_empty()) {
         Some(prog) => CommandBuilder::new(prog),
         None => CommandBuilder::new_default_prog(),
     };
     cmd.env("TERM", "xterm-256color");
-    if let Some(dir) = resolve_start_dir(
-        std::env::current_dir().ok(),
-        std::env::var_os("HOME").map(PathBuf::from),
-    ) {
+    // A restored session hands us the pane's saved cwd; honor it when it still exists,
+    // else fall back to the launch-dir default (as a fresh pane does).
+    let dir = cwd
+        .filter(|p| p.is_dir())
+        .map(Path::to_path_buf)
+        .or_else(|| {
+            resolve_start_dir(
+                std::env::current_dir().ok(),
+                std::env::var_os("HOME").map(PathBuf::from),
+            )
+        });
+    if let Some(dir) = dir {
         cmd.cwd(dir);
     }
     cmd
@@ -341,6 +349,26 @@ impl Terminal {
     where
         W: Fn() + Send + 'static,
     {
+        Self::spawn_shell_in(cols, rows, program, None, wakeup)
+    }
+
+    /// Spawn a shell like [`spawn_shell`](Terminal::spawn_shell), but starting in `cwd` when
+    /// given and it still exists - the launch-time session restore path, which re-opens each
+    /// pane in its saved working directory (layout only; the prior process is never re-run).
+    /// A `None` or vanished `cwd` falls back to the default start directory.
+    ///
+    /// # Errors
+    /// Returns an error if the PTY cannot be opened or the shell cannot be spawned.
+    pub fn spawn_shell_in<W>(
+        cols: u16,
+        rows: u16,
+        program: Option<&str>,
+        cwd: Option<&Path>,
+        wakeup: W,
+    ) -> std::io::Result<Self>
+    where
+        W: Fn() + Send + 'static,
+    {
         let (cols, rows) = clamp_dims(cols, rows);
         let pty = native_pty_system();
         let pair = pty
@@ -352,7 +380,7 @@ impl Terminal {
             })
             .map_err(to_io)?;
 
-        let cmd = build_shell_command(program);
+        let cmd = build_shell_command(program, cwd);
         let child = pair.slave.spawn_command(cmd).map_err(to_io)?;
         drop(pair.slave); // close the parent's slave handle so the master sees EOF.
                           // A killer we keep on the UI side so dropping the `Terminal` can stop the shell
@@ -978,7 +1006,7 @@ mod tests {
         // No configured program -> portable-pty's default-program path, which runs
         // $SHELL as a *login* shell (argv0 prefixed with `-`). `is_default_prog()`
         // marks that path, which the plain `new(prog)` constructor never sets.
-        let cmd = build_shell_command(None);
+        let cmd = build_shell_command(None, None);
         assert!(
             cmd.is_default_prog(),
             "the default shell must take the login-shell path"
@@ -992,14 +1020,14 @@ mod tests {
     #[test]
     fn blank_program_is_treated_as_unconfigured() {
         // A whitespace-only `[shell] program` is the same as leaving it empty.
-        assert!(build_shell_command(Some("   ")).is_default_prog());
+        assert!(build_shell_command(Some("   "), None).is_default_prog());
     }
 
     #[test]
     fn configured_program_is_spawned_as_given_with_no_extra_flags() {
         // A configured program launches exactly as named - no forced `-l`, so wrappers / shells
         // that don't accept a login flag still work (the default `$SHELL` path handles login).
-        let cmd = build_shell_command(Some("zsh"));
+        let cmd = build_shell_command(Some("zsh"), None);
         assert!(!cmd.is_default_prog());
         let argv: Vec<_> = cmd
             .get_argv()

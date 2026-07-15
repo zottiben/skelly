@@ -347,3 +347,34 @@ fn background_color_escape_reaches_the_grid() {
         sleep(Duration::from_millis(50));
     }
 }
+
+#[test]
+fn spawn_shell_in_starts_in_the_given_cwd() {
+    // A split inherits the source pane's cwd (binary `[panes] split_inherits_cwd`), which the
+    // binary implements by spawning the new pane's shell in that directory. Point a shell at a
+    // temp dir and assert `pwd` reports it. `canonicalize` resolves macOS's `/var` -> `/private/var`
+    // symlink so the comparison holds.
+    let dir = std::env::temp_dir().join(format!("skelly-cwd-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("make temp dir");
+    let want = std::fs::canonicalize(&dir).expect("canonicalize temp dir");
+
+    let mut term =
+        Terminal::spawn_shell_in(80, 24, None, Some(&want), || {}).expect("spawn shell in cwd");
+    wait_for_prompt(&term);
+    term.write(b"pwd\n");
+
+    let want_str = want.to_string_lossy().into_owned();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if term.snapshot().iter().any(|line| line.contains(&want_str)) {
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "pwd never reported the spawn cwd {want_str}; grid was:\n{}",
+            term.snapshot().join("\n")
+        );
+        sleep(Duration::from_millis(50));
+    }
+}
