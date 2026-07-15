@@ -164,6 +164,15 @@ impl TextLayer {
         }
     }
 
+    /// Adopt a new DPI `scale` (physical px per logical px) - the window moved to a display
+    /// with a different backing scale factor. Recomputes the cell metrics at the new scale so
+    /// the grid tiles to the display's true pixel density (design: the UI is consistent across
+    /// resolutions). `font_size`/`line_height` are the current logical config values.
+    pub fn set_scale(&mut self, scale: f32, font_size: u16, line_height: f32) {
+        self.scale = scale;
+        self.set_font_size(font_size, line_height);
+    }
+
     /// Cell metrics in physical px: `(width, height, top-left padding)`. Used to
     /// place cell backgrounds and the cursor so they align with the text.
     #[must_use]

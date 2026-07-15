@@ -124,6 +124,12 @@ impl ProseLayer {
         labels.truncate(n);
     }
 
+    /// Adopt a new DPI `scale` (physical px per logical px). The next `set_labels` re-shapes
+    /// every label at the new scale (the fingerprint folds in the scale, so nothing is skipped).
+    pub(crate) fn set_scale(&mut self, scale: f32) {
+        self.scale = scale;
+    }
+
     /// Replace the labels drawn next frame, clipped to `clip`. Re-shapes only labels whose
     /// content fingerprint changed; repositioning is always cheap.
     pub(crate) fn set_labels(&mut self, input: &[ProseLabel], clip: PxRect) {

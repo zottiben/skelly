@@ -40,7 +40,7 @@ use skelly_render::{
     Renderer, SettingsView, SidebarView, Srgb, TextMeasure, Theme, TimelineView,
 };
 use skelly_session::{Actor, Repo, SessionEvent, ShadowWorktree, Status, Timeline};
-use skelly_term::{CellAttrs, CellColor, ExitStatus, TermCell, Terminal};
+use skelly_term::{CellAttrs, CellColor, ExitStatus, KeyboardMode, TermCell, Terminal};
 
 use confirm::{CloseTarget, Confirm};
 use contextmenu::{ContextMenu, MenuAction, MenuContext};
@@ -4400,7 +4400,13 @@ impl App {
         let application_cursor = self
             .focused_term_ref()
             .is_some_and(Terminal::application_cursor_mode);
-        if let Some(bytes) = key_to_bytes(key_event, self.modifiers, application_cursor) {
+        let keyboard_mode = self
+            .focused_term_ref()
+            .map(Terminal::keyboard_mode)
+            .unwrap_or_default();
+        if let Some(bytes) =
+            key_to_bytes(key_event, self.modifiers, application_cursor, keyboard_mode)
+        {
             if let Some(term) = self.focused_term() {
                 // Typing jumps back to the live prompt.
                 term.scroll_to_bottom();
@@ -5138,6 +5144,23 @@ impl ApplicationHandler<Wakeup> for App {
                 ..
             } => self.on_right_click(),
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                // The window moved to a display with a different backing scale factor (e.g. a
+                // retina laptop to an external 1x monitor). Re-scale the whole UI so it keeps its
+                // intended size at the new pixel density - without this, the surface is physical px
+                // while layout/fonts stay at the old scale, so the UI renders tiny on retina. A
+                // `Resized` with the new physical size follows and reconfigures the surface.
+                self.scale = scale_factor;
+                self.measure.set_scale(scale32(self.scale));
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.set_scale(
+                        self.scale,
+                        self.config.appearance.font_size,
+                        self.config.appearance.line_height,
+                    );
+                }
+                self.sync_layout();
+            }
             WindowEvent::Resized(size) => {
                 self.size = (size.width, size.height);
                 if let Some(renderer) = self.renderer.as_mut() {
@@ -5673,7 +5696,18 @@ fn key_to_bytes(
     event: &KeyEvent,
     modifiers: ModifiersState,
     application_cursor: bool,
+    keyboard_mode: KeyboardMode,
 ) -> Option<Vec<u8>> {
+    // When a program has negotiated the Kitty keyboard protocol (Neovim and friends probe for
+    // it at startup; see the PTY-reply wiring in `skelly-term`), it expects the Kitty CSI-u
+    // encoding so it can tell modified keys apart - `Shift+Enter` from `Enter`, `Ctrl+I` from
+    // `Tab`, `Alt+F` from an `ESC f` word-jump. Legacy xterm encoding cannot express those, so
+    // the shift key on `Shift+Enter` would otherwise be silently dropped.
+    if keyboard_mode.is_active() {
+        if let Some(bytes) = kitty_key_to_bytes(event, modifiers, keyboard_mode) {
+            return Some(bytes);
+        }
+    }
     if let Key::Named(key) = event.logical_key {
         if let Some(bytes) = cursor_navigation_shortcut(key, modifiers) {
             return Some(bytes);
@@ -5710,8 +5744,99 @@ fn key_to_bytes(
     }
 }
 
-/// Platform-standard command-line cursor shortcuts. Shell line editors universally bind
-/// Meta-B/F to previous/next word and Ctrl-A/E to start/end of line, so translating the macOS
+/// Encode a key press per the Kitty keyboard protocol, for when the focused pane's program has
+/// enabled it. Returns `None` for anything this level of the protocol leaves as legacy - an
+/// unmodified special key, or a plain/shift-only text key - which then falls back to the legacy
+/// encoding below (so ordinary typing, `Enter`, and application-cursor history are untouched).
+///
+/// A key keeps its legacy final byte where it has one (arrows end in `A`..=`D`, `Home`/`End` in
+/// `H`/`F`, edit keys in `~`, `F1`..=`F4` in `P`..=`S`) and uses `u` otherwise. The modifier
+/// parameter is `1 + shift + 2*alt + 4*ctrl + 8*super`; it is emitted whenever a key carries
+/// modifiers, which is exactly what makes `Shift+Enter` (`CSI 13;2u`) distinguishable from
+/// `Enter`. `Esc` is always disambiguated so it is never mistaken for an escape-sequence prefix.
+fn kitty_key_to_bytes(
+    event: &KeyEvent,
+    modifiers: ModifiersState,
+    mode: KeyboardMode,
+) -> Option<Vec<u8>> {
+    let m = kitty_modifier_code(modifiers);
+    let modified = m > 1;
+    let all = mode.report_all_as_esc;
+    // A special key is Kitty-encoded once it carries a modifier (or when every key is being
+    // reported as an escape sequence); unmodified it falls through to the legacy path.
+    let named = |num: u32, final_byte: u8| (modified || all).then(|| kitty_csi(num, m, final_byte));
+    match &event.logical_key {
+        Key::Named(NamedKey::Escape) => Some(kitty_csi(27, m, b'u')),
+        Key::Named(NamedKey::Enter) => named(13, b'u'),
+        Key::Named(NamedKey::Tab) => named(9, b'u'),
+        Key::Named(NamedKey::Backspace) => named(127, b'u'),
+        Key::Named(NamedKey::ArrowUp) => named(1, b'A'),
+        Key::Named(NamedKey::ArrowDown) => named(1, b'B'),
+        Key::Named(NamedKey::ArrowRight) => named(1, b'C'),
+        Key::Named(NamedKey::ArrowLeft) => named(1, b'D'),
+        Key::Named(NamedKey::Home) => named(1, b'H'),
+        Key::Named(NamedKey::End) => named(1, b'F'),
+        Key::Named(NamedKey::PageUp) => named(5, b'~'),
+        Key::Named(NamedKey::PageDown) => named(6, b'~'),
+        Key::Named(NamedKey::Insert) => named(2, b'~'),
+        Key::Named(NamedKey::Delete) => named(3, b'~'),
+        Key::Named(NamedKey::F1) => named(1, b'P'),
+        Key::Named(NamedKey::F2) => named(1, b'Q'),
+        Key::Named(NamedKey::F3) => named(1, b'R'),
+        Key::Named(NamedKey::F4) => named(1, b'S'),
+        Key::Named(NamedKey::F5) => named(15, b'~'),
+        Key::Named(NamedKey::F6) => named(17, b'~'),
+        Key::Named(NamedKey::F7) => named(18, b'~'),
+        Key::Named(NamedKey::F8) => named(19, b'~'),
+        Key::Named(NamedKey::F9) => named(20, b'~'),
+        Key::Named(NamedKey::F10) => named(21, b'~'),
+        Key::Named(NamedKey::F11) => named(23, b'~'),
+        Key::Named(NamedKey::F12) => named(24, b'~'),
+        // Text keys: Ctrl/Alt/Super (or report-all) force the escape-sequence form, keyed by the
+        // base-layout codepoint - so `Ctrl+A` is `CSI 97;5u`, not the `0x01` control byte. Plain
+        // and shift-only presses return `None` to send their produced text via the legacy path.
+        Key::Character(text) => {
+            let force =
+                modifiers.control_key() || modifiers.alt_key() || modifiers.super_key() || all;
+            if !force {
+                return None;
+            }
+            let base = text.chars().next()?.to_ascii_lowercase();
+            Some(kitty_csi(u32::from(base), m, b'u'))
+        }
+        _ => None,
+    }
+}
+
+/// The Kitty modifier parameter: `1 + shift + 2*alt + 4*ctrl + 8*super`. Unlike the legacy
+/// xterm code, `super`/`⌘` is encoded - a Kitty-aware program handles it itself.
+fn kitty_modifier_code(modifiers: ModifiersState) -> u32 {
+    1 + u32::from(modifiers.shift_key())
+        + (u32::from(modifiers.alt_key()) << 1)
+        + (u32::from(modifiers.control_key()) << 2)
+        + (u32::from(modifiers.super_key()) << 3)
+}
+
+/// Build a Kitty key sequence `CSI <number> ; <m> <final>`. Arrow / `Home` / `End` / `F1`-`F4`
+/// keys carry the default number `1`, which is dropped when there is no modifier (`CSI A`); edit
+/// (`~`) and text (`u`) keys always keep their number since it identifies the key. The modifier
+/// parameter is dropped when it is the default (`1`, no modifiers).
+fn kitty_csi(number: u32, m: u32, final_byte: u8) -> Vec<u8> {
+    let letter_key = final_byte != b'u' && final_byte != b'~';
+    if m == 1 {
+        if letter_key && number == 1 {
+            format!("\x1b[{}", char::from(final_byte)).into_bytes()
+        } else {
+            format!("\x1b[{number}{}", char::from(final_byte)).into_bytes()
+        }
+    } else {
+        format!("\x1b[{number};{m}{}", char::from(final_byte)).into_bytes()
+    }
+}
+
+/// Platform-standard command-line editing shortcuts. Shell line editors universally bind
+/// Meta-B/F to previous/next word, Ctrl-A/E to start/end of line, Meta-Backspace to delete the
+/// previous word, and Ctrl-U to delete to the line start - so translating the macOS
 /// Option/Command gestures here works without shell-specific integration.
 fn cursor_navigation_shortcut(key: NamedKey, modifiers: ModifiersState) -> Option<Vec<u8>> {
     match (key, modifiers) {
@@ -5719,6 +5844,10 @@ fn cursor_navigation_shortcut(key: NamedKey, modifiers: ModifiersState) -> Optio
         (NamedKey::ArrowRight, ModifiersState::ALT) => Some(b"\x1bf".to_vec()),
         (NamedKey::ArrowLeft, ModifiersState::SUPER) => Some(vec![0x01]),
         (NamedKey::ArrowRight, ModifiersState::SUPER) => Some(vec![0x05]),
+        // Option+Backspace deletes the previous word (readline `backward-kill-word`, bound to
+        // Meta-Backspace = ESC + DEL); Command+Backspace deletes to the line start (Ctrl-U).
+        (NamedKey::Backspace, ModifiersState::ALT) => Some(b"\x1b\x7f".to_vec()),
+        (NamedKey::Backspace, ModifiersState::SUPER) => Some(vec![0x15]),
         _ => None,
     }
 }
@@ -5863,10 +5992,10 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 mod tests {
     use super::{
         csi_edit, cursor_key, cursor_navigation_shortcut, cycle_index, dim, editor_filetype,
-        editor_mode, index_after_close, leader_chord, order, overlay_panel_top,
-        overlay_rise_offset, pane_action, pane_dims, panic_message, parse_leader, pointer_cell_in,
-        process_name, resolve_cell, selection_cells, selection_text, tab_action,
-        xterm_modifier_code, PaneAction, Selection, TabAction,
+        editor_mode, index_after_close, kitty_csi, kitty_modifier_code, leader_chord, order,
+        overlay_panel_top, overlay_rise_offset, pane_action, pane_dims, panic_message,
+        parse_leader, pointer_cell_in, process_name, resolve_cell, selection_cells, selection_text,
+        tab_action, xterm_modifier_code, PaneAction, Selection, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -5890,6 +6019,16 @@ mod tests {
         assert_eq!(
             cursor_navigation_shortcut(NamedKey::ArrowRight, ModifiersState::SUPER),
             Some(vec![0x05])
+        );
+        // Option+Backspace kills the previous word (ESC + DEL); Command+Backspace kills to the
+        // line start (Ctrl-U).
+        assert_eq!(
+            cursor_navigation_shortcut(NamedKey::Backspace, ModifiersState::ALT),
+            Some(b"\x1b\x7f".to_vec())
+        );
+        assert_eq!(
+            cursor_navigation_shortcut(NamedKey::Backspace, ModifiersState::SUPER),
+            Some(vec![0x15])
         );
         assert_eq!(
             cursor_navigation_shortcut(
@@ -5924,6 +6063,38 @@ mod tests {
         // Edit keys (PageDown = 6) use the `~` form, modified inserts `;<mod>`.
         assert_eq!(csi_edit(6, 1), b"\x1b[6~");
         assert_eq!(csi_edit(6, 2), b"\x1b[6;2~");
+    }
+
+    #[test]
+    fn kitty_modifier_code_encodes_all_four_modifiers() {
+        // `1 + shift + 2*alt + 4*ctrl + 8*super` - and, unlike xterm, Super is encoded.
+        assert_eq!(kitty_modifier_code(ModifiersState::empty()), 1);
+        assert_eq!(kitty_modifier_code(ModifiersState::SHIFT), 2);
+        assert_eq!(kitty_modifier_code(ModifiersState::ALT), 3);
+        assert_eq!(kitty_modifier_code(ModifiersState::CONTROL), 5);
+        assert_eq!(kitty_modifier_code(ModifiersState::SUPER), 9);
+        assert_eq!(
+            kitty_modifier_code(ModifiersState::CONTROL | ModifiersState::SHIFT),
+            6
+        );
+    }
+
+    #[test]
+    fn kitty_csi_keeps_final_bytes_and_drops_default_params() {
+        // The user's bug: Shift+Enter must be distinguishable. Enter is key code 13, Shift is
+        // modifier 2, so it encodes as `CSI 13 ; 2 u` - which programs map to `<S-CR>`.
+        assert_eq!(kitty_csi(13, 2, b'u'), b"\x1b[13;2u");
+        // Ctrl+A (code 97, modifier 5) is a CSI-u sequence, not the 0x01 control byte.
+        assert_eq!(kitty_csi(97, 5, b'u'), b"\x1b[97;5u");
+        // Esc is always disambiguated, even unmodified: `CSI 27 u`.
+        assert_eq!(kitty_csi(27, 1, b'u'), b"\x1b[27u");
+        // Arrow / Home / F1-F4 keys carry the default number 1, dropped when unmodified.
+        assert_eq!(kitty_csi(1, 1, b'A'), b"\x1b[A");
+        assert_eq!(kitty_csi(1, 2, b'A'), b"\x1b[1;2A");
+        assert_eq!(kitty_csi(1, 5, b'P'), b"\x1b[1;5P");
+        // Edit keys keep their number even unmodified, since it identifies the key.
+        assert_eq!(kitty_csi(5, 1, b'~'), b"\x1b[5~");
+        assert_eq!(kitty_csi(3, 3, b'~'), b"\x1b[3;3~");
     }
 
     fn plain(c: char) -> TermCell {

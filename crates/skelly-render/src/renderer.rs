@@ -59,6 +59,14 @@ impl ChromeLayer {
         self.text.resize(width, height);
     }
 
+    /// Adopt a new DPI `scale` after the window moved to a display with a different backing
+    /// scale factor. Rebuilds the monospace grid metrics and re-scales the proportional prose.
+    fn set_scale(&mut self, scale: f64, font_size: u16, line_height: f32) {
+        self.text
+            .set_scale(scale_f32(scale), font_size, line_height);
+        self.prose.set_scale(scale_f32(scale));
+    }
+
     /// Update the fallback glyph color after a theme switch.
     fn set_default_fg(&mut self, fg: crate::theme::Srgb) {
         self.text.set_default_fg(fg);
@@ -298,6 +306,26 @@ impl Renderer {
     /// after.
     pub fn set_font_size(&mut self, font_size: u16, line_height: f32) {
         self.text.set_font_size(font_size, line_height);
+    }
+
+    /// Adopt a new DPI `scale` (physical px per logical px) - the window moved between displays
+    /// with different backing scale factors (e.g. a retina laptop to an external 1x monitor).
+    /// Re-scales every layer so the whole UI keeps its intended size at the new pixel density.
+    /// `font_size`/`line_height` are the current logical config values for the terminal grid. The
+    /// binary re-fits the PTY grids to the new [`Renderer::cell_metrics`] after.
+    pub fn set_scale(&mut self, scale: f64, font_size: u16, line_height: f32) {
+        self.text
+            .set_scale(scale_f32(scale), font_size, line_height);
+        for chrome in [
+            &mut self.pane_overlay,
+            &mut self.sidebar,
+            &mut self.gitdock,
+            &mut self.timeline,
+            &mut self.overlay,
+            &mut self.settings,
+        ] {
+            chrome.set_scale(scale, font_size, line_height);
+        }
     }
 
     /// Switch the active UI theme. Re-resolves the semantic tokens and updates the

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 # MSRV tracks the pinned toolchain (rust-toolchain.toml): Skelly is an application
 # with a self-contained GUI dependency stack (wgpu / cosmic-text / alacritty_terminal)

@@ -9,6 +9,69 @@ use std::time::{Duration, Instant};
 
 use skelly_term::{CellAttrs, CellColor, Terminal};
 
+/// Block until the shell has drawn something (its prompt) into the grid.
+fn wait_for_prompt(term: &Terminal) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while term.snapshot().iter().all(String::is_empty) {
+        assert!(Instant::now() < deadline, "shell never produced a prompt");
+        sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn device_query_reply_is_sent_back_to_the_shell() {
+    // The parser answers device queries (here Primary Device Attributes, `ESC [ c`) by asking
+    // the terminal to write the reply back to the PTY. That reply used to be dropped, so
+    // programs that probe the terminal - Neovim's Kitty keyboard-protocol handshake among them
+    // - waited on it forever. Emit the query, then run `cat -v` (which renders control bytes
+    // visibly); the injected reply is fed back as input and shows up as `^[[?...c`.
+    let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
+    wait_for_prompt(&term);
+
+    term.write(b"printf '\\033[c'; cat -v\n");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if term.snapshot().iter().any(|line| line.contains("^[[?")) {
+            return; // the device-attributes reply reached the shell
+        }
+        assert!(
+            Instant::now() < deadline,
+            "device-attributes reply never reached the shell; grid was:\n{}",
+            term.snapshot().join("\n")
+        );
+        sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
+fn kitty_keyboard_protocol_mode_is_tracked() {
+    // A program turns on the Kitty keyboard protocol by pushing flags (`ESC [ > flags u`), which
+    // is what lets it distinguish e.g. Shift+Enter from Enter. The binary reads `keyboard_mode()`
+    // to choose the key encoding, so it must reflect what the program enabled. Flag 1 is
+    // "disambiguate escape codes", the level Neovim requests.
+    let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
+    wait_for_prompt(&term);
+    assert!(
+        !term.keyboard_mode().disambiguate,
+        "a fresh shell is in legacy keyboard mode"
+    );
+
+    term.write(b"printf '\\033[>1u'\n");
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        if term.keyboard_mode().disambiguate {
+            return; // the enabled protocol is now visible to the key encoder
+        }
+        assert!(
+            Instant::now() < deadline,
+            "keyboard mode never reflected the enabled Kitty protocol"
+        );
+        sleep(Duration::from_millis(50));
+    }
+}
+
 #[test]
 fn shell_is_spawned_as_a_login_shell() {
     // A login shell is invoked with argv0 prefixed by `-` (e.g. `-zsh`), which is

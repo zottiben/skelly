@@ -38,21 +38,63 @@ type SharedTerm = Arc<Mutex<Term<TitleListener>>>;
 /// reader thread's parser and the UI. Editors set it to the open file's name, which the status
 /// line reads for the filetype (design §10.4).
 type SharedTitle = Arc<Mutex<Option<String>>>;
+/// The PTY writer, shared so the reader thread's parser can send device-query replies back to
+/// the shell (Primary/Secondary Device Attributes, cursor-position reports, and the Kitty
+/// keyboard-protocol handshake) while the UI thread also writes keystrokes through it.
+type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
 
-/// A terminal [`EventListener`] that keeps only the latest title the program set (`OSC 0/2`),
-/// discarding every other event. `send_event` takes `&self`, so the title lives behind a
-/// shared `Mutex` the [`Terminal`] also holds to read it. A default (empty-handle) instance
-/// discards titles - used by the headless [`Parser`], which has no UI to show one.
+/// A terminal [`EventListener`]: it keeps the latest title the program set (`OSC 0/2`) and
+/// forwards the parser's PTY replies to the shell. `send_event` takes `&self`, so both the
+/// title and the writer live behind shared handles the [`Terminal`] also holds. A default
+/// instance has neither - used by the headless [`Parser`], which has no UI or PTY.
 #[derive(Clone, Default)]
 struct TitleListener {
     title: SharedTitle,
+    /// Where the parser's responses go, or `None` for the headless [`Parser`].
+    writer: Option<SharedWriter>,
 }
 
 impl EventListener for TitleListener {
     fn send_event(&self, event: Event) {
-        if let Event::Title(title) = event {
-            *self.title.lock().expect("title mutex poisoned") = Some(title);
+        match event {
+            Event::Title(title) => {
+                *self.title.lock().expect("title mutex poisoned") = Some(title);
+            }
+            // The parser answers device queries (Device Attributes, cursor-position reports,
+            // and the Kitty keyboard-protocol probe that Neovim and friends send) by asking us
+            // to write the reply back to the PTY. Dropping these leaves those programs waiting
+            // on the handshake - and so never enabling the enhanced keyboard protocol - so
+            // forward them to the shell.
+            Event::PtyWrite(text) => {
+                if let Some(writer) = &self.writer {
+                    if let Ok(mut w) = writer.lock() {
+                        let _ = w.write_all(text.as_bytes());
+                        let _ = w.flush();
+                    }
+                }
+            }
+            _ => {}
         }
+    }
+}
+
+/// Which Kitty keyboard-protocol reporting modes the running program has enabled (via the
+/// `CSI = flags ; mode u` handshake). All-false means no program has turned it on, so the
+/// binary uses legacy xterm key encoding; any flag set switches that keystroke to the Kitty
+/// encoding, which is what lets programs distinguish e.g. `Shift+Enter` from `Enter`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct KeyboardMode {
+    /// Report otherwise-ambiguous keys (modified keys, `Esc`) as CSI-u escape sequences.
+    pub disambiguate: bool,
+    /// Report every key - including plain text keys - as an escape sequence.
+    pub report_all_as_esc: bool,
+}
+
+impl KeyboardMode {
+    /// Whether any Kitty reporting mode is active (so keys use the Kitty encoding).
+    #[must_use]
+    pub fn is_active(self) -> bool {
+        self.disambiguate || self.report_all_as_esc
     }
 }
 
@@ -69,6 +111,18 @@ const MIN_ROWS: u16 = 1;
 /// Clamp requested dimensions to the usable floor ([`MIN_COLS`] x [`MIN_ROWS`]).
 fn clamp_dims(cols: u16, rows: u16) -> (u16, u16) {
     (cols.max(MIN_COLS), rows.max(MIN_ROWS))
+}
+
+/// The `alacritty_terminal` config every grid (live and headless) is built with. Identical to
+/// the default except that the Kitty keyboard protocol is enabled: without this flag the parser
+/// silently ignores the enable/query sequences programs like Neovim send, so the enhanced
+/// keyboard encoding never turns on. Must be used everywhere a [`Config`] is built - including
+/// `set_options` calls, which would otherwise reset the flag from `Config::default()`.
+fn term_config() -> Config {
+    Config {
+        kitty_keyboard: true,
+        ..Config::default()
+    }
 }
 
 /// The directory the first shell should start in, given the process's launch
@@ -240,7 +294,7 @@ pub struct TermCell {
 pub struct Terminal {
     term: SharedTerm,
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writer: SharedWriter,
     dirty: Arc<AtomicBool>,
     /// Set once the shell exits (the reader thread reaps the child and records it).
     exit: SharedExit,
@@ -309,15 +363,16 @@ impl Terminal {
         let shell_pid = child.process_id();
 
         let reader = pair.master.try_clone_reader().map_err(to_io)?;
-        let writer = pair.master.take_writer().map_err(to_io)?;
+        let writer: SharedWriter = Arc::new(Mutex::new(pair.master.take_writer().map_err(to_io)?));
 
         let dims = GridSize::new(cols, rows);
         let title: SharedTitle = Arc::new(Mutex::new(None));
         let term: SharedTerm = Arc::new(Mutex::new(Term::new(
-            Config::default(),
+            term_config(),
             &dims,
             TitleListener {
                 title: Arc::clone(&title),
+                writer: Some(Arc::clone(&writer)),
             },
         )));
         let dirty = Arc::new(AtomicBool::new(true));
@@ -381,8 +436,10 @@ impl Terminal {
 
     /// Send bytes to the shell (keyboard input, pastes).
     pub fn write(&mut self, bytes: &[u8]) {
-        let _ = self.writer.write_all(bytes);
-        let _ = self.writer.flush();
+        if let Ok(mut w) = self.writer.lock() {
+            let _ = w.write_all(bytes);
+            let _ = w.flush();
+        }
     }
 
     /// Resize the PTY and the grid to `cols` x `rows` (clamped to the usable floor).
@@ -488,6 +545,23 @@ impl Terminal {
             .is_ok_and(|term| term.mode().contains(TermMode::APP_CURSOR))
     }
 
+    /// Which Kitty keyboard-protocol reporting modes the running program has enabled. The
+    /// binary reads this to pick the key encoding for the focused pane: all-false means legacy
+    /// xterm encoding, anything set means the Kitty CSI-u encoding (see [`KeyboardMode`]).
+    #[must_use]
+    pub fn keyboard_mode(&self) -> KeyboardMode {
+        self.term.lock().map_or_else(
+            |_| KeyboardMode::default(),
+            |term| {
+                let m = term.mode();
+                KeyboardMode {
+                    disambiguate: m.contains(TermMode::DISAMBIGUATE_ESC_CODES),
+                    report_all_as_esc: m.contains(TermMode::REPORT_ALL_KEYS_AS_ESC),
+                }
+            },
+        )
+    }
+
     /// Whether the running program has requested a *blinking* cursor (via `DECSCUSR`'s blinking
     /// styles). The renderer blinks the caret only when this is set - a solid cursor stays solid
     /// (so vim's steady normal-mode cursor never blinks). Design §06 "caret block blinks".
@@ -514,7 +588,7 @@ impl Terminal {
                     shape: vte_shape,
                     blinking: false,
                 },
-                ..Config::default()
+                ..term_config()
             });
         }
     }
@@ -649,7 +723,7 @@ impl Parser {
         let (cols, rows) = clamp_dims(cols, rows);
         let dims = GridSize::new(cols, rows);
         Self {
-            term: Term::new(Config::default(), &dims, TitleListener::default()),
+            term: Term::new(term_config(), &dims, TitleListener::default()),
             processor: Processor::new(),
         }
     }
