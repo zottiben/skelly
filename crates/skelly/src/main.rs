@@ -4579,24 +4579,28 @@ impl App {
             }
         }
         // Shift + PageUp/PageDown scrolls the focused pane's scrollback.
-        if self.modifiers.shift_key() {
-            match key_event.logical_key.as_ref() {
-                Key::Named(NamedKey::PageUp) => {
-                    if let Some(term) = self.focused_term() {
-                        term.scroll_page(true);
-                    }
-                    return;
-                }
-                Key::Named(NamedKey::PageDown) => {
-                    if let Some(term) = self.focused_term() {
-                        term.scroll_page(false);
-                    }
-                    return;
-                }
-                _ => {}
-            }
+        if self.on_scrollback_key(key_event) {
+            return;
         }
         self.forward_key_to_focused(key_event);
+    }
+
+    /// Shift + PageUp/PageDown scrolls the focused pane's scrollback. Returns whether it consumed
+    /// the key.
+    fn on_scrollback_key(&mut self, key_event: &KeyEvent) -> bool {
+        if !self.modifiers.shift_key() {
+            return false;
+        }
+        let up = match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::PageUp) => true,
+            Key::Named(NamedKey::PageDown) => false,
+            _ => return false,
+        };
+        if let Some(term) = self.focused_term() {
+            term.scroll_page(up);
+        }
+        self.request_redraw();
+        true
     }
 
     /// Route a plain key to the focused pane's shell (the fall-through after every chord).
@@ -4863,6 +4867,9 @@ impl App {
             if let Some(term) = self.active_tab_mut().panes.get_mut(&id) {
                 term.scroll_lines(lines);
             }
+            // Scrolling the view produces no shell output, so nothing else wakes the loop to
+            // repaint - request it here so the scrolled scrollback shows immediately.
+            self.request_redraw();
         }
     }
 }
