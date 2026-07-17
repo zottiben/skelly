@@ -2762,6 +2762,22 @@ impl App {
         }
     }
 
+    /// Insert a file dropped onto the window at the focused pane's prompt (design intent:
+    /// dragging a screenshot into a pane running Claude Code / Pi, which then attaches it as
+    /// `[Image #N]`). The shell-escaped path is written as terminal input followed by a space -
+    /// the same wire behavior as other terminals, so a TUI recognizes it as a dropped file and
+    /// the space separates it from the next drop or typed text. winit delivers one event per
+    /// file with no drop position, so it targets the focused pane.
+    fn on_file_dropped(&mut self, path: &std::path::Path) {
+        let mut input = shell_escape_path(path);
+        input.push(' ');
+        if let Some(term) = self.focused_term() {
+            term.scroll_to_bottom();
+            term.write(input.as_bytes());
+        }
+        self.request_redraw();
+    }
+
     /// Type `text` into the focused pane's shell (the palette's `/` file-entry insert, §10.8):
     /// the user picks a file and its path lands at the prompt to complete a command.
     fn type_into_focused(&mut self, text: &str) {
@@ -4993,6 +5009,29 @@ fn home_relative(path: &std::path::Path) -> String {
     full
 }
 
+/// Backslash-escape a dropped file path so it pastes as a single shell argument (spaces and
+/// shell metacharacters escaped). Alphanumerics, path separators, and safe punctuation pass
+/// through; non-ASCII (UTF-8) bytes are left intact so the path stays valid.
+fn shell_escape_path(path: &std::path::Path) -> String {
+    let s = path.to_string_lossy();
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        if c.is_ascii_alphanumeric()
+            || matches!(
+                c,
+                '/' | '.' | '_' | '-' | '~' | '+' | ',' | '=' | ':' | '@' | '%'
+            )
+            || !c.is_ascii()
+        {
+            out.push(c);
+        } else {
+            out.push('\\');
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// The login shell's command name (the `SHELL` env's basename), for the status line;
 /// defaults to `sh`.
 fn shell_name() -> String {
@@ -5404,6 +5443,7 @@ impl ApplicationHandler<Wakeup> for App {
                 ..
             } => self.on_right_click(),
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
+            WindowEvent::DroppedFile(path) => self.on_file_dropped(&path),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 // The window moved to a display with a different backing scale factor (e.g. a
                 // retina laptop to an external 1x monitor). Re-scale the whole UI so it keeps its
@@ -6255,12 +6295,31 @@ mod tests {
         editor_mode, index_after_close, kitty_csi, kitty_modifier_code, leader_chord, order,
         overlay_panel_top, overlay_rise_offset, pane_action, pane_dims, panic_message,
         parse_leader, pointer_cell_in, process_name, resolve_cell, selection_cells, selection_text,
-        tab_action, xterm_modifier_code, PaneAction, Selection, TabAction,
+        shell_escape_path, tab_action, xterm_modifier_code, PaneAction, Selection, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
     use skelly_term::{CellAttrs, CellColor, CursorShape, TermCell};
     use winit::keyboard::{KeyCode, ModifiersState, NamedKey};
+
+    #[test]
+    fn dropped_path_escapes_shell_metacharacters_but_keeps_utf8() {
+        assert_eq!(
+            shell_escape_path(std::path::Path::new(
+                "/Users/me/Desktop/Screenshot 2026.png"
+            )),
+            "/Users/me/Desktop/Screenshot\\ 2026.png"
+        );
+        // Shell-special punctuation is escaped; safe path punctuation and UTF-8 pass through.
+        assert_eq!(
+            shell_escape_path(std::path::Path::new("/tmp/a(b)&c'd.png")),
+            "/tmp/a\\(b\\)\\&c\\'d.png"
+        );
+        assert_eq!(
+            shell_escape_path(std::path::Path::new("/tmp/café/naïve.png")),
+            "/tmp/café/naïve.png"
+        );
+    }
 
     #[test]
     fn default_cursor_navigation_shortcuts_use_shell_line_editor_bindings() {
