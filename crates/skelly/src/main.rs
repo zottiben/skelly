@@ -462,7 +462,7 @@ struct App {
     /// only; it renders the active repo's log from [`timelines`](Self::timelines).
     timeline: TimelineDock,
     /// Per-repo session event logs, keyed by repo root. Every open tab's repo gets one (the git
-    /// poll records edits into all of them); the dock + rewind scope to [`active_root`].
+    /// poll records edits into all of them); the dock + rewind scope to [`active_root`](Self::active_root).
     timelines: HashMap<std::path::PathBuf, RepoTimeline>,
     /// The active tab's focused-pane repo root (`Repo::discover(active_cwd).root()`), or `None`
     /// outside a repo. The dock renders `timelines[active_root]`; rewind + status project from it.
@@ -3630,7 +3630,7 @@ impl App {
         }
     }
 
-    /// Rebuild all workspaces/tabs/groups from a saved [`SessionState`], spawning a shell per
+    /// Rebuild all workspaces/tabs/groups from a saved [`SessionState`](session_state::SessionState), spawning a shell per
     /// restored pane in its saved cwd (layout only - the prior process is never re-run). Called
     /// once from [`resumed`](Self::resumed) before the initial `sync_layout`, so the renderer
     /// (hence cell metrics) already exists. A session with no workspaces is ignored.
