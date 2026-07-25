@@ -6017,7 +6017,7 @@ fn key_to_bytes(
     let cursor = |final_byte: u8| Some(cursor_key(final_byte, m, application_cursor));
     let csi_tilde = |num: u8| Some(csi_edit(num, m));
     match &event.logical_key {
-        Key::Named(NamedKey::Enter) => Some(vec![b'\r']),
+        Key::Named(NamedKey::Enter) => Some(enter_bytes(modifiers)),
         Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
         Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
         Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
@@ -6149,6 +6149,23 @@ fn cursor_navigation_shortcut(key: NamedKey, modifiers: ModifiersState) -> Optio
         (NamedKey::Backspace, ModifiersState::ALT) => Some(b"\x1b\x7f".to_vec()),
         (NamedKey::Backspace, ModifiersState::SUPER) => Some(vec![0x15]),
         _ => None,
+    }
+}
+
+/// The bytes `Enter` sends under the legacy (non-Kitty) encoding.
+///
+/// Legacy xterm has no parameterized form for `Enter`, so a bare `CR` is all an unmodified press
+/// can be - but sending that for `Shift+Enter` too drops the modifier and submits the line in the
+/// very TUIs whose "insert a newline" gesture this is. Most of those never negotiate the Kitty
+/// protocol (so [`kitty_key_to_bytes`] never sees the key) and instead read the meta-prefixed
+/// carriage return `ESC CR` - the sequence they ask users to bind `Shift+Enter` to in terminals
+/// without Kitty support. It is inert in shell line editors (zsh / readline leave the buffer
+/// untouched and execute nothing), so an unmodified `Enter` still submits everywhere.
+fn enter_bytes(modifiers: ModifiersState) -> Vec<u8> {
+    if modifiers.shift_key() || modifiers.alt_key() {
+        vec![0x1b, b'\r']
+    } else {
+        vec![b'\r']
     }
 }
 
@@ -6292,8 +6309,8 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 mod tests {
     use super::{
         csi_edit, cursor_key, cursor_navigation_shortcut, cycle_index, dim, editor_filetype,
-        editor_mode, index_after_close, kitty_csi, kitty_modifier_code, leader_chord, order,
-        overlay_panel_top, overlay_rise_offset, pane_action, pane_dims, panic_message,
+        editor_mode, enter_bytes, index_after_close, kitty_csi, kitty_modifier_code, leader_chord,
+        order, overlay_panel_top, overlay_rise_offset, pane_action, pane_dims, panic_message,
         parse_leader, pointer_cell_in, process_name, resolve_cell, selection_cells, selection_text,
         shell_escape_path, tab_action, xterm_modifier_code, PaneAction, Selection, TabAction,
     };
@@ -6382,6 +6399,26 @@ mod tests {
         // Edit keys (PageDown = 6) use the `~` form, modified inserts `;<mod>`.
         assert_eq!(csi_edit(6, 1), b"\x1b[6~");
         assert_eq!(csi_edit(6, 2), b"\x1b[6;2~");
+    }
+
+    #[test]
+    fn shift_enter_stays_distinguishable_without_the_kitty_protocol() {
+        // The reported bug: `Shift+Enter` was encoded as a bare `CR`, identical to `Enter`, so a
+        // TUI that uses it to insert a newline (Claude Code and friends) submitted the prompt
+        // instead. Most TUIs never negotiate the Kitty protocol, so the legacy path has to carry
+        // the modifier itself - as the meta `ESC` prefix those programs are configured to expect.
+        assert_eq!(enter_bytes(ModifiersState::empty()), b"\r");
+        assert_eq!(enter_bytes(ModifiersState::SHIFT), b"\x1b\r");
+        // `Alt`/`⌥` is the modifier the `ESC` prefix classically encodes, so it sends the same.
+        assert_eq!(enter_bytes(ModifiersState::ALT), b"\x1b\r");
+        assert_eq!(
+            enter_bytes(ModifiersState::ALT | ModifiersState::SHIFT),
+            b"\x1b\r"
+        );
+        // Ctrl+Enter has no legacy encoding, and `Super`/`⌘` is an application modifier that is
+        // never encoded into a terminal sequence: both still submit.
+        assert_eq!(enter_bytes(ModifiersState::CONTROL), b"\r");
+        assert_eq!(enter_bytes(ModifiersState::SUPER), b"\r");
     }
 
     #[test]

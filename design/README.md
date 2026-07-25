@@ -70,6 +70,17 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-25 - **`⇧↵` (and `⌥↵`) send the meta-prefixed carriage return `ESC CR` when the Kitty
+  protocol is off.** The guide is silent on terminal key encoding, so decided here. Legacy xterm
+  has no parameterized form for `Enter`, so Skelly was sending a bare `CR` for `⇧↵` - dropping the
+  modifier and submitting the line in the TUIs that use `⇧↵` to insert a newline. Measured: those
+  TUIs (Claude Code among them) never negotiate the Kitty protocol, so the `CSI 13;2u` path added
+  with Kitty support never applies to them; what they read is `ESC CR`, the sequence they ask users
+  to bind `⇧↵` to in terminals without Kitty support (the same binding Ghostty / iTerm2 / WezTerm
+  ship natively). `ESC CR` is inert in shell line editors (zsh / readline leave the buffer untouched
+  and execute nothing), so unmodified `Enter` still submits everywhere. `⌃↵` has no legacy encoding
+  and `⌘` stays an application modifier, so both still submit.
+
 - 2026-07-14 - **Standard terminal cursor shortcuts take precedence over horizontal pane-arrow
   navigation.** `⌥←/→` move by word (Meta-B/F) and `⌘←/→` move to start/end of line (Ctrl-A/E),
   matching native terminal conventions without shell-specific setup. This supersedes the

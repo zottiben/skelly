@@ -59,6 +59,7 @@ const TERMINAL: Group = Group {
         b("Copy / paste", "\u{2318}C / V"),
         b("Move by word", "\u{2325}\u{2190} / \u{2192}"),
         b("Start / end of line", "\u{2318}\u{2190} / \u{2192}"),
+        b("Newline (no submit)", "\u{21e7}\u{21b5}"),
         b("Clear scrollback", "\u{2318}L"),
         b("Font larger / smaller", "\u{2318}= / -"),
         b("Reset font size", "\u{2318}0"),
