@@ -145,18 +145,21 @@ fn resolve_start_dir(launch: Option<PathBuf>, home: Option<PathBuf>) -> Option<P
 ///
 /// When no program is configured we use portable-pty's default-program path, which launches the
 /// login shell (`$SHELL`, else the passwd-db shell) as a *login* shell by prefixing argv0 with
-/// `-` - the canonical spelling that works for every shell including `/bin/sh`. This is what makes
-/// a GUI-launched Skelly source the user's profile (`/etc/zprofile` -> macOS `path_helper`, then
-/// `~/.zprofile` / `~/.zshrc`) and inherit the full `PATH` rather than launchd's minimal one, so
-/// `nvim`, `brew`, etc. resolve.
+/// `-` - the canonical spelling that works for every shell including `/bin/sh`. A configured
+/// `[shell] program` is also launched as a login shell, using its standard `-l` flag. The config
+/// key is a shell executable (the picker offers `zsh`, `bash`, and `fish`), not an arbitrary
+/// command line.
 ///
-/// A configured `[shell] program` is launched **as given, with no extra flags** - the same as a
-/// direct `exec`. We deliberately don't force `-l`: the config value can be any shell, wrapper, or
-/// launcher, and many don't accept a login flag; if a user wants login semantics for a custom
-/// program they can point it at a login-shell invocation themselves.
+/// Login semantics are what make every fresh pane source the user's profile (`/etc/zprofile` ->
+/// macOS `path_helper`, then `~/.zprofile` / `~/.zshrc`) and receive the full `PATH` rather than
+/// launchd's minimal one, so a configured `zsh` behaves exactly like `exec zsh -l`.
 fn build_shell_command(program: Option<&str>, cwd: Option<&Path>) -> CommandBuilder {
     let mut cmd = match program.map(str::trim).filter(|p| !p.is_empty()) {
-        Some(prog) => CommandBuilder::new(prog),
+        Some(prog) => {
+            let mut cmd = CommandBuilder::new(prog);
+            cmd.arg("-l");
+            cmd
+        }
         None => CommandBuilder::new_default_prog(),
     };
     cmd.env("TERM", "xterm-256color");
@@ -447,9 +450,9 @@ impl Terminal {
     }
 
     /// The pid of the shell this pane spawned, if it is known. Unlike
-    /// [`foreground_job_pid`](Self::foreground_job_pid) this is valid even while the shell is
-    /// idle at its prompt - the binary reads its working directory (which `cd` changes without
-    /// changing the pid) for the live status-line cwd and cwd-based tab titles.
+    /// [`foreground_job_pid`](Self::foreground_job_pid) this is valid while the shell is idle at
+    /// its prompt. Use [`cwd_pid`](Self::cwd_pid) when reading the pane's working directory: a
+    /// foreground agent/editor can change its own cwd without changing the parent shell's cwd.
     ///
     /// Returns `None` once the shell has exited: the pid is then stale and the OS may reuse it for
     /// an unrelated process, so reading *its* cwd would silently mis-scope the pane. Callers treat
@@ -460,6 +463,18 @@ impl Terminal {
             return None;
         }
         self.shell_pid
+    }
+
+    /// The process whose working directory best represents this pane's current context.
+    ///
+    /// A foreground job wins over the parent shell. This matters for agents that create or enter
+    /// a linked git worktree inside their own process while the shell remains in the main checkout:
+    /// git diff, timeline recording, tab titles, and split inheritance must follow the agent's
+    /// worktree rather than silently falling back to the shell's checkout. At an idle prompt this
+    /// returns the shell pid, so ordinary shell `cd` behavior is unchanged.
+    #[must_use]
+    pub fn cwd_pid(&self) -> Option<u32> {
+        self.foreground_job_pid().or_else(|| self.shell_pid())
     }
 
     /// Send bytes to the shell (keyboard input, pastes).
@@ -1024,9 +1039,9 @@ mod tests {
     }
 
     #[test]
-    fn configured_program_is_spawned_as_given_with_no_extra_flags() {
-        // A configured program launches exactly as named - no forced `-l`, so wrappers / shells
-        // that don't accept a login flag still work (the default `$SHELL` path handles login).
+    fn configured_program_is_spawned_as_a_login_shell() {
+        // The shell picker writes e.g. `program = "zsh"`; every new pane must still source the
+        // login profile and recover the user's PATH, exactly like `exec zsh -l`.
         let cmd = build_shell_command(Some("zsh"), None);
         assert!(!cmd.is_default_prog());
         let argv: Vec<_> = cmd
@@ -1034,6 +1049,6 @@ mod tests {
             .iter()
             .map(|a| a.to_string_lossy().into_owned())
             .collect();
-        assert_eq!(argv, vec!["zsh".to_owned()]);
+        assert_eq!(argv, vec!["zsh".to_owned(), "-l".to_owned()]);
     }
 }

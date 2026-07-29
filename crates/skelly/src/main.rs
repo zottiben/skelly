@@ -91,11 +91,11 @@ const TOAST_DURATION: Duration = Duration::from_secs(4);
 /// How often the background thread polls the repo's working tree to record edits into the session
 /// timeline (design §10.5). Off the UI thread, so the interval is a battery/freshness trade-off.
 const GIT_POLL_INTERVAL: Duration = Duration::from_secs(4);
-/// How often the background thread re-reads each pane's shell working directory (for the live
-/// status-line cwd, the cwd-based tab title, and the active tab's git dock). `cd` doesn't change
-/// the shell pid, so the cwd is polled on this interval rather than only when the foreground job
-/// changes. The read is a cheap symlink (Linux) or a short `lsof` (macOS), and runs **off the UI
-/// thread** ([`start_cwd_poll`](App::start_cwd_poll)) so a slow read never stalls a repaint.
+/// How often the background thread re-reads each pane's context working directory (for the live
+/// status-line cwd, cwd-based tab title, and git features). The context is the foreground job when
+/// present, otherwise the shell, so an agent can move into a linked worktree independently of its
+/// parent shell. The read is a cheap symlink (Linux) or a short `lsof` (macOS), and runs **off the
+/// UI thread** ([`start_cwd_poll`](App::start_cwd_poll)) so a slow read never stalls a repaint.
 const CWD_POLL_INTERVAL: Duration = Duration::from_millis(700);
 /// How long the empty-state mark + hint chips take to fade out once a pristine tab goes live
 /// (the design §10.2 "chips fade the first time the user runs a command", here the moment the
@@ -433,16 +433,19 @@ struct App {
     measure: TextMeasure,
     /// The active pane's live working directory (home-collapsed), mirrored from its tab's
     /// `pane_cwd` on each status poll - the sidebar group label + the fallback for a pane with
-    /// no tracked cwd read it. Per-pane cwds live on each [`Tab`].
+    /// no tracked cwd read it. A foreground job's cwd wins over its parent shell's, so agents
+    /// operating in linked worktrees scope the pane to that checkout. Per-pane cwds live on each
+    /// [`Tab`].
     status_cwd: String,
     status_branch: Option<String>,
-    /// The process repo's working-tree diff `(added, removed)` lines for the status-line dirty
-    /// indicator (§10.3); refreshed at startup + when the git dock refreshes.
+    /// The active pane repo's working-tree diff `(added, removed)` lines for the status-line dirty
+    /// indicator (§10.3); refreshed by the per-worktree git poll.
     status_dirty: Option<(u32, u32)>,
     status_shell: String,
-    /// The pids the background cwd-poll thread should read next cycle (each pane's shell pid),
-    /// written cheaply by the UI thread ([`refresh_poll_pids`](App::refresh_poll_pids)) whenever
-    /// the pane set changes. The `lsof`/`/proc` reads happen on the thread, never in a repaint.
+    /// The pids the background cwd-poll thread should read next cycle (each pane's foreground job,
+    /// falling back to its shell), written cheaply by the UI thread
+    /// ([`refresh_poll_pids`](App::refresh_poll_pids)). The `lsof`/`/proc` reads happen on the
+    /// thread, never in a repaint.
     poll_pids: Arc<Mutex<Vec<u32>>>,
     /// The latest `pid -> absolute cwd` map the poll thread produced; drained on the UI thread
     /// ([`drain_cwd_poll`](App::drain_cwd_poll)) into each pane's cwd. A pid absent from the map
@@ -496,8 +499,8 @@ struct App {
     shadow: Option<ShadowWorktree>,
     /// When the session began, for the timeline's session-relative event times.
     session_start: Instant,
-    /// The repository backing the dock (from the process cwd), cached while it is open so
-    /// moving the file selection re-diffs without re-discovering.
+    /// The repository backing the dock (from the active pane context cwd), cached while it is
+    /// open so moving the file selection re-diffs without re-discovering.
     git_repo: Option<Repo>,
     clipboard: Option<arboard::Clipboard>,
     window: Option<Arc<Window>>,
@@ -1408,23 +1411,25 @@ impl App {
         });
     }
 
-    /// Publish the current panes' shell pids for the background cwd-poll thread to read next
-    /// cycle. Cheap (no subprocess) - just collects pids under a short lock, so it can run on the
-    /// UI thread whenever the pane set changes (e.g. from [`sync_layout`](Self::sync_layout)).
+    /// Publish the current panes' context pids for the background cwd-poll thread to read next
+    /// cycle. A foreground job wins over its shell: an agent can enter a linked worktree in its
+    /// own process while the shell stays in the main checkout. Cheap (no subprocess) - just
+    /// collects pids under a short lock, so it can run whenever the pane set or foreground jobs
+    /// may have changed.
     fn refresh_poll_pids(&self) {
         let pids: Vec<u32> = self
             .tabs
             .iter()
             .flat_map(|tab| tab.panes.values())
-            .filter_map(Terminal::shell_pid)
+            .filter_map(Terminal::cwd_pid)
             .collect();
         if let Ok(mut guard) = self.poll_pids.lock() {
             *guard = pids;
         }
     }
 
-    /// Start the background thread that reads each pane's shell working directory (for the live
-    /// status-line cwd, cwd-based tab titles, and the active git dock). It reads the pids the UI
+    /// Start the background thread that reads each pane's context working directory (for the live
+    /// status-line cwd, cwd-based tab titles, and git features). It reads the pids the UI
     /// published in [`poll_pids`](Self::poll_pids), does the `lsof`/`/proc` reads **off the UI
     /// thread**, stores the results in [`pending_cwds`](Self::pending_cwds), and wakes the loop via
     /// `Wakeup::CwdPoll` - so a slow read (e.g. a hung mount) can never stall a repaint.
@@ -1468,7 +1473,7 @@ impl App {
             let live: HashSet<PaneId> = tab.tree.panes().into_iter().collect();
             tab.pane_cwd.retain(|id, _| live.contains(id));
             for (&id, term) in &tab.panes {
-                if let Some(dir) = term.shell_pid().and_then(|pid| cwds.get(&pid)) {
+                if let Some(dir) = term.cwd_pid().and_then(|pid| cwds.get(&pid)) {
                     if (ti, id) == active_focused {
                         active_abs = Some(dir.clone());
                     }
@@ -1490,6 +1495,10 @@ impl App {
                 self.rescope_active();
             }
         }
+        // Foreground process groups can change without the pane set changing (for example when a
+        // shell starts an agent). Refresh after every cwd cycle so the next one follows that job's
+        // cwd; once it exits, the next cycle naturally falls back to the shell pid.
+        self.refresh_poll_pids();
         if changed {
             self.request_redraw();
         }
@@ -1506,9 +1515,7 @@ impl App {
         // follows immediately (the cwd poll's own drain also calls this after updating active_cwd).
         let pid = {
             let ws = self.active_tab();
-            ws.panes
-                .get(&ws.tree.focused())
-                .and_then(Terminal::shell_pid)
+            ws.panes.get(&ws.tree.focused()).and_then(Terminal::cwd_pid)
         };
         if let Some(dir) = pid.and_then(|pid| {
             self.pending_cwds
@@ -1518,6 +1525,14 @@ impl App {
         }) {
             self.active_cwd = Some(dir);
         }
+        self.rescope_active_root();
+    }
+
+    /// Recompute the repo projection from [`active_cwd`](Self::active_cwd), returning any rewind
+    /// to now when the worktree changed and refreshing an already-open diff dock. Kept separate
+    /// from [`rescope_active`](Self::rescope_active) so opening a git feature can first perform one
+    /// immediate live cwd read instead of waiting for the background poll.
+    fn rescope_active_root(&mut self) {
         let root = self
             .active_cwd
             .as_deref()
@@ -1538,6 +1553,16 @@ impl App {
         if self.git_dock.open {
             self.refresh_git();
         }
+    }
+
+    /// Read the active pane's context cwd now and adopt its exact checkout. This is used when a
+    /// git feature opens, so an agent that just entered a linked worktree never briefly shows the
+    /// parent shell's main checkout while waiting for the next background cwd cycle.
+    fn refresh_active_context_now(&mut self) {
+        let cwd = self.active_pane_cwd();
+        self.status_cwd = home_relative(&cwd);
+        self.active_cwd = Some(cwd);
+        self.rescope_active_root();
     }
 
     /// Repaint every visible pane from its terminal grid, resolving cell colors and
@@ -2306,9 +2331,11 @@ impl App {
             self.git_dock.close();
             self.git_repo = None;
         } else {
-            // Only one right dock at a time (Hard rule 4): opening the diff closes the
-            // timeline and returns to now.
+            // Only one right dock at a time (Hard rule 4): opening the diff closes the timeline and
+            // returns to now. Re-read the pane context first so a foreground agent's linked
+            // worktree is used even if the background cwd poll has not observed it yet.
             self.close_timeline();
+            self.refresh_active_context_now();
             self.git_dock.open();
             self.refresh_git();
         }
@@ -2328,6 +2355,9 @@ impl App {
         } else {
             self.git_dock.close();
             self.git_repo = None;
+            // A foreground agent may have entered a linked worktree since the last poll; scope the
+            // timeline synchronously on open so it never flashes/falls back to the primary branch.
+            self.refresh_active_context_now();
             self.ensure_active_seeded();
             let branch = self
                 .active_root
@@ -2567,16 +2597,20 @@ impl App {
     }
 
     /// The active tab's focused-pane working directory (absolute) - the repo the git diff dock
-    /// scopes to (design §10.4 "Scoped to the active tab's repo"). Read from the pane's shell
-    /// process; falls back to the process cwd when it can't be read or there is no focused pane.
-    /// Only used to seed the very first git refresh (before the poll thread has filled the cache);
-    /// steady state reads the cached [`active_cwd`](Self::active_cwd) instead.
+    /// scopes to (design §10.4 "Scoped to the active tab's repo"). Read from the pane's foreground
+    /// job when one is running, else its shell; this keeps agent-created linked worktrees distinct
+    /// from the parent shell's main checkout. Used for startup and an immediate re-scope whenever a
+    /// git feature opens; a transient read failure retains cached [`active_cwd`](Self::active_cwd)
+    /// before finally falling back to the process cwd.
     fn active_pane_cwd(&self) -> std::path::PathBuf {
         let ws = self.active_tab();
         ws.panes
             .get(&ws.tree.focused())
-            .and_then(Terminal::shell_pid)
+            .and_then(Terminal::cwd_pid)
             .and_then(process_cwd)
+            // A transient process lookup failure keeps the last valid pane context rather than
+            // falling back from a linked worktree to Skelly's own launch checkout.
+            .or_else(|| self.active_cwd.clone())
             .unwrap_or_else(|| {
                 std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
             })
@@ -2792,10 +2826,7 @@ impl App {
     /// active cwd, or `None` before the first poll. Seeds a split's inherited working directory.
     fn focused_pane_abs_cwd(&self) -> Option<std::path::PathBuf> {
         let ws = self.active_tab();
-        let pid = ws
-            .panes
-            .get(&ws.tree.focused())
-            .and_then(Terminal::shell_pid);
+        let pid = ws.panes.get(&ws.tree.focused()).and_then(Terminal::cwd_pid);
         pid.and_then(|pid| {
             self.pending_cwds
                 .lock()
@@ -4879,6 +4910,14 @@ impl App {
         if lines == 0 {
             return;
         }
+        // The git dock is outside `pane_at_pointer`, so route a wheel/trackpad gesture over it to
+        // the selected file's diff. Winit's positive delta means scrolling up; the diff model's
+        // positive delta advances downward, hence the sign inversion.
+        if self.git_dock.open && self.pointer_in_right_dock() {
+            self.git_dock.scroll_diff(-lines);
+            self.request_redraw();
+            return;
+        }
         if let Some((id, _)) = self.pane_at_pointer() {
             if let Some(term) = self.active_tab_mut().panes.get_mut(&id) {
                 term.scroll_lines(lines);
@@ -5211,7 +5250,9 @@ fn process_cwd(pid: u32) -> Option<std::path::PathBuf> {
 /// the working directory is the one prefixed with `n`.
 #[cfg(target_os = "macos")]
 fn process_cwd(pid: u32) -> Option<std::path::PathBuf> {
-    let output = std::process::Command::new("lsof")
+    // Use macOS's fixed system path: a GUI-launched app may have launchd's minimal PATH, and cwd
+    // tracking is exactly what prevents git features from falling back to the launch checkout.
+    let output = std::process::Command::new("/usr/sbin/lsof")
         .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
         .output()
         .ok()?;
@@ -5371,13 +5412,17 @@ impl ApplicationHandler<Wakeup> for App {
             event_loop.exit();
             return;
         }
-        // Seed the launch repo's timeline with its "session started" anchor (so it exists even if
-        // the user commits before opening the timeline) and project its branch/dirty to the status
-        // line. `rescope_active` later re-points active_root to the active tab's repo.
-        self.active_root = Repo::discover(&std::env::current_dir().unwrap_or_default())
+        // Seed the active pane's repo with its "session started" anchor (so it exists even if the
+        // user commits before the first cwd poll). This must use the pane context, not Skelly's own
+        // launch cwd: a restored pane or foreground agent may be in a linked worktree while the app
+        // process remains in the main checkout.
+        let active_cwd = self.active_pane_cwd();
+        self.status_cwd = home_relative(&active_cwd);
+        self.active_root = Repo::discover(&active_cwd)
             .ok()
             .flatten()
             .map(|r| r.root().to_path_buf());
+        self.active_cwd = Some(active_cwd);
         self.ensure_active_seeded();
         self.sync_active_status();
         // Start recording working-tree edits into every tab's repo timeline (design §10.5).

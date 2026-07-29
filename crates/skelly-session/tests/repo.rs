@@ -96,6 +96,71 @@ fn discovers_repo_and_reports_status_and_diff() {
 }
 
 #[test]
+fn linked_worktree_stays_scoped_to_its_checkout_and_branch() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let main = dir.path().join("main");
+    let worktree = dir.path().join("agent-worktree");
+    std::fs::create_dir(&main).expect("create main checkout");
+
+    git(&main, &["init", "-b", "main"]);
+    std::fs::write(main.join("shared.txt"), "base\n").expect("write base");
+    git(&main, &["add", "."]);
+    git(&main, &["commit", "-m", "init", "--no-gpg-sign"]);
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "agent/one",
+            worktree.to_str().expect("utf-8 worktree path"),
+        ],
+    );
+
+    // Only the linked checkout is dirty. Discovery from a nested directory must retain that
+    // checkout as the command root rather than collapsing through the shared git dir to `main`.
+    std::fs::create_dir(worktree.join("src")).expect("create nested dir");
+    std::fs::write(worktree.join("shared.txt"), "agent edit\n").expect("edit worktree");
+    let linked = Repo::discover(&worktree.join("src"))
+        .expect("discover linked worktree")
+        .expect("linked checkout is a repo");
+    assert_eq!(
+        linked.root().canonicalize().unwrap(),
+        worktree.canonicalize().unwrap()
+    );
+
+    let linked_status = linked.status().expect("linked status");
+    assert_eq!(linked_status.branch.as_deref(), Some("agent/one"));
+    assert_eq!(linked_status.files.len(), 1);
+    assert_eq!(linked_status.files[0].path, Path::new("shared.txt"));
+    assert!(!linked
+        .diff(Path::new("shared.txt"), false)
+        .unwrap()
+        .hunks
+        .is_empty());
+
+    // The primary checkout has its own branch, index, and clean working tree.
+    let primary = Repo::discover(&main)
+        .expect("discover primary")
+        .expect("primary checkout is a repo");
+    let primary_status = primary.status().expect("primary status");
+    assert_eq!(primary_status.branch.as_deref(), Some("main"));
+    assert!(primary_status.files.is_empty());
+
+    // Staging through the linked Repo must update that worktree's index only.
+    linked
+        .stage(Path::new("shared.txt"))
+        .expect("stage linked edit");
+    let staged = linked.status().expect("linked staged status");
+    assert!(staged.files[0].staged && !staged.files[0].unstaged);
+    assert!(primary
+        .status()
+        .expect("primary still clean")
+        .files
+        .is_empty());
+}
+
+#[test]
 fn staging_moves_a_file_between_unstaged_and_staged() {
     let dir = tempfile::tempdir().expect("temp dir");
     let root = dir.path();

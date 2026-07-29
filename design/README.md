@@ -70,6 +70,18 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-07-29 - **A pane's repo/cwd context follows its foreground job, falling back to its shell;
+  every selected shell launches as a login shell.** Agents can enter a linked git worktree in their
+  own process while the parent shell remains in the primary checkout. Skelly now polls the PTY's
+  foreground process-group leader for cwd in that case, so diff, timeline recording/rewind, tab
+  titles, persisted cwd, and split inheritance stay scoped to that exact worktree; an idle pane
+  still follows the shell and ordinary `cd`. This refines the 2026-07-13 shell-cwd decision. The
+  `[shell] program` key is a shell executable (the picker offers zsh/bash/fish), so configured
+  shells now receive `-l` too; previously only the empty/default `$SHELL` path was a login shell,
+  which made the picker's default `program = "zsh"` skip the login profile and lose PATH in every
+  new pane. Diff wheel/trackpad input over the right dock also scrolls the selected file (keyboard
+  PageUp/PageDown remains available when the dock is focused).
+
 - 2026-07-25 - **`⇧↵` (and `⌥↵`) send the meta-prefixed carriage return `ESC CR` when the Kitty
   protocol is off.** The guide is silent on terminal key encoding, so decided here. Legacy xterm
   has no parameterized form for `Enter`, so Skelly was sending a bare `CR` for `⇧↵` - dropping the

@@ -156,8 +156,16 @@ fn shell_exit_is_reported() {
 }
 
 #[test]
-fn foreground_job_is_detected() {
-    let mut term = Terminal::spawn(80, 24, || {}).expect("spawn shell");
+fn foreground_job_is_the_pane_cwd_context() {
+    let base = std::env::temp_dir().join(format!("skelly-cwd-test-{}", std::process::id()));
+    let shell_dir = base.join("primary-checkout");
+    let agent_dir = base.join("agent-worktree");
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&shell_dir).expect("create shell cwd");
+    std::fs::create_dir_all(&agent_dir).expect("create agent cwd");
+
+    let mut term = Terminal::spawn_shell_in(80, 24, None, Some(&shell_dir), || {})
+        .expect("spawn shell in primary checkout");
 
     // Wait for the shell to come up (it prints a prompt), then let it settle as the
     // controlling terminal's foreground process group.
@@ -167,28 +175,65 @@ fn foreground_job_is_detected() {
         sleep(Duration::from_millis(50));
     }
     sleep(Duration::from_millis(300));
-    // Idle at the prompt: the shell itself owns the foreground group, so there is no job.
+    // Idle at the prompt: the shell itself owns the foreground group, so there is no job and its
+    // pid is the pane's best cwd context.
     assert_eq!(
         term.foreground_job_pid(),
         None,
         "an idle shell reports no foreground job"
     );
+    assert_eq!(term.cwd_pid(), term.shell_pid());
 
-    // Start a long-running foreground job; it takes over the terminal's foreground group.
-    term.write(b"sleep 30\n");
+    // Simulate an agent that enters its linked worktree in a child process while the parent shell
+    // stays in the primary checkout. The foreground process's cwd must become the pane context.
+    let command = format!("(cd '{}' && sleep 30)\n", agent_dir.to_string_lossy());
+    term.write(command.as_bytes());
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         if let Some(pid) = term.foreground_job_pid() {
             assert!(pid > 0, "a foreground job pid is positive");
-            return; // the `sleep` job was detected as the foreground process group
+            assert_eq!(term.cwd_pid(), Some(pid));
+            assert_eq!(
+                process_cwd(pid).and_then(|p| p.canonicalize().ok()),
+                agent_dir.canonicalize().ok(),
+                "the pane follows the foreground agent's worktree"
+            );
+            assert_eq!(
+                term.shell_pid()
+                    .and_then(process_cwd)
+                    .and_then(|p| p.canonicalize().ok()),
+                shell_dir.canonicalize().ok(),
+                "the parent shell remains in the primary checkout"
+            );
+            break;
         }
         assert!(
             Instant::now() < deadline,
-            "the foreground `sleep` job was never detected"
+            "the foreground agent job was never detected"
         );
         sleep(Duration::from_millis(50));
     }
-    // `term` drops here, killing the shell and its `sleep` child.
+    drop(term); // kills the shell and its sleeping child before removing their cwd directories.
+    std::fs::remove_dir_all(base).expect("remove cwd fixtures");
+}
+
+#[cfg(target_os = "linux")]
+fn process_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    std::fs::read_link(format!("/proc/{pid}/cwd")).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn process_cwd(pid: u32) -> Option<std::path::PathBuf> {
+    let output = std::process::Command::new("/usr/sbin/lsof")
+        .args(["-a", "-p", &pid.to_string(), "-d", "cwd", "-Fn"])
+        .output()
+        .ok()?;
+    output.status.success().then_some(())?;
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| line.strip_prefix('n'))
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
 }
 
 #[test]

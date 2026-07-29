@@ -1274,6 +1274,24 @@ mod tests {
         }
     }
 
+    fn long_diff() -> FileDiff {
+        FileDiff {
+            hunks: vec![Hunk {
+                old_start: 1,
+                new_start: 1,
+                heading: "large change".to_owned(),
+                lines: (0..100)
+                    .map(|i| DiffLine {
+                        kind: LineKind::Context,
+                        old_no: Some(i + 1),
+                        new_no: Some(i + 1),
+                        text: format!("large diff line {i}"),
+                    })
+                    .collect(),
+            }],
+        }
+    }
+
     /// A tall dock panel (the 420px dock) at 2x DPI.
     fn panel() -> PxRect {
         PxRect {
@@ -1544,13 +1562,23 @@ mod tests {
     }
 
     #[test]
-    fn diff_scroll_clamps_to_the_content_height() {
+    fn diff_scroll_moves_through_large_files_and_clamps_to_content() {
         let mut dock = GitDock::new();
         dock.load(sample_status());
-        dock.set_diff(sample_diff(), false);
+        dock.set_diff(long_diff(), false);
+
+        dock.scroll_diff(10);
+        let scrolled = built(&dock);
+        assert_eq!(scrolled.diff_scroll, 10);
+        let visible = texts(&scrolled);
+        assert!(visible.contains("large diff line 9"));
+        assert!(!visible.contains("large diff line 0"));
+
+        dock.set_scroll(scrolled.diff_scroll);
         dock.scroll_diff(1000); // far past the end
-                                // With plenty of rows the whole (3-line) diff fits, so the used scroll clamps to 0.
-        assert_eq!(built(&dock).diff_scroll, 0);
+        let end = built(&dock).diff_scroll;
+        assert!(end > 10, "a large diff has a real scroll range");
+        assert!(end < 1000, "the scroll clamps to the content height");
     }
 
     #[test]

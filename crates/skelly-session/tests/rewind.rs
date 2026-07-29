@@ -123,6 +123,61 @@ fn shadow_checkout_restores_past_state_without_moving_head_or_refs() {
 }
 
 #[test]
+fn rewind_from_a_linked_worktree_preserves_every_checkout_and_branch() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let main = dir.path().join("main");
+    let linked = dir.path().join("agent-worktree");
+    std::fs::create_dir(&main).expect("create main checkout");
+    let (first, _) = two_commit_repo(&main);
+    git(
+        &main,
+        &[
+            "worktree",
+            "add",
+            "-b",
+            "agent/one",
+            linked.to_str().expect("utf-8 worktree path"),
+        ],
+    );
+
+    let main_before = ref_state(&main);
+    let linked_before = ref_state(&linked);
+    let repo = Repo::discover(&linked)
+        .expect("discover linked worktree")
+        .expect("linked checkout is a repo");
+    assert_eq!(
+        repo.root().canonicalize().unwrap(),
+        linked.canonicalize().unwrap()
+    );
+
+    let shadow = repo
+        .shadow_checkout(&first)
+        .expect("rewind from linked worktree");
+    assert_eq!(
+        std::fs::read_to_string(shadow.path().join("f.txt")).unwrap(),
+        "first\n"
+    );
+    assert_eq!(
+        ref_state(&main),
+        main_before,
+        "the primary checkout remains on main"
+    );
+    assert_eq!(
+        ref_state(&linked),
+        linked_before,
+        "the agent checkout remains on its linked-worktree branch"
+    );
+    assert_eq!(
+        std::fs::read_to_string(linked.join("f.txt")).unwrap(),
+        "second\n"
+    );
+
+    shadow.discard().expect("discard linked rewind");
+    assert_eq!(ref_state(&main), main_before);
+    assert_eq!(ref_state(&linked), linked_before);
+}
+
+#[test]
 fn a_failed_shadow_checkout_leaves_refs_untouched() {
     let dir = tempfile::tempdir().expect("temp dir");
     let root = dir.path();

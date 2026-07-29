@@ -203,8 +203,8 @@ pub struct Git {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct Shell {
-    /// The shell program to launch (e.g. `zsh`, `bash`, `fish`). Empty = the login shell
-    /// (`$SHELL`, else `/bin/bash`), which is also what the first-run "Skip" accepts.
+    /// The shell program to launch as a login shell (e.g. `zsh`, `bash`, `fish`). Empty = the
+    /// system login shell (`$SHELL`, else `/bin/bash`), which is what first-run "Skip" accepts.
     pub program: String,
 }
 
