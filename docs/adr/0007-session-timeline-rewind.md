@@ -1,6 +1,12 @@
 # 0007. Session timeline: an in-session event log with shadow-worktree rewind
 
-- Status: Accepted
+> **Superseded in part by [ADR-0008](0008-snapshot-rewind.md) (2026-08-06).** The
+> event-log model, `Timeline`/`SessionEvent`, and the still-open `Agent` transport
+> stand. What 0008 replaces: "only commits are restorable" and "rewind is read-only
+> inspection" - every recorded moment is now a content snapshot in a Skelly-owned
+> object store, and restoring one puts those files back in the working tree.
+
+- Status: Accepted (rewind mechanism superseded by ADR-0008)
 - Date: 2026-07-12
 - Deciders: maintainers
 - Related: AGENTS.md Hard rule 3 (non-destructive rewind never moves HEAD/refs -

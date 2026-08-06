@@ -4,11 +4,12 @@
 //! `Esc`. This module is pure state + view-building over a [`Timeline`]: it holds the
 //! event log + the selection, and turns them into a monospace grid of UI-token-colored
 //! cells plus the row metadata the renderer needs (the selected row's fill and the
-//! "viewing" accent bar). The binary owns recording events, the shadow-worktree rewind
-//! ([`skelly_session::Repo::shadow_checkout`]), and key routing.
+//! "viewing" accent bar). The binary owns recording events, the snapshot rewind
+//! ([`skelly_session::SnapshotStore`]), and key/click routing.
 //!
-//! v1 is a read-only inspection (ADR-0007): selecting a restorable event rewinds to it in
-//! a shadow worktree (HEAD untouched, Hard rule 3); `⌥⌘0` returns to now. Event times are
+//! Selecting an event (arrows, `⌥⌘←/→`, or a click on its row) restores the working tree to
+//! that moment's snapshot (ADR-0008; HEAD/refs untouched, Hard rule 3); `⌥⌘0` returns to
+//! now, putting the live state the rewind parked back. Event times are
 //! **session-relative** elapsed labels (`M:SS` into the session) - dependency-free and
 //! honest, in place of the mockup's wall-clock times (which would need a date dependency a
 //! minimal terminal should not carry).
@@ -114,6 +115,50 @@ impl TimelineDock {
         true
     }
 
+    /// Select event `index` in `timeline`, clamped (a click on a row). Returns `true` when the
+    /// selection actually moved, so the binary only restores when the moment changed.
+    pub(crate) fn select(&mut self, timeline: &Timeline, index: usize) -> bool {
+        let Some(newest) = timeline.newest() else {
+            return false;
+        };
+        let next = index.min(newest);
+        if next == self.selected {
+            return false;
+        }
+        self.selected = next;
+        true
+    }
+
+    /// The index of the event row at physical `y` within `panel` (design §10.7 "click any
+    /// entry"), or `None` when the point is over the header, the foot band, or empty space past
+    /// the last row. Mirrors [`Self::push_events`]' geometry, including its scroll window.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "the row index is computed from a guarded non-negative offset"
+    )]
+    pub(crate) fn row_at(
+        &self,
+        timeline: &Timeline,
+        panel: PxRect,
+        scale: f32,
+        y: f32,
+    ) -> Option<usize> {
+        let top = panel.y + (PAD_TOP + STATUS_H + LABEL_H) * scale;
+        let events_bottom = panel.y + panel.h - FOOT_H * scale;
+        let row_h = EVENT_H * scale;
+        if y < top || y >= events_bottom || row_h <= 0.0 {
+            return None;
+        }
+        let visible = ((events_bottom - top) / row_h).floor().max(0.0) as usize;
+        let slot = ((y - top) / row_h).floor() as usize;
+        if slot >= visible {
+            return None;
+        }
+        let index = scroll_window(timeline.len(), visible, self.selected) + slot;
+        (index < timeline.len()).then_some(index)
+    }
+
     /// Select the newest event of `timeline` (return to now). Returns `true` if it moved.
     pub(crate) fn select_now(&mut self, timeline: &Timeline) -> bool {
         let newest = timeline.newest().unwrap_or(0);
@@ -211,7 +256,7 @@ impl TimelineDock {
         push_right(
             &mut labels,
             measure,
-            "up down move",
+            "click or arrows",
             FontRole::Caption,
             theme.fg_muted,
             cr,
@@ -326,22 +371,20 @@ impl TimelineDock {
         }
     }
 
-    /// The status banner text + color: at HEAD (now) or viewing a past state.
+    /// The status banner text + color: at now, or viewing a restored past state (design §10.7
+    /// "Viewing state at 13:44 - codebase restored to this point").
     fn status_banner(&self, timeline: &Timeline, theme: &Theme) -> (String, Srgb) {
         if self.selection_is_now(timeline) {
-            ("At HEAD - now".to_owned(), theme.diff_hunk)
+            ("At now - live working tree".to_owned(), theme.diff_hunk)
         } else {
             let time = timeline
                 .events()
                 .get(self.selected)
                 .map_or("", |e| e.time.as_str());
-            let short: String = self
-                .selected_restore(timeline)
-                .unwrap_or_default()
-                .chars()
-                .take(7)
-                .collect();
-            (format!("Viewing {time} - {short}"), theme.accent)
+            (
+                format!("Viewing {time} - files restored to this point"),
+                theme.accent,
+            )
         }
     }
 
@@ -643,7 +686,7 @@ fn scroll_window(len: usize, visible: usize, anchor: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::TimelineDock;
+    use super::{TimelineDock, EVENT_H, LABEL_H, PAD_TOP, STATUS_H};
     use skelly_render::{PxRect, TextMeasure, Theme};
     use skelly_session::{Actor, SessionEvent, Timeline};
 
@@ -718,10 +761,48 @@ mod tests {
     }
 
     #[test]
+    fn clicking_a_row_selects_the_moment_under_it() {
+        // Design §10.7: "scrub the track (or click any entry) to restore the codebase to that
+        // moment". The hit test has to agree with the geometry `build` lays the rows out on.
+        let (mut dock, tl) = recorded();
+        dock.open(&tl, Some("main".to_owned()));
+        let (panel, scale) = (panel(), 2.0);
+        let first_row = panel.y + (PAD_TOP + STATUS_H + LABEL_H) * scale;
+
+        assert_eq!(dock.row_at(&tl, panel, scale, first_row + 1.0), Some(0));
+        let third = first_row + 2.0 * EVENT_H * scale + 1.0;
+        assert_eq!(dock.row_at(&tl, panel, scale, third), Some(2));
+        // Past the last event, over the header, and over the foot band are all misses.
+        assert_eq!(
+            dock.row_at(&tl, panel, scale, first_row + 3.5 * EVENT_H * scale),
+            None,
+            "empty space below the last event"
+        );
+        assert_eq!(
+            dock.row_at(&tl, panel, scale, panel.y + 1.0),
+            None,
+            "header"
+        );
+        assert_eq!(
+            dock.row_at(&tl, panel, scale, panel.y + panel.h - 1.0),
+            None,
+            "foot band"
+        );
+
+        // Selecting the clicked row rewinds; clicking it again is a no-op (nothing to restore).
+        assert!(dock.select(&tl, 0));
+        assert!(!dock.selection_is_now(&tl));
+        assert!(!dock.select(&tl, 0), "already there");
+        // Out of range clamps to the newest rather than selecting nothing.
+        assert!(dock.select(&tl, 99));
+        assert!(dock.selection_is_now(&tl));
+    }
+
+    #[test]
     fn build_shows_the_events_status_banner_and_legend() {
         let (dock, tl) = recorded();
         let text = labels_text(&dock, &tl);
-        assert!(text.contains("At HEAD - now"), "at-now banner");
+        assert!(text.contains("At now - live working tree"), "at-now banner");
         assert!(text.contains("TIMELINE - 3 EVENTS"));
         assert!(text.contains("Session started"));
         assert!(text.contains("git commit - feat: x"));
@@ -758,7 +839,7 @@ mod tests {
             paint
                 .labels
                 .iter()
-                .any(|l| l.text.starts_with("Viewing 0:00")),
+                .any(|l| l.text == "Viewing 0:00 - files restored to this point"),
             "viewing banner"
         );
     }

@@ -17,11 +17,12 @@ const DOT_GAP: f32 = 10.0;
 const MARGIN_BOTTOM: f32 = 24.0;
 
 /// A toast's severity, which colors its leading dot: `Info` (accent) for a neutral notice like
-/// the pane cap, `Success` (green) for a completed action.
+/// the pane cap, `Success` (green) for a completed action, `Error` (red) for one that failed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum ToastKind {
     Info,
     Success,
+    Error,
 }
 
 /// A transient notification: a short message + its severity. The binary pairs it with an expiry.
@@ -61,6 +62,7 @@ impl Toast {
         let dot_color = match self.kind {
             ToastKind::Info => theme.accent,
             ToastKind::Success => theme.diff_add,
+            ToastKind::Error => theme.diff_del,
         };
         let quads = vec![ChromeQuad::rounded(
             PxRect {

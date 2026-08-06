@@ -187,7 +187,11 @@ pub struct Session {
     pub timeline: bool,
     /// Restore tabs + pinned layout on launch (layout only).
     pub persist: bool,
-    /// Use a shadow worktree so rewind never mutates HEAD (Hard rule 3).
+    /// Allow the timeline to rewind the working tree, which it does through Skelly's own
+    /// shadow object store - never the repository's `.git`, so HEAD and refs are untouched
+    /// (Hard rule 3, ADR-0008) and the state a rewind replaces is always restorable. Off
+    /// means the timeline is a log Skelly will not act on: selecting a moment shows it but
+    /// changes no files.
     pub shadow_worktree: bool,
 }
 

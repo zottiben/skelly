@@ -64,10 +64,14 @@ ANSI palette - never cross them (any ANSI scheme pairs with any UI theme).
 *Enforced:* review + a visual check in both Ossein Dark and Light; later, a lint rejecting raw hex in UI code.
 
 ### 3. Session-timeline rewind is non-destructive
-Restoring to a past moment checks out a shadow worktree and never rewrites history or
-moves HEAD - this is the feature's whole trust contract. Treat any path that could
-mutate the user's real branch/HEAD during rewind as a bug.
-*Enforced:* tests asserting HEAD and refs are untouched across a rewind/fast-forward cycle.
+Restoring to a past moment replays a content snapshot from Skelly's **own** object store
+(ADR-0008): every git command runs with `--git-dir` at that store and `GIT_INDEX_FILE` at a
+private index, so the user's `.git` is never in scope and HEAD, branches, refs, the reflog,
+and their index cannot move. Rewind *does* write the working tree - which is why the state
+it replaces is captured first and parked in the store, making return-to-now exact. Treat any
+git invocation that could reach the user's `.git` during rewind, or any rewind path that
+does not park the live state first, as a bug.
+*Enforced:* tests asserting HEAD, refs, and the index are byte-identical across a rewind/return cycle.
 
 ### 4. Docks and overlays are layers, not routes
 The terminal pane tree is the always-present base layer and never unmounts. Git diff

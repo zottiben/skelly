@@ -1,6 +1,6 @@
 [package]
 name = "skelly-session"
-description = "Session timeline, non-destructive rewind (shadow worktree), and per-repo git diff."
+description = "Session timeline, non-destructive rewind (snapshot store), and per-repo git diff."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

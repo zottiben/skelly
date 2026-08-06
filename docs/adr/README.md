@@ -14,7 +14,8 @@ old one and flip its status.
 | [0004](0004-windowing.md)                     | Windowing / input layer        | Accepted |
 | [0005](0005-pane-tree-crate.md)               | Pane-tree model as a leaf crate | Accepted |
 | [0006](0006-git-backend.md)                   | Git backend: the `git` CLI     | Accepted |
-| [0007](0007-session-timeline-rewind.md)       | Session timeline + shadow-worktree rewind | Accepted |
+| [0007](0007-session-timeline-rewind.md)       | Session timeline + shadow-worktree rewind | Superseded in part by 0008 |
+| [0008](0008-snapshot-rewind.md)               | Rewind restores the working tree from content snapshots | Accepted |
 
 ADRs 0001-0004 settle the open foundation decisions flagged in
 [`design/README.md`](../../design/README.md). Ratified 2026-07-11; the M1 walking

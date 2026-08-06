@@ -30,10 +30,13 @@ with the decision + date.
   explicit append-only event log the agent writes), never a shell heuristic._
 - [x] **Windowing** - single OS window for v0.1 via `winit`; multi-window is a
   later additive decision. _Resolved 2026-07-11 (ADR-0004)._
-- [x] **Rewind + edit** - _Resolved 2026-07-12: v1 rewind is **read-only
-  inspection**. Restoring materializes the commit in a shadow worktree
-  (HEAD/refs untouched, Hard rule 3) and shows the viewed state; Skelly never
-  auto-forks or moves panes into it. Editable rewind / fork-on-edit is deferred._
+- [x] **Rewind + edit** - _Revised 2026-08-06 (ADR-0008): restoring a moment now **restores
+  the working tree** to it, from a content snapshot in Skelly's own object store
+  (HEAD/refs/index untouched, Hard rule 3); the live state is parked in the store first, so
+  return-to-now is exact. The 2026-07-12 resolution (read-only inspection in a shadow
+  worktree) is superseded - it made scrubbing a no-op in any session without commits.
+  Editing *while* rewound / fork-on-edit is still deferred: edits made in a past state are
+  not carried forward._
 - [x] **Persist scope** - _Resolved 2026-07-12: **layout only** (restore tabs +
   pinned on launch), never re-run processes, per the guide's own `[session]
   persist` comment. **Launch-time restore landed 2026-07-15** (see "Session
@@ -69,6 +72,25 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
+
+- 2026-08-06 - **Scrubbing the timeline restores the working tree, and both git surfaces are
+  live while open.** Two reported bugs, one root cause each. **(1) The diff dock was a
+  snapshot, not a feed**: it only loaded on open and on a repo change, so edits made while it
+  was up never showed. The background git poll now refreshes the open dock from the status it
+  already reads, at a live cadence (600ms while a git surface is open, 4s idle), keeping the
+  selection on its *path* and the diff at its scroll position so a refresh never moves the
+  reader. A generation stamp drops a poll that started before a staging/commit, so an
+  in-flight cycle cannot paint stale data over what the user just did. **(2) Selecting a
+  timeline moment did nothing**: only commits were restorable, so in a session without one
+  every event resolved to the same launch SHA and was "now" by construction - and edits after
+  the first to a given file were not even recorded. Every moment now carries a working-tree
+  **snapshot** (a tree in a Skelly-owned object store, never the user's `.git`), edit
+  detection tracks each file's line counts rather than just which paths are dirty, and
+  selecting a moment - by `⌥⌘←/→`, arrows, or **clicking a row** (design §10.7 "click any
+  entry", previously unimplemented) - restores those files. `⌥⌘0`, Esc, a cross-repo `cd`,
+  and quitting all return to now, restoring the live state the rewind parked. `[session]
+  shadow_worktree` now gates rewind: `false` means the timeline is a log Skelly will not act
+  on. See ADR-0008 for the mechanism and what it supersedes in ADR-0007._
 
 - 2026-07-29 - **A pane's repo/cwd context follows its foreground job, falling back to its shell;
   every selected shell launches as a login shell.** Agents can enter a linked git worktree in their

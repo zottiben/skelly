@@ -13,7 +13,8 @@ end-to-end. M2 has a handful of tracked carry-overs - the unchecked boxes below
 plus a few M3 follow-ups, which we finish opportunistically rather than block on.
 **M4 (signature features) is complete**: the **per-repo git diff dock** (`⇧⌘G`) - the
 diff model, the dock UI, per-file + hunk-level staging, and the commit box - and the
-**session timeline + non-destructive rewind** (`⇧⌘H`, ADR-0007) both land end-to-end.
+**session timeline + non-destructive rewind** (`⇧⌘H`, ADR-0007 as revised by ADR-0008)
+both land end-to-end.
 **M5 (hardening & release) is now in progress**: six edge states have landed - the
 **shell-exit / crash overlay** (design §12; a dim scrim + exit message + `↵ restart` over a
 pane whose shell ended), the **empty state + never-quit close cascade** (design §10.2;
@@ -169,7 +170,7 @@ follow-ups, finished opportunistically.
     key so the two are independently selectable per Hard rule 2; today one name drives
     both, and there is no theme-file watch yet.)
 - [~] **M4 - Signature features.** Per-repo git diff dock with hunk staging;
-  session timeline with non-destructive rewind (shadow worktree).
+  session timeline with non-destructive rewind (snapshot store).
   - [x] Per-repo git diff dock.
     - [x] The read-only git diff **model** in `skelly-session` (ADR-0006: shell out
       to the `git` CLI behind a Skelly-owned type, not libgit2). `Repo::discover`
@@ -212,18 +213,20 @@ follow-ups, finished opportunistically.
         (integration-tested staging one hunk of a two-hunk file). In the dock, `[` / `]`
         move the focused hunk (highlighted, with a `stage`/`unstage ⌘↵` affordance) and
         `⌘↵` stages it (or unstages when viewing the staged diff).
-  - [x] Session timeline + non-destructive rewind (shadow worktree via
-    `git worktree add --detach`; Hard rule 3 - HEAD/refs untouched, adversarially
-    tested). The three open decisions are settled (ADR-0007 + `design/README.md`):
-    the timeline is an **in-session event log** Skelly records itself (a `System`
-    session-start anchor + the `Human` git events it witnesses - commits, which are
-    restorable, and staging, which is not); rewind is **read-only inspection** (a
-    shadow worktree, HEAD/refs untouched); persist is **layout only**. The
-    `skelly-session` model (`Timeline` / `SessionEvent` / `Actor`,
-    `Repo::shadow_checkout` -> `ShadowWorktree`) has a mandatory trust-contract
-    integration suite; the right-dock UI (`⇧⌘H`, mutually exclusive with the git
-    dock) lists the events with a viewing banner + actor legend, `↑/↓` (or `⌥⌘←/→`)
-    scrub, `⌥⌘0` returns to now, and selecting a past commit rewinds to it. Verified
+  - [x] Session timeline + non-destructive rewind (Hard rule 3 - HEAD/refs/index
+    untouched, adversarially tested). The three open decisions are settled (ADR-0007 +
+    `design/README.md`): the timeline is an **in-session event log** Skelly records
+    itself (a `System` session-start anchor, the `Human` edits the git poll witnesses,
+    and the git events it drives); persist is **layout only**. **Rewind was revised by
+    ADR-0008** (2026-08-06): every recorded moment is a working-tree **snapshot** in a
+    Skelly-owned object store, and selecting one restores those files - the earlier
+    commit-only, read-only shadow-worktree rewind made scrubbing a no-op in any session
+    without a commit. The `skelly-session` model (`Timeline` / `SessionEvent` / `Actor`,
+    `SnapshotStore`, plus `Repo::shadow_checkout` -> `ShadowWorktree` still available)
+    has a mandatory trust-contract integration suite; the right-dock UI (`⇧⌘H`, mutually
+    exclusive with the git dock) lists the events with a viewing banner + actor legend,
+    `↑/↓` (or `⌥⌘←/→`) scrub, a click selects any row, `⌥⌘0` returns to now, and
+    selecting a past moment restores the codebase to it. Verified
     by the `timeline_capture` headless PNG in both themes + a clean boot. The
     **launch-time layout restore** (`session.persist`) has since landed: on quit the
     full layout (all workspaces, their tabs + groups, each tab's pane tiling + per-pane

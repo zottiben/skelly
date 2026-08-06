@@ -30,6 +30,7 @@ mod toast;
 mod tooltip;
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,7 +41,7 @@ use skelly_render::{
     AnsiPalette, CursorShape, GitDockView, GridCell, OverlayView, PaneView, ProseLabel, PxRect,
     Renderer, SettingsView, SidebarView, Srgb, TextMeasure, Theme, TimelineView,
 };
-use skelly_session::{Actor, Repo, SessionEvent, ShadowWorktree, Status, Timeline};
+use skelly_session::{Actor, Repo, SessionEvent, SnapshotStore, Status, Timeline};
 use skelly_term::{CellAttrs, CellColor, ExitStatus, KeyboardMode, TermCell, Terminal};
 
 use confirm::{CloseTarget, Confirm};
@@ -91,6 +92,13 @@ const TOAST_DURATION: Duration = Duration::from_secs(4);
 /// How often the background thread polls the repo's working tree to record edits into the session
 /// timeline (design §10.5). Off the UI thread, so the interval is a battery/freshness trade-off.
 const GIT_POLL_INTERVAL: Duration = Duration::from_secs(4);
+/// The poll interval used while a git surface is open. The diff dock and the timeline are meant to
+/// read as a live feed of the working tree (design §10.4/§10.5), so while one is on screen the
+/// trade-off flips towards freshness; it returns to [`GIT_POLL_INTERVAL`] when both are closed.
+const GIT_POLL_INTERVAL_ACTIVE: Duration = Duration::from_millis(600);
+/// The longest the git-poll thread sleeps in one go. It waits in slices of this length so a cadence
+/// change (a dock opening) takes effect within a slice instead of after a full idle interval.
+const GIT_POLL_SLICE: Duration = Duration::from_millis(200);
 /// How often the background thread re-reads each pane's context working directory (for the live
 /// status-line cwd, cwd-based tab title, and git features). The context is the foreground job when
 /// present, otherwise the shell, so an agent can move into a linked worktree independently of its
@@ -335,22 +343,92 @@ struct Workspace {
 struct RepoTimeline {
     /// The append-only event log for this repo.
     timeline: Timeline,
-    /// Repo-relative paths known dirty, the baseline that distinguishes a *session* edit from
-    /// pre-session changes.
-    tracked_dirty: HashSet<String>,
+    /// Last-known `(added, removed)` per dirty repo-relative path. Both the baseline that tells a
+    /// *session* edit from pre-session dirt and the source of an edit event's title.
+    file_stats: HashMap<String, (u32, u32)>,
     /// Whether the per-repo "session started" anchor has been recorded (lazy on first sight).
     started: bool,
     /// Last-known working-tree `(added, removed)` totals - the status-line dirty projection source.
     dirty: Option<(u32, u32)>,
     /// Last-known branch - the status-line branch projection source.
     branch: Option<String>,
+    /// The newest working-tree snapshot observed for this repo (a tree id in Skelly's own object
+    /// store). A change in it is what makes a poll cycle a timeline moment; it is also the restore
+    /// target attached to UI-driven events, whose content is unchanged by staging or committing.
+    snapshot: Option<String>,
 }
 
-/// One repo's freshly-polled status, posted from the git-poll thread. `head` (short SHA) is
-/// computed on the thread so the UI never shells out for a repo's session-start anchor.
+/// One repo's freshly-polled status, posted from the git-poll thread. `head` (short SHA) and the
+/// working-tree `snapshot` are computed on the thread so the UI never shells out for them.
 struct RepoStatus {
     status: Status,
     head: Option<String>,
+    snapshot: Option<String>,
+}
+
+/// One cycle's worth of polled statuses, stamped with the git generation they were read at.
+///
+/// The UI bumps that generation whenever it changes the repository itself (staging, committing,
+/// undoing), so a cycle that started before the change is recognizable as stale and dropped rather
+/// than painted over the dock's already-correct view of what just happened.
+#[derive(Default)]
+struct PolledStatuses {
+    /// The [`App::git_generation`] value the cycle read the repos at.
+    generation: u64,
+    /// The statuses, keyed by repo root.
+    repos: HashMap<std::path::PathBuf, RepoStatus>,
+}
+
+/// The snapshot stores shared with the git-poll thread, behind one lock.
+///
+/// Both threads drive `git` against the same private index per repo, so the lock is what keeps a
+/// background capture from racing a rewind for `index.lock`. The poll thread only ever `try_lock`s
+/// (a busy cycle is skipped, never blocked on); the UI thread blocks, because a rewind must happen.
+#[derive(Default)]
+struct Snapshots {
+    /// One store per repo root, created on first sight.
+    stores: HashMap<std::path::PathBuf, SnapshotStore>,
+    /// The repo currently rewound, if any. Its working tree is showing a past state, so the poll
+    /// thread must not snapshot it - that would record the rewind itself as a timeline moment.
+    frozen: Option<std::path::PathBuf>,
+}
+
+impl Snapshots {
+    /// The store for `root`, opening it on first use. `None` when the store cannot be created
+    /// (no temp dir, no `git`), which degrades the timeline to a log without rewind.
+    ///
+    /// A cached store whose directory has gone (the OS reaping the temp dir under a long-running
+    /// session) is re-opened rather than used, so a vanished store costs one re-init instead of
+    /// failing every capture for the rest of the session.
+    fn store(&mut self, root: &std::path::Path) -> Option<&SnapshotStore> {
+        if self.stores.get(root).is_none_or(|s| !s.git_dir().is_dir()) {
+            match SnapshotStore::open(root) {
+                Ok(store) => {
+                    self.stores.insert(root.to_path_buf(), store);
+                }
+                Err(err) => {
+                    tracing::warn!(%err, root = %root.display(), "no snapshot store for repo");
+                    self.stores.remove(root);
+                    return None;
+                }
+            }
+        }
+        self.stores.get(root)
+    }
+}
+
+/// A live rewind: the active repo's working tree is showing a past snapshot.
+///
+/// Holding `live` is what makes the rewind non-destructive in the way that matters to the user -
+/// the state the first restore replaced is parked in Skelly's store, so returning to now puts it
+/// back byte for byte. HEAD, refs, and the repository's index are never in play at all.
+struct Rewind {
+    /// The repo whose working tree is rewound (only ever one at a time).
+    root: std::path::PathBuf,
+    /// The snapshot of the live state the rewind replaced, restored on return-to-now.
+    live: String,
+    /// The snapshot currently materialized in the working tree.
+    viewing: String,
 }
 
 /// The active repo's event log from the per-repo map, or the empty fallback outside a repo. A free
@@ -366,13 +444,72 @@ fn active_log<'a>(
         .map_or(empty, |rt| &rt.timeline)
 }
 
-/// The set of dirty working-tree paths (repo-relative) in `status` - the timeline's edit baseline.
-fn dirty_paths(status: &Status) -> HashSet<String> {
+/// The `(added, removed)` line counts per dirty working-tree path (repo-relative) in `status` -
+/// the timeline's edit baseline. Counts, not just paths, so a second edit to an already-dirty file
+/// is still a moment worth recording.
+fn dirty_stats(status: &Status) -> HashMap<String, (u32, u32)> {
     status
         .files
         .iter()
-        .map(|f| f.path.to_string_lossy().into_owned())
+        .map(|f| (f.path.to_string_lossy().into_owned(), (f.added, f.removed)))
         .collect()
+}
+
+/// The files whose working-tree change differs from `baseline` - newly dirty, or dirty with
+/// different line counts. In git's report order, so the title names files the way the dock lists
+/// them. A file that went clean is not an edit to name, only a change of state.
+fn changed_since(
+    status: &Status,
+    baseline: &HashMap<String, (u32, u32)>,
+) -> Vec<(String, u32, u32)> {
+    status
+        .files
+        .iter()
+        .filter_map(|f| {
+            let path = f.path.to_string_lossy().into_owned();
+            (baseline.get(&path) != Some(&(f.added, f.removed)))
+                .then_some((path, f.added, f.removed))
+        })
+        .collect()
+}
+
+/// A [`Duration`] as the whole milliseconds the git-poll thread's shared interval is stored in.
+fn interval_ms(interval: Duration) -> u64 {
+    u64::try_from(interval.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// Sleep out the git poll's current interval in [`GIT_POLL_SLICE`] slices, re-reading it each
+/// slice. Waiting in slices is what lets opening a dock speed the poll up right away instead of
+/// after the idle interval already in flight has elapsed.
+fn poll_wait(interval_ms: &AtomicU64) {
+    let start = Instant::now();
+    loop {
+        let target = Duration::from_millis(interval_ms.load(Ordering::Relaxed));
+        let Some(left) = target.checked_sub(start.elapsed()) else {
+            return;
+        };
+        std::thread::sleep(left.min(GIT_POLL_SLICE));
+    }
+}
+
+/// Snapshot `root`'s working tree from the poll thread, returning its tree id.
+///
+/// `None` when the repo is frozen (rewound - snapshotting it would record the rewind itself as a
+/// moment), when the UI thread holds the lock for a rewind, or when `git` fails: all cases where
+/// the honest answer is "no new moment observed this cycle", never a wait on the UI thread.
+fn capture_snapshot(snapshots: &Mutex<Snapshots>, root: &std::path::Path) -> Option<String> {
+    let mut guard = snapshots.try_lock().ok()?;
+    if guard.frozen.as_deref() == Some(root) {
+        return None;
+    }
+    let store = guard.store(root)?;
+    match store.capture() {
+        Ok(tree) => Some(tree),
+        Err(err) => {
+            tracing::warn!(%err, root = %root.display(), "snapshot capture failed");
+            None
+        }
+    }
 }
 
 /// The `(added, removed)` line totals across `status`, or `None` when the tree is clean.
@@ -384,14 +521,20 @@ fn dirty_totals(status: &Status) -> Option<(u32, u32)> {
     (a > 0 || r > 0).then_some((a, r))
 }
 
-/// The timeline edit event's `(title, detail)` for the files `(path, added, removed)` newly dirty
-/// since the last poll, or `None` when nothing is new. A single file names itself; several collapse
+/// The timeline edit event's `(title, detail)` for the files `(path, added, removed)` that changed
+/// since the last poll, or `None` when nothing did. A single file names itself; several collapse
 /// to a count + combined totals (design §10.5).
 fn edit_text(newly: &[(String, u32, u32)]) -> Option<(String, String)> {
     match newly {
         [] => None,
         [(path, added, removed)] => {
-            let name = path.rsplit('/').next().unwrap_or(path);
+            // git reports a wholly-untracked directory as `sub/`, so take the basename of the
+            // path without its trailing slash - otherwise the moment is titled "Edited ".
+            let name = path
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(path);
             Some((
                 format!("Edited {name}"),
                 format!("+{added} \u{2212}{removed} \u{b7} {path}"),
@@ -494,9 +637,12 @@ struct App {
     /// The scrollback find state (`⌘F`, §11), `Some` while the find bar is open. Captures typing
     /// into the query; `Enter`/`↑↓` navigate matches, `Esc` closes.
     find: Option<FindState>,
-    /// The live shadow worktree while rewound to a past state (`None` = at HEAD/now). Its
-    /// drop removes the worktree, so returning to now / closing just clears it.
-    shadow: Option<ShadowWorktree>,
+    /// The live rewind while the active repo's working tree shows a past snapshot (`None` = at
+    /// now). Holds the snapshot of the state it replaced, so returning to now is exact.
+    rewind: Option<Rewind>,
+    /// Whether the "rewind is off" notice has been shown for the open timeline, so scrubbing with
+    /// `session.shadow_worktree` disabled explains itself once instead of once per step.
+    rewind_off_notified: bool,
     /// When the session began, for the timeline's session-relative event times.
     session_start: Instant,
     /// The repository backing the dock (from the active pane context cwd), cached while it is
@@ -572,7 +718,16 @@ struct App {
     /// The latest per-repo working-tree status produced by the background git-poll thread (keyed
     /// by repo root), drained on the UI thread to record timeline edit events for every watched
     /// repo. Empty until the first poll lands.
-    pending_status: Arc<Mutex<HashMap<std::path::PathBuf, RepoStatus>>>,
+    pending_status: Arc<Mutex<PolledStatuses>>,
+    /// Bumped whenever the UI changes the repository itself, so an in-flight poll's results can be
+    /// recognized as predating the change and dropped (see [`PolledStatuses`]).
+    git_generation: Arc<AtomicU64>,
+    /// The per-repo snapshot stores backing timeline rewind, shared with the git-poll thread
+    /// (which captures into them) - see [`Snapshots`] for why they are behind one lock.
+    snapshots: Arc<Mutex<Snapshots>>,
+    /// The git-poll thread's current interval in milliseconds. The UI writes it whenever a git
+    /// surface opens or closes so the dock reads as a live feed while it is up.
+    git_poll_ms: Arc<AtomicU64>,
     /// The command palette's open / close animation (design §03 motion), live only while it
     /// plays. While any animation is set the event loop polls + redraws each frame; it clears
     /// itself when done (finalizing the close), returning the loop to its idle `Wait`.
@@ -635,7 +790,8 @@ impl App {
             leader_pending: false,
             cheatsheet_open: false,
             find: None,
-            shadow: None,
+            rewind: None,
+            rewind_off_notified: false,
             session_start: Instant::now(),
             git_repo: None,
             clipboard: arboard::Clipboard::new().ok(),
@@ -668,7 +824,10 @@ impl App {
             tooltip_visible: false,
             blink_epoch: Instant::now(),
             blink_phase: false,
-            pending_status: Arc::new(Mutex::new(HashMap::new())),
+            pending_status: Arc::new(Mutex::new(PolledStatuses::default())),
+            git_generation: Arc::new(AtomicU64::new(0)),
+            snapshots: Arc::new(Mutex::new(Snapshots::default())),
+            git_poll_ms: Arc::new(AtomicU64::new(interval_ms(GIT_POLL_INTERVAL))),
             palette_anim: None,
             confirm_anim: None,
         }
@@ -866,6 +1025,22 @@ impl App {
         let panel = self.dock_panel_rect();
         let (px, _) = point_f32(self.pointer);
         px >= panel.x
+    }
+
+    /// The timeline event row under the pointer, or `None` when the timeline dock is closed or the
+    /// pointer is not over a row.
+    fn timeline_row_at_pointer(&self) -> Option<usize> {
+        if !self.timeline.open {
+            return None;
+        }
+        let log = active_log(
+            self.active_root.as_deref(),
+            &self.timelines,
+            &self.empty_timeline,
+        );
+        let (_, py) = point_f32(self.pointer);
+        self.timeline
+            .row_at(log, self.dock_content_rect(), scale32(self.scale), py)
     }
 
     /// Whether the pointer sits on the open right dock's left edge (its resize grab zone). Only
@@ -1542,7 +1717,7 @@ impl App {
             return;
         }
         self.active_root = root;
-        self.discard_shadow();
+        self.return_to_now();
         let branch = self
             .active_root
             .as_ref()
@@ -2234,9 +2409,14 @@ impl App {
     fn start_git_poll(&mut self) {
         let cwds_slot = Arc::clone(&self.pending_cwds);
         let status_slot = Arc::clone(&self.pending_status);
+        let snapshots = Arc::clone(&self.snapshots);
+        let interval_ms = Arc::clone(&self.git_poll_ms);
+        let generation_slot = Arc::clone(&self.git_generation);
+        let record = self.config.session.timeline;
         let proxy = self.proxy.clone();
         std::thread::spawn(move || loop {
-            std::thread::sleep(GIT_POLL_INTERVAL);
+            poll_wait(&interval_ms);
+            let generation = generation_slot.load(Ordering::Relaxed);
             // The working set: every pane's cwd (covers background tabs). Before the first cwd poll
             // fills the map, fall back to the process cwd so the launch repo is watched from cycle 1.
             let mut cwds: Vec<std::path::PathBuf> = cwds_slot
@@ -2258,11 +2438,24 @@ impl App {
                 }
                 if let Ok(status) = repo.status() {
                     let head = repo.head_short().ok();
-                    result.insert(root, RepoStatus { status, head });
+                    let snapshot = record
+                        .then(|| capture_snapshot(&snapshots, &root))
+                        .flatten();
+                    result.insert(
+                        root,
+                        RepoStatus {
+                            status,
+                            head,
+                            snapshot,
+                        },
+                    );
                 }
             }
             if let Ok(mut guard) = status_slot.lock() {
-                *guard = result;
+                *guard = PolledStatuses {
+                    generation,
+                    repos: result,
+                };
             }
             if proxy.send_event(Wakeup::GitPoll).is_err() {
                 break; // the event loop is gone; stop polling.
@@ -2270,57 +2463,121 @@ impl App {
         });
     }
 
+    /// Point the git-poll thread at the cadence the current UI calls for: a live one while the diff
+    /// dock or the timeline is up, the battery-friendly one when both are closed.
+    fn sync_poll_cadence(&self) {
+        let live = self.git_dock.open || self.timeline.open;
+        let interval = if live {
+            GIT_POLL_INTERVAL_ACTIVE
+        } else {
+            GIT_POLL_INTERVAL
+        };
+        self.git_poll_ms
+            .store(interval_ms(interval), Ordering::Relaxed);
+    }
+
     /// Drain the latest per-repo statuses from the poll thread: for each repo, seed its "session
-    /// started" anchor on first sight, else record any file that became dirty since its last poll as
-    /// an edit event into *its* timeline, and refresh its cached dirty/branch. Then project the
-    /// active repo's status to the status line. Repaints only when something changed.
+    /// started" anchor on first sight, else record the moment as an edit event into *its* timeline
+    /// when its working-tree snapshot moved, and refresh its cached dirty/branch/snapshot. Then
+    /// project the active repo's status to the status line and refresh an open diff dock (design
+    /// §10.4: the dock is a live view of the working tree, not a snapshot taken when it opened).
+    /// Repaints only when something changed.
     fn drain_git_poll(&mut self) {
-        let statuses = match self.pending_status.lock() {
+        let polled = match self.pending_status.lock() {
             Ok(mut g) => std::mem::take(&mut *g),
             Err(_) => return,
         };
+        // Read before the UI last changed the repository itself, so it describes a state that no
+        // longer exists. Drop it; the next cycle is along in well under a second.
+        if polled.generation != self.git_generation.load(Ordering::Relaxed) {
+            return;
+        }
+        let statuses = polled.repos;
         let mut changed = false;
-        for (root, RepoStatus { status, head }) in statuses {
-            let current = dirty_paths(&status);
+        let mut active_status = None;
+        for (
+            root,
+            RepoStatus {
+                status,
+                head,
+                snapshot,
+            },
+        ) in statuses
+        {
+            if self.active_root.as_ref() == Some(&root) {
+                active_status = Some(status.clone());
+            }
+            let current = dirty_stats(&status);
             let totals = dirty_totals(&status);
             let branch = status.branch.clone();
             if self.timelines.get(&root).is_some_and(|rt| rt.started) {
-                // Files newly dirty since this repo's last poll = edits made this session.
-                let newly: Vec<(String, u32, u32)> = {
-                    let tracked = self.timelines.get(&root).map(|rt| &rt.tracked_dirty);
-                    status
-                        .files
-                        .iter()
-                        .filter(|f| {
-                            tracked.is_none_or(|t| !t.contains(f.path.to_string_lossy().as_ref()))
-                        })
-                        .map(|f| (f.path.to_string_lossy().into_owned(), f.added, f.removed))
-                        .collect()
-                };
-                if let Some((title, detail)) = edit_text(&newly) {
-                    tracing::debug!(files = newly.len(), %title, "timeline: recorded edit");
-                    let event =
+                // A moved snapshot is the definition of "the codebase changed since the last
+                // poll", and the snapshot itself is the restore target that makes the moment
+                // rewindable - so every move records one, even if `git status` has nothing new to
+                // name it after. A frozen (rewound) repo reports no snapshot, so a rewind records
+                // nothing and its baseline stays put for when it returns to now.
+                let moved = snapshot.as_ref().is_some_and(|s| {
+                    self.timelines
+                        .get(&root)
+                        .is_none_or(|rt| rt.snapshot.as_ref() != Some(s))
+                });
+                if moved {
+                    let baseline = self.timelines.get(&root).map(|rt| &rt.file_stats);
+                    let edited = baseline.map_or_else(Vec::new, |b| changed_since(&status, b));
+                    let (title, detail) = edit_text(&edited)
+                        .unwrap_or_else(|| ("Working tree changed".to_owned(), String::new()));
+                    tracing::debug!(files = edited.len(), %title, "timeline: recorded edit");
+                    let mut event =
                         SessionEvent::new(Actor::Human, self.elapsed_label(), title, detail);
+                    if let Some(tree) = snapshot.clone() {
+                        event = event.restoring(tree);
+                    }
                     self.record_edit(&root, event);
                     changed = true;
                 }
                 if let Some(rt) = self.timelines.get_mut(&root) {
-                    changed |= rt.tracked_dirty != current || rt.dirty != totals;
-                    rt.tracked_dirty = current;
+                    changed |= rt.dirty != totals;
                     rt.dirty = totals;
                     rt.branch = branch;
+                    // The edit baseline and the snapshot are one fact - what the codebase looked
+                    // like at the last recorded moment - so they advance together or not at all.
+                    // Advancing the baseline on a cycle that saw no snapshot (the poll skipped a
+                    // busy store) would leave the *next* moment with nothing left to describe.
+                    if let Some(tree) = snapshot {
+                        changed |= rt.file_stats != current;
+                        rt.file_stats = current;
+                        rt.snapshot = Some(tree);
+                    }
                 }
             } else {
                 // First sight: anchor + baseline (pre-session dirt is not counted as an edit).
-                self.seed_repo(&root, branch, head, current, totals);
+                self.seed_repo(&root, branch, head, current, totals, snapshot);
                 changed = true;
             }
         }
         // The active repo's dirty/branch may have moved; keep the status line coherent (F3).
         self.sync_active_status();
+        if let Some(status) = active_status {
+            changed |= self.refresh_git_dock_live(status);
+        }
         if changed {
             self.request_redraw();
         }
+    }
+
+    /// Reload the open diff dock from a freshly polled `status` for the active repo, so it tracks
+    /// the working tree while it is on screen instead of showing what git said when it opened.
+    /// Returns whether anything actually changed (an idle poll must not force a repaint).
+    ///
+    /// Reuses the poll thread's status rather than re-running `git status` here, so the only work
+    /// on the UI thread is re-reading the selected file's diff - and only when the status moved.
+    fn refresh_git_dock_live(&mut self, status: Status) -> bool {
+        if !self.git_dock.open || self.git_repo.is_none() || self.git_dock.matches(&status) {
+            return false;
+        }
+        self.git_dock.load(status);
+        self.load_selected_diff();
+        true
     }
 
     /// Toggle the git diff dock (`⇧⌘G`). Opening refreshes the repo status and the
@@ -2342,6 +2599,7 @@ impl App {
         // Opening keeps keyboard focus on the terminal; closing clears the dock focus.
         self.dock_focused = false;
         self.dock_full_width = false;
+        self.sync_poll_cadence();
         self.sync_layout();
         self.request_redraw();
     }
@@ -2365,22 +2623,25 @@ impl App {
                 .and_then(|r| self.timelines.get(r))
                 .and_then(|rt| rt.branch.clone());
             self.timeline_open(branch);
-            self.reconcile_shadow();
+            self.reconcile_rewind();
         }
         // Opening keeps keyboard focus on the terminal; closing clears the dock focus.
         self.dock_focused = false;
         self.dock_full_width = false;
+        self.sync_poll_cadence();
         self.sync_layout();
         self.request_redraw();
     }
 
-    /// Close the timeline dock and return to now (discarding any shadow worktree).
+    /// Close the timeline dock and return to now (restoring the working tree if it was rewound).
     fn close_timeline(&mut self) {
         if self.timeline.open {
             self.timeline.close();
         }
         self.dock_focused = false;
-        self.discard_shadow();
+        self.rewind_off_notified = false;
+        self.return_to_now();
+        self.sync_poll_cadence();
     }
 
     /// Append `event` to `root`'s repo timeline (creating it if new). When `root` is the active
@@ -2419,21 +2680,27 @@ impl App {
             return;
         };
         let mut event = SessionEvent::new(actor, self.elapsed_label(), title, detail);
-        if let Some(sha) = restore {
-            event = event.restoring(sha);
+        // Staging and committing move the index and refs, not the files - so the moment these
+        // events restore to is the repo's last observed content snapshot, whatever `restore` names.
+        let target =
+            restore.or_else(|| self.timelines.get(&root).and_then(|rt| rt.snapshot.clone()));
+        if let Some(tree) = target {
+            event = event.restoring(tree);
         }
         self.record_edit(&root, event);
     }
 
-    /// Record `root`'s one-time "session started" anchor (restorable to its then-HEAD) and seed its
-    /// dirty baseline, so pre-session changes aren't mistaken for edits (design §10.5).
+    /// Record `root`'s one-time "session started" anchor (restorable to the codebase as it was at
+    /// launch) and seed its dirty baseline, so pre-session changes aren't mistaken for edits
+    /// (design §10.5).
     fn seed_repo(
         &mut self,
         root: &std::path::Path,
         branch: Option<String>,
         head: Option<String>,
-        tracked: HashSet<String>,
+        tracked: HashMap<String, (u32, u32)>,
         dirty: Option<(u32, u32)>,
+        snapshot: Option<String>,
     ) {
         let detail = branch.clone().unwrap_or_else(|| "no repository".to_owned());
         let mut event = SessionEvent::new(
@@ -2442,19 +2709,23 @@ impl App {
             "Session started",
             detail,
         );
-        if let Some(sha) = head {
-            event = event.restoring(sha);
+        // The anchor restores to the working tree as Skelly first saw it - including whatever was
+        // uncommitted then. Falling back to HEAD keeps it restorable when snapshots are unavailable.
+        if let Some(target) = snapshot.clone().or(head) {
+            event = event.restoring(target);
         }
         self.record_edit(root, event);
         let rt = self.timelines.entry(root.to_path_buf()).or_default();
         rt.started = true;
-        rt.tracked_dirty = tracked;
+        rt.file_stats = tracked;
         rt.dirty = dirty;
         rt.branch = branch;
+        rt.snapshot = snapshot;
     }
 
     /// Synchronously seed the active repo if it has not been (so opening the timeline shows its
-    /// anchor before the first background poll for that repo lands). Reads the repo once.
+    /// anchor, and can rewind to it, before the first background poll for that repo lands). Reads
+    /// the repo once and takes its first snapshot.
     fn ensure_active_seeded(&mut self) {
         let Some(root) = self.active_root.clone() else {
             return;
@@ -2467,14 +2738,35 @@ impl App {
                 let status = repo.status().ok();
                 let branch = status.as_ref().and_then(|s| s.branch.clone());
                 let (tracked, dirty) = status.map_or_else(
-                    || (HashSet::new(), None),
-                    |s| (dirty_paths(&s), dirty_totals(&s)),
+                    || (HashMap::new(), None),
+                    |s| (dirty_stats(&s), dirty_totals(&s)),
                 );
                 (branch, repo.head_short().ok(), tracked, dirty)
             }
-            _ => (None, None, HashSet::new(), None),
+            _ => (None, None, HashMap::new(), None),
         };
-        self.seed_repo(&root, branch, head, tracked, dirty);
+        let snapshot = self
+            .config
+            .session
+            .timeline
+            .then(|| self.capture_now(&root))
+            .flatten();
+        self.seed_repo(&root, branch, head, tracked, dirty, snapshot);
+    }
+
+    /// Snapshot `root`'s working tree on the UI thread, for the moments that cannot wait for the
+    /// background poll (a repo's first sight when the timeline opens). `None` when the store or
+    /// `git` is unavailable, which leaves that moment un-rewindable rather than failing the open.
+    fn capture_now(&self, root: &std::path::Path) -> Option<String> {
+        let mut guard = self.snapshots.lock().ok()?;
+        let store = guard.store(root)?;
+        match store.capture() {
+            Ok(tree) => Some(tree),
+            Err(err) => {
+                tracing::warn!(%err, root = %root.display(), "snapshot capture failed");
+                None
+            }
+        }
     }
 
     /// A short session-relative time label (`M:SS` into the session) for a recorded event.
@@ -2511,6 +2803,28 @@ impl App {
             &self.empty_timeline,
         );
         self.timeline.move_selection(log, delta)
+    }
+
+    /// Select event `index` in the active repo's log. Returns whether the selection moved.
+    fn timeline_select_index(&mut self, index: usize) -> bool {
+        let log = active_log(
+            self.active_root.as_deref(),
+            &self.timelines,
+            &self.empty_timeline,
+        );
+        self.timeline.select(log, index)
+    }
+
+    /// The selected event's time label, for the "restored to …" toast.
+    fn timeline_selected_label(&self) -> String {
+        let log = active_log(
+            self.active_root.as_deref(),
+            &self.timelines,
+            &self.empty_timeline,
+        );
+        log.events()
+            .get(self.timeline.selected())
+            .map_or_else(|| "that moment".to_owned(), |e| e.time.clone())
     }
 
     /// Snap the timeline selection to now over the active repo's log. Returns whether it moved.
@@ -2554,45 +2868,102 @@ impl App {
         self.status_branch = rt.and_then(|t| t.branch.clone());
     }
 
-    /// Reconcile the shadow worktree to the timeline's current selection **in the active repo**: at
-    /// now, discard any worktree; on a past state, ensure a shadow worktree is checked out to its
-    /// commit (Hard rule 3 - never touches HEAD/refs). A git failure is logged and treated as
-    /// "stay at now" rather than left half-applied.
-    fn reconcile_shadow(&mut self) {
+    /// Reconcile the working tree to the timeline's current selection **in the active repo**
+    /// (ADR-0008): at now, return to now; on a past moment, restore that moment's snapshot so the
+    /// files on disk really are what they were then - which is the whole point of scrubbing.
+    ///
+    /// Non-destructive in the way that matters (Hard rule 3): the restore runs entirely inside
+    /// Skelly's own object store, so HEAD, every ref, and the repository's index are untouched,
+    /// and the live state it replaces is captured first and parked in [`Rewind::live`] so
+    /// [`return_to_now`](Self::return_to_now) puts it back byte for byte. A git failure is logged
+    /// and leaves the working tree where it was rather than half-applied.
+    fn reconcile_rewind(&mut self) {
         if self.timeline_at_now() {
-            self.discard_shadow();
+            self.return_to_now();
             return;
         }
-        let Some(sha) = self.timeline_restore() else {
-            self.discard_shadow();
+        let Some(tree) = self.timeline_restore() else {
+            self.return_to_now();
             return;
         };
-        // Already viewing this commit? Nothing to do.
-        if self.shadow.as_ref().is_some_and(|w| w.committish() == sha) {
+        // Already showing this moment? Nothing to do.
+        if self.rewind.as_ref().is_some_and(|r| r.viewing == tree) {
             return;
         }
-        self.discard_shadow();
         let Some(root) = self.active_root.clone() else {
             tracing::warn!("cannot rewind: no active repository");
             return;
         };
-        match Repo::discover(&root) {
-            Ok(Some(repo)) => match repo.shadow_checkout(&sha) {
-                Ok(worktree) => self.shadow = Some(worktree),
-                Err(err) => tracing::warn!(%err, %sha, "shadow checkout failed"),
-            },
-            Ok(None) => tracing::warn!("cannot rewind: not in a git repository"),
-            Err(err) => tracing::warn!(%err, "cannot rewind: git discovery failed"),
+        // A rewind the user could not undo is not one Skelly offers (`session.shadow_worktree`).
+        // The dock still scrubs so the log is browsable; say once why the files are not following.
+        if !self.config.session.shadow_worktree {
+            if !self.rewind_off_notified {
+                self.rewind_off_notified = true;
+                self.show_toast(
+                    "Rewind is off - enable session.shadow_worktree".to_owned(),
+                    ToastKind::Info,
+                );
+            }
+            return;
+        }
+        // The rewind must not race the poll thread's capture for the same private index, so freeze
+        // the repo before restoring and hold the lock across it.
+        let restored = {
+            let Ok(mut guard) = self.snapshots.lock() else {
+                tracing::warn!("cannot rewind: the snapshot store is unavailable");
+                return;
+            };
+            guard.frozen = Some(root.clone());
+            guard.store(&root).map(|store| store.restore(&tree))
+        };
+        match restored {
+            Some(Ok(live)) => {
+                let event = self.timeline_selected_label();
+                // The first step away from now is the one that parks the live state; later steps
+                // move between past moments and must keep pointing at that same live snapshot.
+                if let Some(rewind) = self.rewind.as_mut() {
+                    rewind.viewing = tree;
+                } else {
+                    self.rewind = Some(Rewind {
+                        root,
+                        live,
+                        viewing: tree,
+                    });
+                    self.show_toast(
+                        format!("Restored to {event} - \u{2325}\u{2318}0 to return to now"),
+                        ToastKind::Info,
+                    );
+                }
+            }
+            Some(Err(err)) => {
+                tracing::warn!(%err, %tree, "rewind failed");
+                self.unfreeze_snapshots();
+                self.show_toast(format!("Rewind failed: {err}"), ToastKind::Error);
+            }
+            None => self.unfreeze_snapshots(),
         }
     }
 
-    /// Discard the live shadow worktree, if any (`git worktree remove --force` via its
-    /// drop), returning to the real HEAD.
-    fn discard_shadow(&mut self) {
-        if let Some(worktree) = self.shadow.take() {
-            if let Err(err) = worktree.discard() {
-                tracing::warn!(%err, "failed to remove shadow worktree");
+    /// Put the working tree back to the live state a rewind replaced, and let the poll thread
+    /// resume snapshotting the repo. A no-op when not rewound, so it is safe to over-call from
+    /// every close / repo-change / exit path.
+    fn return_to_now(&mut self) {
+        let Some(rewind) = self.rewind.take() else {
+            self.unfreeze_snapshots();
+            return;
+        };
+        if let Ok(mut guard) = self.snapshots.lock() {
+            if let Some(Err(err)) = guard.store(&rewind.root).map(|s| s.restore(&rewind.live)) {
+                tracing::warn!(%err, "failed to return to now");
             }
+            guard.frozen = None;
+        }
+    }
+
+    /// Clear the poll thread's "do not snapshot this repo" flag (a rewind that did not happen).
+    fn unfreeze_snapshots(&self) {
+        if let Ok(mut guard) = self.snapshots.lock() {
+            guard.frozen = None;
         }
     }
 
@@ -4274,6 +4645,9 @@ impl App {
     /// file selection, then re-diff the selected file. Cheaper than [`Self::refresh_git`]
     /// (no re-discovery).
     fn reload_git_status(&mut self) {
+        // This is the UI changing the repository, so any poll already in flight is now describing
+        // the past; retire its generation before reading the new truth.
+        self.git_generation.fetch_add(1, Ordering::Relaxed);
         let Some(repo) = self.git_repo.clone() else {
             return;
         };
@@ -4398,18 +4772,27 @@ impl App {
         true
     }
 
-    /// Move the timeline selection by `delta` and reconcile the shadow worktree to it.
+    /// Move the timeline selection by `delta` and restore the working tree to it.
     fn timeline_step(&mut self, delta: i32) {
         if self.timeline_move_selection(delta) {
-            self.reconcile_shadow();
+            self.reconcile_rewind();
         }
         self.request_redraw();
     }
 
-    /// Snap the timeline selection back to now (HEAD), discarding any shadow worktree.
+    /// Select the timeline event at `index` (a click on a row, design §10.7 "click any entry") and
+    /// restore the working tree to it.
+    fn timeline_select(&mut self, index: usize) {
+        if self.timeline_select_index(index) {
+            self.reconcile_rewind();
+        }
+        self.request_redraw();
+    }
+
+    /// Snap the timeline selection back to now, restoring the live working tree.
     fn timeline_return_to_now(&mut self) {
         if self.timeline_select_now() {
-            self.reconcile_shadow();
+            self.reconcile_rewind();
         }
         self.request_redraw();
     }
@@ -4839,6 +5222,11 @@ impl App {
                     if !self.dock_focused {
                         self.dock_focused = true;
                         self.request_redraw();
+                    }
+                    // On the timeline, the click also picks the moment under it and restores the
+                    // codebase to it (design §10.7 "scrub the track, or click any entry").
+                    if let Some(index) = self.timeline_row_at_pointer() {
+                        self.timeline_select(index);
                     }
                     return;
                 }
@@ -5448,6 +5836,9 @@ impl ApplicationHandler<Wakeup> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Never leave the user's working tree rewound: quitting mid-scrub puts the live state back
+        // before anything else, so closing Skelly can never be how work goes missing.
+        self.return_to_now();
         // Persist the current layout so the next launch restores it (design/README.md persist
         // scope: layout only). Best-effort - a write failure just means a fresh next launch.
         if self.config.session.persist {
@@ -5455,6 +5846,8 @@ impl ApplicationHandler<Wakeup> for App {
                 tracing::warn!(%err, "failed to save session state");
             }
         }
+        // This session's snapshots are session state; drop the whole per-process store.
+        let _ = std::fs::remove_dir_all(skelly_session::session_root());
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -6353,16 +6746,109 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        csi_edit, cursor_key, cursor_navigation_shortcut, cycle_index, dim, editor_filetype,
-        editor_mode, enter_bytes, index_after_close, kitty_csi, kitty_modifier_code, leader_chord,
-        order, overlay_panel_top, overlay_rise_offset, pane_action, pane_dims, panic_message,
-        parse_leader, pointer_cell_in, process_name, resolve_cell, selection_cells, selection_text,
-        shell_escape_path, tab_action, xterm_modifier_code, PaneAction, Selection, TabAction,
+        changed_since, csi_edit, cursor_key, cursor_navigation_shortcut, cycle_index, dim,
+        dirty_stats, edit_text, editor_filetype, editor_mode, enter_bytes, index_after_close,
+        interval_ms, kitty_csi, kitty_modifier_code, leader_chord, order, overlay_panel_top,
+        overlay_rise_offset, pane_action, pane_dims, panic_message, parse_leader, pointer_cell_in,
+        poll_wait, process_name, resolve_cell, selection_cells, selection_text, shell_escape_path,
+        tab_action, xterm_modifier_code, Duration, Instant, PaneAction, Selection, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
+    use skelly_session::{ChangedFile, FileStatus, Status};
     use skelly_term::{CellAttrs, CellColor, CursorShape, TermCell};
+    use std::collections::HashMap;
     use winit::keyboard::{KeyCode, ModifiersState, NamedKey};
+
+    /// A working status with the given `(path, added, removed)` files.
+    fn status_of(files: &[(&str, u32, u32)]) -> Status {
+        Status {
+            branch: Some("main".to_owned()),
+            files: files
+                .iter()
+                .map(|(path, added, removed)| ChangedFile {
+                    path: (*path).into(),
+                    orig_path: None,
+                    status: FileStatus::Modified,
+                    staged: false,
+                    unstaged: true,
+                    added: *added,
+                    removed: *removed,
+                })
+                .collect(),
+            ..Status::default()
+        }
+    }
+
+    #[test]
+    fn shortening_the_poll_interval_cuts_a_wait_already_in_flight() {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        // Opening the diff dock switches the poll to its live cadence. Waiting in slices is what
+        // makes that take effect now rather than after the idle interval already sleeping.
+        let interval = Arc::new(AtomicU64::new(interval_ms(Duration::from_secs(30))));
+        let slot = Arc::clone(&interval);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            slot.store(interval_ms(Duration::from_millis(100)), Ordering::Relaxed);
+        });
+        let start = Instant::now();
+        poll_wait(&interval);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the wait followed the new cadence, not the 30s one it started on"
+        );
+    }
+
+    #[test]
+    fn editing_an_already_dirty_file_again_is_still_a_timeline_moment() {
+        // The timeline used to key off which *paths* were dirty, so the second and every later
+        // edit to a file recorded nothing - leaving hours of work with one entry to rewind to.
+        // Tracking each file's line counts makes every edit its own moment.
+        let first = status_of(&[("src/main.rs", 4, 1)]);
+        let baseline = dirty_stats(&first);
+
+        let unchanged = changed_since(&first, &baseline);
+        assert!(unchanged.is_empty(), "an idle poll records nothing");
+        assert_eq!(edit_text(&unchanged), None);
+
+        let again = status_of(&[("src/main.rs", 9, 1)]);
+        let edited = changed_since(&again, &baseline);
+        assert_eq!(edited, vec![("src/main.rs".to_owned(), 9, 1)]);
+        let (title, detail) = edit_text(&edited).expect("a recorded moment");
+        assert_eq!(title, "Edited main.rs");
+        assert_eq!(detail, "+9 \u{2212}1 \u{b7} src/main.rs");
+    }
+
+    #[test]
+    fn changed_since_names_newly_dirty_files_and_ignores_ones_gone_clean() {
+        let baseline = dirty_stats(&status_of(&[("a.rs", 1, 0), ("b.rs", 2, 0)]));
+        let edited = changed_since(&status_of(&[("a.rs", 1, 0), ("c.rs", 5, 2)]), &baseline);
+        assert_eq!(
+            edited,
+            vec![("c.rs".to_owned(), 5, 2)],
+            "only the new file - `a.rs` is untouched and `b.rs` going clean is not an edit"
+        );
+        let (title, _) = edit_text(&edited).expect("a recorded moment");
+        assert_eq!(title, "Edited c.rs");
+
+        // Several at once collapse to a count plus combined totals (design §10.5).
+        let many = changed_since(&status_of(&[("a.rs", 3, 1), ("c.rs", 5, 2)]), &baseline);
+        let (title, detail) = edit_text(&many).expect("a recorded moment");
+        assert_eq!(title, "Edited 2 files");
+        assert_eq!(detail, "+8 \u{2212}3");
+    }
+
+    #[test]
+    fn a_wholly_untracked_directory_is_named_by_its_directory() {
+        // git reports a new directory with nothing tracked in it as `sub/`, whose basename after
+        // the last slash is the empty string - which titled the moment "Edited ".
+        let edited = changed_since(&status_of(&[("sub/", 0, 0)]), &HashMap::new());
+        let (title, detail) = edit_text(&edited).expect("a recorded moment");
+        assert_eq!(title, "Edited sub");
+        assert_eq!(detail, "+0 \u{2212}0 \u{b7} sub/");
+    }
 
     #[test]
     fn dropped_path_escapes_shell_metacharacters_but_keeps_utf8() {

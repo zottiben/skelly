@@ -221,6 +221,33 @@ mod tests {
     }
 
     #[test]
+    fn an_editing_session_with_no_commits_is_still_scrubbable() {
+        // The reported bug: with only commits restorable, every event in an ordinary editing
+        // session inherited the same launch SHA, so `is_now` was true everywhere and selecting a
+        // past moment did nothing at all. Each recorded moment now carries its own working-tree
+        // snapshot, so every one of them is a distinct state to restore.
+        let mut t = Timeline::new();
+        t.record(
+            SessionEvent::new(Actor::System, "0:00", "Session started", "main")
+                .restoring("tree-launch"),
+        );
+        t.record(
+            SessionEvent::new(Actor::Human, "0:20", "Edited main.rs", "+4 \u{2212}0")
+                .restoring("tree-one"),
+        );
+        t.record(
+            SessionEvent::new(Actor::Human, "1:05", "Edited main.rs", "+9 \u{2212}1")
+                .restoring("tree-two"),
+        );
+
+        assert_eq!(t.effective_restore(0), Some("tree-launch"));
+        assert_eq!(t.effective_restore(1), Some("tree-one"));
+        assert!(!t.is_now(0), "the launch state is a past moment");
+        assert!(!t.is_now(1), "so is the first edit");
+        assert!(t.is_now(2), "only the newest moment is now");
+    }
+
+    #[test]
     fn a_timeline_with_no_restorable_events_is_always_now() {
         let mut t = Timeline::new();
         t.record(SessionEvent::new(

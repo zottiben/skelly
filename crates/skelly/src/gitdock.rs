@@ -14,6 +14,8 @@
 //!
 //! [`Repo`]: skelly_session::Repo
 
+use std::path::PathBuf;
+
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
 use skelly_session::{ChangedFile, FileDiff, FileStatus, Hunk, LineKind, Status};
 
@@ -72,6 +74,9 @@ pub(crate) struct GitDock {
     /// Whether `diff` is the staged (index-vs-HEAD) diff rather than the working-tree
     /// one; determines whether `⌘↵` stages or unstages the focused hunk.
     diff_is_staged: bool,
+    /// The path `diff` was read for, so a live refresh can tell a reload of the file on
+    /// screen (keep the scroll) from a move to another file (reset it).
+    diff_path: Option<PathBuf>,
     /// Index of the focused hunk in `diff.hunks` (the target of `⌘↵`).
     focused_hunk: usize,
     /// Top line offset into the selected file's flattened diff (scrolled with PageUp/Dn).
@@ -97,6 +102,7 @@ impl GitDock {
             diff: FileDiff::default(),
             selected: 0,
             diff_is_staged: false,
+            diff_path: None,
             focused_hunk: 0,
             diff_scroll: 0,
             focus: Focus::List,
@@ -187,6 +193,7 @@ impl GitDock {
         self.repo_present = false;
         self.status = Status::default();
         self.diff = FileDiff::default();
+        self.diff_path = None;
         self.selected = 0;
         self.diff_scroll = 0;
         self.focus = Focus::List;
@@ -195,24 +202,42 @@ impl GitDock {
         self.error = None;
     }
 
-    /// Load a fresh repository status, clamping the selection and resetting the diff
-    /// scroll. Call [`Self::selected_file`] afterwards to fetch the selected file's diff.
+    /// Whether `status` is what the dock is already showing - the guard that keeps a live
+    /// refresh (design §10.4) free when the working tree has not moved.
+    pub(crate) fn matches(&self, status: &Status) -> bool {
+        self.repo_present && self.error.is_none() && self.status == *status
+    }
+
+    /// Load a fresh repository status, keeping the user's place: the selection follows the
+    /// selected **path** rather than its index, so a refresh that reorders or adds files
+    /// (the dock re-reads the working tree while it is open) never jumps the cursor to
+    /// another file. Call [`Self::selected_file`] afterwards to fetch the selected diff.
     pub(crate) fn load(&mut self, status: Status) {
         self.repo_present = true;
         self.error = None;
-        self.selected = self.selected.min(status.files.len().saturating_sub(1));
+        let previous = self.selected_file().map(|f| f.path.clone());
+        self.selected = previous
+            .and_then(|path| status.files.iter().position(|f| f.path == path))
+            .unwrap_or_else(|| self.selected.min(status.files.len().saturating_sub(1)));
         self.status = status;
-        self.diff = FileDiff::default();
-        self.diff_scroll = 0;
     }
 
     /// Set the selected file's diff (from `Repo::diff`), recording whether it is the
-    /// staged side and resetting the focused hunk + scroll.
+    /// staged side. Scroll and hunk focus reset when this is a different file (or a
+    /// different side of the same one) and are kept when it is a refresh of the one on
+    /// screen, so a live reload does not scroll the diff out from under the reader.
     pub(crate) fn set_diff(&mut self, diff: FileDiff, staged: bool) {
+        let path = self.selected_file().map(|f| f.path.clone());
+        if path != self.diff_path || staged != self.diff_is_staged {
+            self.focused_hunk = 0;
+            self.diff_scroll = 0;
+        }
+        self.diff_path = path;
         self.diff = diff;
         self.diff_is_staged = staged;
-        self.focused_hunk = 0;
-        self.diff_scroll = 0;
+        self.focused_hunk = self
+            .focused_hunk
+            .min(self.diff.hunks.len().saturating_sub(1));
     }
 
     /// Whether the shown diff is the staged side (so `⌘↵` unstages rather than stages).
@@ -1397,6 +1422,73 @@ mod tests {
         assert!(joined.contains("Init repo"));
         // The Init button has an accent highlight (so Enter has a visible target).
         assert!(!paint.quads.is_empty(), "init button highlight");
+    }
+
+    #[test]
+    fn a_live_refresh_keeps_the_selected_file_and_its_scroll() {
+        // The dock re-loads itself from the git poll while it is open (design §10.4), so a refresh
+        // must not move the reader: it follows the selected path, not its index.
+        let mut dock = GitDock::new();
+        dock.load(sample_status());
+        assert!(dock.move_selection(1), "select the second file");
+        let selected = dock.selected_file().expect("a selection").path.clone();
+        dock.set_diff(long_diff(), false);
+        dock.scroll_diff(30);
+
+        // A poll where a *new* file appeared first in git's order, and the file after ours went
+        // clean - both of which would shift a plain index.
+        let mut refreshed = sample_status();
+        refreshed.files.remove(2);
+        refreshed
+            .files
+            .insert(0, changed("fresh.rs", FileStatus::Added, 3, 0));
+        dock.load(refreshed);
+        dock.set_diff(long_diff(), false);
+
+        assert_eq!(
+            dock.selected_file().expect("still selected").path,
+            selected,
+            "the selection follows the file, not the row"
+        );
+        assert_eq!(
+            dock.diff_scroll, 30,
+            "and stays scrolled where the reader was"
+        );
+    }
+
+    #[test]
+    fn selecting_another_file_resets_the_diff_scroll() {
+        let mut dock = GitDock::new();
+        dock.load(sample_status());
+        dock.set_diff(long_diff(), false);
+        dock.scroll_diff(30);
+        assert!(dock.move_selection(1));
+        dock.set_diff(long_diff(), false);
+        assert_eq!(dock.diff_scroll, 0, "a different file starts at the top");
+    }
+
+    #[test]
+    fn matches_reports_whether_a_polled_status_is_already_on_screen() {
+        let mut dock = GitDock::new();
+        assert!(
+            !dock.matches(&sample_status()),
+            "nothing is loaded yet, so there is always work to do"
+        );
+        dock.load(sample_status());
+        assert!(
+            dock.matches(&sample_status()),
+            "an idle poll changes nothing"
+        );
+
+        let mut edited = sample_status();
+        edited.files[0].added += 1;
+        assert!(!dock.matches(&edited), "a line count moved");
+
+        dock.set_error("git exploded".to_owned());
+        assert!(
+            !dock.matches(&sample_status()),
+            "an errored dock always reloads, so a transient failure clears itself"
+        );
     }
 
     #[test]

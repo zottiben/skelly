@@ -1,10 +1,10 @@
 //! `skelly-session` - the session timeline and git integration.
 //!
 //! Records the session as a timeline of human, agent, and system events, and
-//! restores the codebase to any past moment. Rewind is **non-destructive**: it
-//! checks out a shadow worktree and never rewrites history or moves HEAD (Hard
-//! rule 3) - the whole trust contract of the feature. Also owns the per-repo git
-//! diff model (changed files, hunk staging, commit).
+//! restores the codebase to any past moment. Rewind is **non-destructive**: it works
+//! entirely through a Skelly-owned object store and never rewrites history, moves HEAD,
+//! or touches a ref (Hard rule 3) - the whole trust contract of the feature. Also owns
+//! the per-repo git diff model (changed files, hunk staging, commit).
 //!
 //! Independent of rendering; depends only on the `git` CLI (ADR-0006) and, later, the
 //! config. Never on the binary. Git access is split into a thin invocation layer (the
@@ -15,13 +15,16 @@
 //! unified diff), **per-file / hunk staging** ([`Repo::stage`] / [`Repo::unstage`] /
 //! [`Repo::stage_all`] / [`Repo::apply_hunk`]), **committing** ([`Repo::commit`] /
 //! [`Repo::head_short`] / [`Repo::undo_commit`]), the **session timeline** model
-//! ([`Timeline`]), and the **non-destructive rewind** ([`Repo::shadow_checkout`] ->
-//! [`ShadowWorktree`], `git worktree add --detach`; HEAD/refs untouched, Hard rule 3,
-//! ADR-0007).
+//! ([`Timeline`]), and the **non-destructive rewind**: [`SnapshotStore`] captures every
+//! recorded moment as a tree in Skelly's own object store and restores the working tree to
+//! it (ADR-0008), with [`Repo::shadow_checkout`] -> [`ShadowWorktree`] still available for
+//! materializing a commit somewhere else (ADR-0007). Both leave HEAD/refs untouched
+//! (Hard rule 3).
 
 #![doc(test(attr(deny(warnings))))]
 
 mod diff;
+mod snapshot;
 mod timeline;
 
 use std::collections::HashMap;
@@ -31,6 +34,7 @@ use std::process::Command;
 use thiserror::Error;
 
 pub use diff::{DiffLine, FileDiff, Hunk, LineKind};
+pub use snapshot::{session_root, SnapshotStore};
 pub use timeline::{Actor, SessionEvent, Timeline};
 
 /// Anything that can go wrong talking to git.
