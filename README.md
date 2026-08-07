@@ -17,6 +17,20 @@ Applications plus a `skelly` command on your PATH; on Linux it installs the `ske
 binary and a desktop entry. You can also grab a build from the
 [releases page](https://github.com/zottiben/skelly/releases/latest).
 
+### Update
+
+Once Skelly is installed, upgrade in place - no need to remember the install
+command:
+
+```sh
+skelly update           # install the latest release
+skelly update --check   # only report whether a newer release exists
+```
+
+It re-runs the same install script, so an update and a fresh install do exactly the
+same thing. `--force` reinstalls the current version, and `--version v0.1.8` installs
+a specific release. Restart any open window afterwards to pick up the new build.
+
 <details>
 <summary>Build from source</summary>
 

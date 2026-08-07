@@ -11,6 +11,7 @@
 //! never leak up.
 
 mod cheatsheet;
+mod cli;
 mod confirm;
 mod contextmenu;
 mod deadpane;
@@ -148,6 +149,28 @@ enum Wakeup {
 }
 
 fn main() -> anyhow::Result<()> {
+    // The non-windowing subcommands answer and exit before any of the GUI machinery (log
+    // file, event loop, GPU surface) is set up, so `skelly update` behaves like the plain
+    // CLI tool it looks like.
+    match cli::parse(std::env::args().skip(1)) {
+        Ok(cli::Cli::Run) => {}
+        Ok(cli::Cli::Version) => {
+            println!("skelly {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Ok(cli::Cli::Help) => {
+            println!("{}", cli::help());
+            return Ok(());
+        }
+        Ok(cli::Cli::Update(args)) => {
+            std::process::exit(cli::update(&args)?);
+        }
+        Err(arg) => {
+            eprintln!("skelly: unrecognized argument '{arg}'\n\n{}", cli::help());
+            std::process::exit(2);
+        }
+    }
+
     // Hold the log-file guard for the whole run so buffered logs flush on exit; install the
     // panic hook right after so any panic during startup is logged too.
     let _log_guard = init_tracing();

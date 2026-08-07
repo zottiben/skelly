@@ -28,6 +28,8 @@ module_name_repetitions = { level = "allow", priority = 1 }
 png = "0.17"
 # settings round-trip test: diff serialized config to prove each control writes one key.
 toml.workspace = true
+# update_cli test: run `skelly update` against a temp HOME so it never touches a real install.
+tempfile = "3"
 
 [dependencies]
 skelly-config = { path = "../skelly-config" }
