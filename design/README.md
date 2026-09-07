@@ -73,6 +73,27 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-09-07 - **Copy/paste is `Ctrl+Shift+C`/`Ctrl+Shift+V` on Linux (was: the whole
+  command modifier mapped to `Super` on both platforms, "waits on the full `[keys]`
+  registry", 2026-07-12).** Copy/paste was unreachable on Linux and actively harmful: every
+  app chord was gated on `Super`, which a Linux window manager normally grabs before Skelly
+  sees it, and the guide's `Ctrl+Shift+C` fell through to the terminal - where the legacy
+  encoder folds shift away and sends `0x03`, so the standard copy shortcut **interrupted the
+  foreground process**. Copy/paste now decodes through its own `clipboard_action`, accepting
+  `⌘C`/`⌘V` *and* `Ctrl+Shift+C`/`Ctrl+Shift+V` on both platforms; bare `Ctrl+C`/`Ctrl+V`
+  stay the shell's SIGINT and literal-next, which is exactly why the guide shifts the
+  clipboard up onto `Ctrl+Shift` (design §11 "mac · linux"). **Still open - the rest of the
+  guide's Linux column.** It maps most chords to bare `Ctrl` (`Ctrl K` palette, `Ctrl B`
+  sidebar, `Ctrl F` find, `Ctrl Q` quit, `Ctrl 1…9` tabs), each of which shadows a key
+  Skelly's target audience uses constantly - `Ctrl+K` kill-line, `Ctrl+B` page-up / the tmux
+  prefix, `Ctrl+F` page-forward, `Ctrl+Q` XON, and `Ctrl+A` is already Skelly's own leader.
+  Adopting that column wholesale would break vim/neovim in the pane, so it is not a call to
+  make as a side effect of a clipboard fix: it needs the `[keys]` registry (Hard rule 1 -
+  every binding a config key) so the defaults are overridable, and a decision on whether
+  Linux gets bare `Ctrl` at all or stays on `Ctrl+Shift`. Only the unambiguous,
+  conflict-free half - the clipboard, which no TUI can receive anyway since `Ctrl+Shift+letter`
+  has no distinct legacy encoding - is implemented now.
+
 - 2026-08-06 - **Scrubbing the timeline restores the working tree, and both git surfaces are
   live while open.** Two reported bugs, one root cause each. **(1) The diff dock was a
   snapshot, not a feed**: it only loaded on open and on a repo change, so edits made while it

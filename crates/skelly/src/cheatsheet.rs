@@ -4,7 +4,8 @@
 //! Git / Terminal), laid out in two columns like the guide's §11 "Keybinding reference". Pure
 //! layout: the binary gates it (a boolean overlay) and draws the returned display list through
 //! the overlay pass (a `bg.elevated` card); `Esc` or `⌘/` dismisses it. The chords shown are the
-//! macOS glyph chords, matching the app's other hints.
+//! macOS glyph chords, matching the app's other hints - except copy/paste, whose modifier really
+//! is per-platform (see `COPY_PASTE_CHORD`).
 
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, TextMeasure, Theme};
 
@@ -24,6 +25,14 @@ struct Group {
 const fn b(action: &'static str, chord: &'static str) -> Bind {
     Bind { action, chord }
 }
+
+/// Copy/paste is the one chord whose modifier really differs per platform, so the card must not
+/// show the mac glyphs to a Linux user - `Ctrl+Shift` is what works there (see `clipboard_action`
+/// in the binary).
+#[cfg(target_os = "macos")]
+const COPY_PASTE_CHORD: &str = "\u{2318}C / V";
+#[cfg(not(target_os = "macos"))]
+const COPY_PASTE_CHORD: &str = "\u{2303}\u{21e7}C / V";
 
 const GLOBAL: Group = Group {
     title: "Global",
@@ -56,7 +65,7 @@ const TERMINAL: Group = Group {
     title: "Terminal",
     note: "",
     binds: &[
-        b("Copy / paste", "\u{2318}C / V"),
+        b("Copy / paste", COPY_PASTE_CHORD),
         b("Move by word", "\u{2325}\u{2190} / \u{2192}"),
         b("Start / end of line", "\u{2318}\u{2190} / \u{2192}"),
         b("Newline (no submit)", "\u{21e7}\u{21b5}"),

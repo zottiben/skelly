@@ -225,6 +225,15 @@ enum PaneAction {
     CycleLayout,
 }
 
+/// A clipboard operation bound to a keyboard chord (see [`clipboard_action`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ClipboardAction {
+    /// Copy the current selection to the system clipboard.
+    Copy,
+    /// Paste the system clipboard into the focused pane's shell.
+    Paste,
+}
+
 /// A tab operation bound to a keyboard chord.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum TabAction {
@@ -671,6 +680,7 @@ struct App {
     /// The repository backing the dock (from the active pane context cwd), cached while it is
     /// open so moving the file selection re-diffs without re-discovering.
     git_repo: Option<Repo>,
+    /// The system clipboard, or `None` when none could be reached (see [`open_clipboard`]).
     clipboard: Option<arboard::Clipboard>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -817,7 +827,7 @@ impl App {
             rewind_off_notified: false,
             session_start: Instant::now(),
             git_repo: None,
-            clipboard: arboard::Clipboard::new().ok(),
+            clipboard: open_clipboard(),
             window: None,
             renderer: None,
             tabs: vec![Tab::new()],
@@ -4820,9 +4830,11 @@ impl App {
         self.request_redraw();
     }
 
-    /// The Cmd/Super chords, matched on the logical character: `⌘K` palette, `⌘Q` quit, `⌘C`/`⌘V`
-    /// copy/paste, `⌘B`/`⇧⌘B` sidebar toggle/mode, `⇧⌘G` git dock, `⇧⌘H` timeline, `⇧⌘P` pin,
+    /// The Cmd/Super chords, matched on the logical character: `⌘K` palette, `⌘Q` quit,
+    /// `⌘B`/`⇧⌘B` sidebar toggle/mode, `⇧⌘G` git dock, `⇧⌘H` timeline, `⇧⌘P` pin,
     /// `⌘,` settings. Returns `true` when a chord fired (the caller then stops routing the key).
+    /// Copy/paste is not here - its modifier differs per platform, so it routes through
+    /// [`clipboard_action`].
     fn on_super_chord(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) -> bool {
         if !self.modifiers.super_key() {
             return false;
@@ -4835,10 +4847,6 @@ impl App {
             self.open_palette();
         } else if ch.eq_ignore_ascii_case("q") {
             event_loop.exit();
-        } else if ch.eq_ignore_ascii_case("c") {
-            self.copy_selection();
-        } else if ch.eq_ignore_ascii_case("v") {
-            self.paste();
         } else if ch.eq_ignore_ascii_case("b") {
             if shift {
                 self.cycle_sidebar_mode();
@@ -4949,8 +4957,13 @@ impl App {
             return;
         }
         // The scrollback find bar (§11) captures input while open (typing / navigate / Esc). `⌘F`
-        // and `⌘K` etc. still route (super chords), so let those fall through first.
-        if self.find.is_some() && !self.modifiers.super_key() && self.on_find_key(key_event) {
+        // and `⌘K` etc. still route (super chords), so let those fall through first - as does
+        // Linux's `Ctrl+Shift` copy/paste, which would otherwise type its letter into the query.
+        if self.find.is_some()
+            && !self.modifiers.super_key()
+            && clipboard_action(&key_event.logical_key, self.modifiers).is_none()
+            && self.on_find_key(key_event)
+        {
             return;
         }
         // The "running job" confirm modal captures input while fully up (design §12).
@@ -5012,7 +5025,16 @@ impl App {
         if self.on_session_chord(key_event) {
             return;
         }
-        // Platform combos (Cmd/Super + K/Q/C/V/B/L, font size, and the ⇧-modified dock/pin
+        // Copy / paste (`⌘C`/`⌘V` on macOS, `Ctrl+Shift+C`/`Ctrl+Shift+V` on Linux). Its own
+        // chord because it is the one binding whose modifier differs per platform.
+        if let Some(action) = clipboard_action(&key_event.logical_key, self.modifiers) {
+            match action {
+                ClipboardAction::Copy => self.copy_selection(),
+                ClipboardAction::Paste => self.paste(),
+            }
+            return;
+        }
+        // Platform combos (Cmd/Super + K/Q/B/L, font size, and the ⇧-modified dock/pin
         // chords). The terminal owns every other key - Ctrl+C etc. still reach the shell.
         if self.on_super_chord(event_loop, key_event) {
             return;
@@ -6225,6 +6247,54 @@ fn pane_action(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
     })
 }
 
+/// Connect to the system clipboard, degrading to `None` rather than failing the launch when the
+/// platform has none we can reach (a headless run, or a Wayland session without `XWayland` - the
+/// Linux backend talks X11). The failure is logged because copy/paste quietly doing nothing is
+/// otherwise indistinguishable from a keybinding that never fired.
+fn open_clipboard() -> Option<arboard::Clipboard> {
+    match arboard::Clipboard::new() {
+        Ok(clipboard) => Some(clipboard),
+        Err(err) => {
+            tracing::warn!(%err, "no system clipboard available; copy/paste will do nothing");
+            None
+        }
+    }
+}
+
+/// Decode a logical key + modifiers into a clipboard action.
+///
+/// Copy/paste is the one chord whose modifier genuinely differs per platform (design §11's
+/// "mac · linux" column): macOS uses `⌘C`/`⌘V`, Linux uses `Ctrl+Shift+C`/`Ctrl+Shift+V` -
+/// bare `Ctrl+C`/`Ctrl+V` belong to the shell as SIGINT and literal-next, which is why every
+/// Linux terminal shifts the clipboard up onto `Ctrl+Shift`. Both spellings are accepted on
+/// both platforms: a Linux window manager usually grabs `Super` for itself before Skelly ever
+/// sees the key, so `Ctrl+Shift` is what actually arrives there.
+///
+/// `Ctrl+Shift` has to be matched *and consumed* here rather than simply left unbound. The
+/// legacy encoder folds shift away when Ctrl is held ([`key_to_bytes`]), so an unhandled
+/// `Ctrl+Shift+C` reaches the shell as `0x03` - the standard Linux copy shortcut would
+/// interrupt the foreground process.
+fn clipboard_action(key: &Key, mods: ModifiersState) -> Option<ClipboardAction> {
+    let Key::Character(ch) = key else {
+        return None;
+    };
+    // `⌥` is never part of either spelling, and `Ctrl+Shift` only counts on its own (a stray
+    // `⌃⇧⌘` is not a clipboard chord).
+    let command = mods.super_key();
+    let ctrl_shift = mods.control_key() && mods.shift_key() && !mods.super_key();
+    if mods.alt_key() || !(command || ctrl_shift) {
+        return None;
+    }
+    // Shift is part of the Linux chord, so the character arrives uppercased.
+    if ch.eq_ignore_ascii_case("c") {
+        Some(ClipboardAction::Copy)
+    } else if ch.eq_ignore_ascii_case("v") {
+        Some(ClipboardAction::Paste)
+    } else {
+        None
+    }
+}
+
 /// Decode a physical key + modifiers into a tab action. Tab management uses the
 /// platform command modifier (`⌘` on macOS, mapped to `Super` here to match the
 /// other `⌘` bindings): `⌘T` new tab, `⌘W` close tab, `⌘1..⌘9` jump to the nth tab;
@@ -6769,19 +6839,20 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        changed_since, csi_edit, cursor_key, cursor_navigation_shortcut, cycle_index, dim,
-        dirty_stats, edit_text, editor_filetype, editor_mode, enter_bytes, index_after_close,
-        interval_ms, kitty_csi, kitty_modifier_code, leader_chord, order, overlay_panel_top,
-        overlay_rise_offset, pane_action, pane_dims, panic_message, parse_leader, pointer_cell_in,
-        poll_wait, process_name, resolve_cell, selection_cells, selection_text, shell_escape_path,
-        tab_action, xterm_modifier_code, Duration, Instant, PaneAction, Selection, TabAction,
+        changed_since, clipboard_action, csi_edit, cursor_key, cursor_navigation_shortcut,
+        cycle_index, dim, dirty_stats, edit_text, editor_filetype, editor_mode, enter_bytes,
+        index_after_close, interval_ms, kitty_csi, kitty_modifier_code, leader_chord, order,
+        overlay_panel_top, overlay_rise_offset, pane_action, pane_dims, panic_message,
+        parse_leader, pointer_cell_in, poll_wait, process_name, resolve_cell, selection_cells,
+        selection_text, shell_escape_path, tab_action, xterm_modifier_code, ClipboardAction,
+        Duration, Instant, PaneAction, Selection, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
     use skelly_session::{ChangedFile, FileStatus, Status};
     use skelly_term::{CellAttrs, CellColor, CursorShape, TermCell};
     use std::collections::HashMap;
-    use winit::keyboard::{KeyCode, ModifiersState, NamedKey};
+    use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey};
 
     /// A working status with the given `(path, added, removed)` files.
     fn status_of(files: &[(&str, u32, u32)]) -> Status {
@@ -7424,6 +7495,84 @@ mod tests {
         // Without the Alt leader the key belongs to the shell.
         assert_eq!(pane_action(KeyCode::KeyL, ModifiersState::empty()), None);
         assert_eq!(pane_action(KeyCode::KeyA, ModifiersState::ALT), None);
+    }
+
+    // ----- clipboard ----------------------------------------------------------
+
+    #[test]
+    fn linux_ctrl_shift_chords_are_copy_and_paste() {
+        // The Linux binding (design §11 "mac · linux"). Shift is held, so the character the
+        // platform reports is uppercase.
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(
+            clipboard_action(&Key::Character("C".into()), ctrl_shift),
+            Some(ClipboardAction::Copy)
+        );
+        assert_eq!(
+            clipboard_action(&Key::Character("V".into()), ctrl_shift),
+            Some(ClipboardAction::Paste)
+        );
+    }
+
+    #[test]
+    fn macos_command_chords_are_copy_and_paste() {
+        let sup = ModifiersState::SUPER;
+        assert_eq!(
+            clipboard_action(&Key::Character("c".into()), sup),
+            Some(ClipboardAction::Copy)
+        );
+        assert_eq!(
+            clipboard_action(&Key::Character("v".into()), sup),
+            Some(ClipboardAction::Paste)
+        );
+    }
+
+    #[test]
+    fn bare_ctrl_c_and_v_stay_with_the_shell() {
+        // The whole reason the Linux binding carries Shift: `Ctrl+C` is SIGINT and `Ctrl+V` is
+        // literal-next. Neither may ever be swallowed as a clipboard chord.
+        let ctrl = ModifiersState::CONTROL;
+        assert_eq!(clipboard_action(&Key::Character("c".into()), ctrl), None);
+        assert_eq!(clipboard_action(&Key::Character("v".into()), ctrl), None);
+        // Nor may a plain (or shift-only) keystroke - that is just typing.
+        assert_eq!(
+            clipboard_action(&Key::Character("c".into()), ModifiersState::empty()),
+            None
+        );
+        assert_eq!(
+            clipboard_action(&Key::Character("C".into()), ModifiersState::SHIFT),
+            None
+        );
+    }
+
+    #[test]
+    fn clipboard_chords_reject_other_keys_and_modifiers() {
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        // `Ctrl+Shift+G` is the git dock, not a clipboard chord.
+        assert_eq!(
+            clipboard_action(&Key::Character("g".into()), ctrl_shift),
+            None
+        );
+        // Alt is part of neither spelling, so `⌥⌘C` / `⌃⌥⇧C` fall through.
+        assert_eq!(
+            clipboard_action(
+                &Key::Character("c".into()),
+                ModifiersState::SUPER | ModifiersState::ALT
+            ),
+            None
+        );
+        assert_eq!(
+            clipboard_action(
+                &Key::Character("c".into()),
+                ctrl_shift | ModifiersState::ALT
+            ),
+            None
+        );
+        // A named key is never a clipboard chord.
+        assert_eq!(
+            clipboard_action(&Key::Named(NamedKey::Enter), ctrl_shift),
+            None
+        );
     }
 
     // ----- tab management -----------------------------------------------------
