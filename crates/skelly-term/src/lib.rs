@@ -153,7 +153,11 @@ fn resolve_start_dir(launch: Option<PathBuf>, home: Option<PathBuf>) -> Option<P
 /// Login semantics are what make every fresh pane source the user's profile (`/etc/zprofile` ->
 /// macOS `path_helper`, then `~/.zprofile` / `~/.zshrc`) and receive the full `PATH` rather than
 /// launchd's minimal one, so a configured `zsh` behaves exactly like `exec zsh -l`.
-fn build_shell_command(program: Option<&str>, cwd: Option<&Path>) -> CommandBuilder {
+fn build_shell_command(
+    program: Option<&str>,
+    cwd: Option<&Path>,
+    env: &[(&str, &std::ffi::OsStr)],
+) -> CommandBuilder {
     let mut cmd = match program.map(str::trim).filter(|p| !p.is_empty()) {
         Some(prog) => {
             let mut cmd = CommandBuilder::new(prog);
@@ -163,6 +167,9 @@ fn build_shell_command(program: Option<&str>, cwd: Option<&Path>) -> CommandBuil
         None => CommandBuilder::new_default_prog(),
     };
     cmd.env("TERM", "xterm-256color");
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
     // A restored session hands us the pane's saved cwd; honor it when it still exists,
     // else fall back to the launch-dir default (as a fresh pane does).
     let dir = cwd
@@ -372,6 +379,26 @@ impl Terminal {
     where
         W: Fn() + Send + 'static,
     {
+        Self::spawn_shell_in_with_env(cols, rows, program, cwd, &[], wakeup)
+    }
+
+    /// Spawn a pane with explicit environment overrides, without changing the app's environment.
+    /// This lets the binary supply per-pane integration endpoints; the terminal core does not
+    /// interpret them. Empty values can mask inherited endpoints from a parent terminal.
+    ///
+    /// # Errors
+    /// Returns an error if the PTY cannot be opened or the shell cannot be spawned.
+    pub fn spawn_shell_in_with_env<W>(
+        cols: u16,
+        rows: u16,
+        program: Option<&str>,
+        cwd: Option<&Path>,
+        env: &[(&str, &std::ffi::OsStr)],
+        wakeup: W,
+    ) -> std::io::Result<Self>
+    where
+        W: Fn() + Send + 'static,
+    {
         let (cols, rows) = clamp_dims(cols, rows);
         let pty = native_pty_system();
         let pair = pty
@@ -383,7 +410,7 @@ impl Terminal {
             })
             .map_err(to_io)?;
 
-        let cmd = build_shell_command(program, cwd);
+        let cmd = build_shell_command(program, cwd, env);
         let child = pair.slave.spawn_command(cmd).map_err(to_io)?;
         drop(pair.slave); // close the parent's slave handle so the master sees EOF.
                           // A killer we keep on the UI side so dropping the `Terminal` can stop the shell
@@ -1017,11 +1044,25 @@ mod tests {
     }
 
     #[test]
+    fn environment_overrides_are_per_pane_not_process_global() {
+        use std::ffi::OsStr;
+        let key = "SKELLY_TEST_PANE_ENV";
+        let before = std::env::var_os(key);
+        let first = build_shell_command(None, None, &[(key, OsStr::new("first"))]);
+        let second = build_shell_command(None, None, &[(key, OsStr::new("second"))]);
+        let masked = build_shell_command(None, None, &[(key, OsStr::new(""))]);
+        assert_eq!(first.get_env(key), Some(OsStr::new("first")));
+        assert_eq!(second.get_env(key), Some(OsStr::new("second")));
+        assert_eq!(masked.get_env(key), Some(OsStr::new("")));
+        assert_eq!(std::env::var_os(key), before);
+    }
+
+    #[test]
     fn default_shell_command_is_a_login_shell() {
         // No configured program -> portable-pty's default-program path, which runs
         // $SHELL as a *login* shell (argv0 prefixed with `-`). `is_default_prog()`
         // marks that path, which the plain `new(prog)` constructor never sets.
-        let cmd = build_shell_command(None, None);
+        let cmd = build_shell_command(None, None, &[]);
         assert!(
             cmd.is_default_prog(),
             "the default shell must take the login-shell path"
@@ -1035,14 +1076,14 @@ mod tests {
     #[test]
     fn blank_program_is_treated_as_unconfigured() {
         // A whitespace-only `[shell] program` is the same as leaving it empty.
-        assert!(build_shell_command(Some("   "), None).is_default_prog());
+        assert!(build_shell_command(Some("   "), None, &[]).is_default_prog());
     }
 
     #[test]
     fn configured_program_is_spawned_as_a_login_shell() {
         // The shell picker writes e.g. `program = "zsh"`; every new pane must still source the
         // login profile and recover the user's PATH, exactly like `exec zsh -l`.
-        let cmd = build_shell_command(Some("zsh"), None);
+        let cmd = build_shell_command(Some("zsh"), None, &[]);
         assert!(!cmd.is_default_prog());
         let argv: Vec<_> = cmd
             .get_argv()

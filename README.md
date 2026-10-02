@@ -35,7 +35,8 @@ a specific release. Restart any open window afterwards to pick up the new build.
 <summary>Build from source</summary>
 
 Requires the pinned toolchain (installed automatically by `rustup` from
-[`rust-toolchain.toml`](rust-toolchain.toml)).
+[`rust-toolchain.toml`](rust-toolchain.toml)). On Debian/Ubuntu, install
+`libasound2-dev` and `pkg-config` for the native audio backend.
 
 ```sh
 cargo build --release -p skelly    # binary at target/release/skelly
@@ -54,6 +55,27 @@ cargo test --workspace   # run the test suite
 
 Right now the binary loads `~/.config/skelly/config.toml` (or spec defaults when
 there is no file) and reports the resolved settings.
+
+## Optional local voice (experimental)
+
+Voice is off by default. With Pi running directly in a Skelly pane, local
+dictation inserts an editable draft; a separate spoken-turn command submits to
+that same Pi session and reads new replies aloud. No new speech-service credentials
+or fees; normal Pi model usage still applies.
+
+Supply whisper.cpp **>=1.8.2** and a compatible ggml model yourself. Playback uses
+installed macOS voices (`say`) or separately installed Linux `espeak-ng`.
+Skelly never downloads engines/models/voices or enables microphone access for you.
+
+The matching companion extension ships in every release:
+- macOS: `Skelly.app/Contents/Resources/pi`
+- Linux installer: `~/.local/share/skelly/pi` (archive: `share/skelly/pi`)
+
+See [setup, shortcuts, privacy and device verification](integrations/pi/README.md).
+Linux also needs the ALSA runtime (`libasound.so.2`: Debian/Ubuntu `libasound2`
+or `libasound2t64`, Fedora `alsa-lib`). ALSA/PipeWire/PulseAudio device routing
+remains under your OS configuration. Automated checks are not a microphone,
+recognition-quality or audible-playback certification.
 
 ## Contributing
 

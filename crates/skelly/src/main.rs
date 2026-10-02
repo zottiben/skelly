@@ -29,6 +29,7 @@ mod statusline;
 mod timeline;
 mod toast;
 mod tooltip;
+mod voice;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -146,6 +147,7 @@ enum Wakeup {
     Shell,
     GitPoll,
     CwdPoll,
+    Voice,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -259,6 +261,8 @@ struct Tab {
     tree: PaneTree,
     /// One live shell per pane.
     panes: HashMap<PaneId, Terminal>,
+    /// Opt-in bridges share the lifetime of their shell, including in inactive workspaces.
+    voice_bridges: HashMap<PaneId, skelly_voice::bridge::Bridge>,
     /// Each pane's last-applied grid size, so we only resize on a real change.
     dims: HashMap<PaneId, (u16, u16)>,
     /// The active selection and the pane it belongs to.
@@ -332,6 +336,7 @@ impl Tab {
         Self {
             tree: PaneTree::new(),
             panes: HashMap::new(),
+            voice_bridges: HashMap::new(),
             dims: HashMap::new(),
             selection: None,
             activated: false,
@@ -733,6 +738,10 @@ struct App {
     /// The current transient toast (design §12), or `None`. Non-modal: it auto-dismisses at
     /// `toast_expires` (the loop wakes at that deadline) and never captures input.
     toast: Option<Toast>,
+    dictation: Option<voice::Dictation>,
+    conversation: Option<skelly_voice::conversation::Conversation>,
+    playback: Option<voice::Speaking>,
+    voice_transcript: Option<String>,
     /// When the current toast disappears (only meaningful while `toast` is `Some`).
     toast_expires: Instant,
     /// The icon-only element the pointer is resting on and when the hover began (design §09
@@ -852,6 +861,10 @@ impl App {
             rail_expanded: false,
             context_menu: None,
             toast: None,
+            dictation: None,
+            conversation: None,
+            playback: None,
+            voice_transcript: None,
             toast_expires: Instant::now(),
             hover_tip: None,
             tooltip_visible: false,
@@ -1177,6 +1190,7 @@ impl App {
         let ws = self.active_tab_mut();
         let id = ws.tree.focused();
         ws.panes.remove(&id);
+        ws.voice_bridges.remove(&id);
         ws.dims.remove(&id);
         self.sync_layout();
         self.request_redraw();
@@ -1225,6 +1239,7 @@ impl App {
         // The cwd a newly-spawned pane inherits this cycle (a split from a pane in that dir);
         // taken so it applies once, then reverts to the default start dir.
         let inherit = std::mem::take(&mut self.inherit_cwd);
+        let voice_enabled = self.config.voice.enabled;
         let layout = self.active_tab().tree.layout(viewport);
 
         let ws = self.active_tab_mut();
@@ -1232,6 +1247,7 @@ impl App {
         // panes stay, since `tree.panes()` still lists them.
         let live: HashSet<PaneId> = ws.tree.panes().into_iter().collect();
         ws.panes.retain(|id, _| live.contains(id));
+        ws.voice_bridges.retain(|id, _| live.contains(id));
         ws.dims.retain(|id, _| live.contains(id));
 
         for (id, rect) in layout {
@@ -1244,16 +1260,18 @@ impl App {
                 }
             } else {
                 let proxy = proxy.clone();
-                match Terminal::spawn_shell_in(
+                match voice::spawn_shell(
                     target.0,
                     target.1,
-                    Some(shell.as_str()),
+                    shell.as_str(),
                     inherit.as_deref(),
-                    move || {
-                        let _ = proxy.send_event(Wakeup::Shell);
-                    },
+                    voice_enabled,
+                    proxy,
                 ) {
-                    Ok(term) => {
+                    Ok((term, bridge)) => {
+                        if let Some(bridge) = bridge {
+                            ws.voice_bridges.insert(id, bridge);
+                        }
                         // Apply the configured default cursor shape (appearance.cursor) to the
                         // fresh shell; a program's DECSCUSR still overrides it live.
                         term.set_default_cursor_shape(cursor);
@@ -1777,6 +1795,7 @@ impl App {
     /// overlaying the selection and the focused-pane ring.
     fn redraw(&mut self) {
         let redraw_start = Instant::now();
+        self.drain_dictation();
         let frames = self.pane_frames();
 
         let views: Vec<PaneView> = frames.iter().map(PaneFrame::view).collect();
@@ -1805,11 +1824,7 @@ impl App {
             .then(|| self.build_context_menu_frame())
             .flatten();
         // A transient toast (design §12) reuses the overlay card at the lowest priority.
-        let toast = self
-            .toast
-            .is_some()
-            .then(|| self.build_toast_frame())
-            .flatten();
+        let toast = self.build_toast_frame();
         // A hover tooltip (design §09) reuses the overlay card at the very lowest priority.
         let tooltip = self
             .tooltip_visible
@@ -2328,6 +2343,8 @@ impl App {
 
     /// Open the settings view (`⌘,` or the palette command).
     fn open_settings(&mut self) {
+        self.cancel_dictation("Capture cancelled: settings opened");
+        self.end_conversation();
         self.settings.open();
         self.request_redraw();
     }
@@ -2377,6 +2394,13 @@ impl App {
             // Layout-affecting toggles: re-fit the grids. Hiding the status line reclaims its
             // rows; the sidebar width shifts the pane viewport.
             "appearance.show_status_line" | "sidebar.width" => self.sync_layout(),
+            "voice.enabled" => {
+                if self.config.voice.enabled {
+                    self.show_toast("Pi voice bridge enabled for new panes", ToastKind::Info);
+                } else {
+                    self.clear_voice_bridges();
+                }
+            }
             _ => {}
         }
         self.persist_config();
@@ -3189,6 +3213,118 @@ impl App {
         }
     }
 
+    /// Disable every bridge, including those in inactive workspaces.
+    fn clear_voice_bridges(&mut self) {
+        self.cancel_dictation("Voice disabled");
+        self.end_conversation();
+        self.voice_transcript = None;
+        for tab in &mut self.tabs {
+            tab.voice_bridges.clear();
+        }
+        for workspace in &mut self.workspaces {
+            if let Some((tabs, _, _)) = &mut workspace.stash {
+                for tab in tabs {
+                    tab.voice_bridges.clear();
+                }
+            }
+        }
+    }
+
+    /// Exercise the same safe insertion used by dictation, without recording audio.
+    /// A missing or changed Pi session is an error, never a fallback to PTY input.
+    fn voice_insert_clipboard(&mut self) {
+        let Some(text) = self.clipboard.as_mut().and_then(|c| c.get_text().ok()) else {
+            self.show_toast("Clipboard text is unavailable", ToastKind::Error);
+            return;
+        };
+        let result = (|| {
+            let tab = self.active_tab();
+            let bridge = tab
+                .voice_bridges
+                .get(&tab.tree.focused())
+                .ok_or_else(|| std::io::Error::other("Enable Voice and open a new pane first"))?;
+            let target = bridge
+                .snapshot()?
+                .target
+                .ok_or_else(|| std::io::Error::other("No Pi bridge connected in this pane"))?;
+            if !target.is_foreground(
+                tab.panes
+                    .get(&tab.tree.focused())
+                    .and_then(Terminal::cwd_pid),
+            ) {
+                return Err(std::io::Error::other(
+                    "The connected Pi is not this pane\'s foreground process",
+                ));
+            }
+            bridge.send(&target, skelly_voice::bridge::Action::Insert { text })
+        })();
+        if let Err(err) = result {
+            self.show_toast(err.to_string(), ToastKind::Error);
+        }
+    }
+
+    /// Drain bounded acknowledgments for all panes; only the active pane owns UI feedback.
+    fn drain_voice(&mut self) {
+        self.drain_dictation();
+        let active_pane = self.active_tab().tree.focused();
+        let mut feedback = None;
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            // A dead shell cannot retain a usable endpoint for orphaned descendants.
+            tab.voice_bridges.retain(|id, _| {
+                tab.panes
+                    .get(id)
+                    .is_some_and(|term| term.exit_status().is_none())
+            });
+            for (id, bridge) in &tab.voice_bridges {
+                while let Ok(Some(reply)) = bridge.take_reply() {
+                    if index == self.active && *id == active_pane {
+                        feedback = Some(if reply.accepted {
+                            (
+                                match reply.operation {
+                                    skelly_voice::bridge::Operation::Insert => {
+                                        "Inserted into Pi draft (not sent)"
+                                    }
+                                    skelly_voice::bridge::Operation::Prompt => {
+                                        "Spoken turn dispatched to Pi"
+                                    }
+                                    skelly_voice::bridge::Operation::Abort => {
+                                        "Pi cancellation requested; completed actions remain"
+                                    }
+                                }
+                                .to_owned(),
+                                ToastKind::Success,
+                            )
+                        } else {
+                            (
+                                reply
+                                    .error
+                                    .unwrap_or_else(|| "Pi rejected the input".into()),
+                                ToastKind::Error,
+                            )
+                        });
+                    }
+                }
+            }
+        }
+        for workspace in &mut self.workspaces {
+            if let Some((tabs, _, _)) = &mut workspace.stash {
+                for tab in tabs {
+                    tab.voice_bridges.retain(|id, _| {
+                        tab.panes
+                            .get(id)
+                            .is_some_and(|term| term.exit_status().is_none())
+                    });
+                    for bridge in tab.voice_bridges.values() {
+                        while matches!(bridge.take_reply(), Ok(Some(_))) {}
+                    }
+                }
+            }
+        }
+        if let Some((message, kind)) = feedback {
+            self.show_toast(message, kind);
+        }
+    }
+
     /// Paste the clipboard contents into the focused pane's shell.
     fn paste(&mut self) {
         let Some(text) = self.clipboard.as_mut().and_then(|c| c.get_text().ok()) else {
@@ -3707,7 +3843,31 @@ impl App {
     fn build_toast_frame(&mut self) -> Option<OnboardingFrame> {
         let scale = scale32(self.scale);
         let surface = (dim_f32(self.size.0), dim_f32(self.size.1));
-        let toast = self.toast.as_ref()?;
+        let progress = self
+            .voice_activity_label()
+            .map(|label| Toast::new(label, ToastKind::Info));
+        let ready = self.conversation.as_ref().map(|_| {
+            Toast::new(
+                format!(
+                    "Voice {} · {} records/sends · Esc ends",
+                    if self.config.voice.spoken_replies {
+                        "on"
+                    } else {
+                        "muted"
+                    },
+                    if self.config.voice.turn_shortcut.is_empty() {
+                        "palette"
+                    } else {
+                        &self.config.voice.turn_shortcut
+                    }
+                ),
+                ToastKind::Info,
+            )
+        });
+        let toast = progress
+            .as_ref()
+            .or(self.toast.as_ref())
+            .or(ready.as_ref())?;
         let size = toast.natural_size(scale, &mut self.measure);
         let panel = toast::place(size, surface, scale);
         let (quads, labels) = toast.build(panel, scale, &self.theme, &mut self.measure);
@@ -4152,16 +4312,18 @@ impl App {
             let rect = rects.get(&id).copied().unwrap_or(viewport);
             let target = pane_dims(rect, cell_w, cell_h, inset, status_h);
             let proxy = self.proxy.clone();
-            match Terminal::spawn_shell_in(
+            match voice::spawn_shell(
                 target.0,
                 target.1,
-                Some(shell.as_str()),
+                shell.as_str(),
                 start.as_deref(),
-                move || {
-                    let _ = proxy.send_event(Wakeup::Shell);
-                },
+                self.config.voice.enabled,
+                proxy,
             ) {
-                Ok(term) => {
+                Ok((term, bridge)) => {
+                    if let Some(bridge) = bridge {
+                        tab.voice_bridges.insert(id, bridge);
+                    }
                     term.set_default_cursor_shape(cursor);
                     tab.panes.insert(id, term);
                     tab.dims.insert(id, target);
@@ -4263,6 +4425,7 @@ impl App {
         // (it was spawned with the login shell before onboarding was dismissed).
         let ws = self.active_tab_mut();
         ws.panes.clear();
+        ws.voice_bridges.clear();
         ws.dims.clear();
         self.sync_layout();
         self.request_redraw();
@@ -4387,6 +4550,15 @@ impl App {
             Action::OpenSettings => self.open_settings(),
             Action::ThemeDark => self.apply_theme("ossein-dark"),
             Action::ThemeLight => self.apply_theme("ossein-light"),
+            Action::VoiceInsertClipboard => self.voice_insert_clipboard(),
+            Action::VoiceDictation => self.toggle_dictation(),
+            Action::VoiceCancel => self.cancel_dictation("Dictation cancelled"),
+            Action::VoiceCopyTranscript => self.copy_voice_transcript(),
+            Action::VoiceTurn => self.toggle_spoken_turn(),
+            Action::VoiceConversation => self.toggle_conversation(),
+            Action::VoiceStopPlayback => self.stop_playback(),
+            Action::VoiceMute => self.toggle_voice_mute(),
+            Action::VoiceAbort => self.abort_voice_agent(),
             Action::Quit => event_loop.exit(),
         }
     }
@@ -4407,6 +4579,34 @@ impl App {
                     return;
                 }
             }
+        }
+        if self.settings.editing.is_some() {
+            let command = self.modifiers.super_key() || self.modifiers.control_key();
+            match key_event.logical_key.as_ref() {
+                Key::Named(NamedKey::Escape) => self.settings.editing = None,
+                Key::Named(NamedKey::Enter) => match self.settings.commit_text(&mut self.config) {
+                    Ok(Some(key)) => self.apply_setting_change(key),
+                    Ok(None) => {}
+                    Err(error) => self.show_toast(error.to_string(), ToastKind::Error),
+                },
+                Key::Named(NamedKey::Backspace) => self.settings.backspace_text(),
+                Key::Character(ch) if command && ch.eq_ignore_ascii_case("a") => {
+                    self.settings.select_text();
+                }
+                Key::Character(ch) if command && ch.eq_ignore_ascii_case("v") => {
+                    if let Some(text) = self.clipboard.as_mut().and_then(|c| c.get_text().ok()) {
+                        self.settings.append_text(&text);
+                    }
+                }
+                _ if !command => {
+                    if let Some(text) = &key_event.text {
+                        self.settings.append_text(text);
+                    }
+                }
+                _ => {}
+            }
+            self.request_redraw();
+            return;
         }
         match key_event.logical_key.as_ref() {
             Key::Named(NamedKey::Escape) => {
@@ -4436,7 +4636,9 @@ impl App {
                 self.request_redraw();
             }
             Key::Named(NamedKey::Enter) => {
-                if let Some(key) = self.settings.activate(&mut self.config) {
+                if self.settings.start_text_edit(&self.config) {
+                    self.request_redraw();
+                } else if let Some(key) = self.settings.activate(&mut self.config) {
                     self.apply_setting_change(key);
                 }
             }
@@ -4924,10 +5126,22 @@ impl App {
         self.request_redraw();
     }
 
+    fn on_clipboard_chord(&mut self, key: &Key) -> bool {
+        let Some(action) = clipboard_action(key, self.modifiers) else {
+            return false;
+        };
+        match action {
+            ClipboardAction::Copy => self.copy_selection(),
+            ClipboardAction::Paste => self.paste(),
+        }
+        true
+    }
+
     /// Handle a key press: the palette (when open), platform combos (quit/copy/paste/
     /// palette), pane chords, scrollback keys, then terminal input to the focused pane.
     fn on_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
-        if key_event.state != ElementState::Pressed {
+        if key_event.state != ElementState::Pressed || self.on_voice_escape(&key_event.logical_key)
+        {
             return;
         }
         // A key during either overlay's fade-out settles it shut, then routes as if it were
@@ -5006,6 +5220,9 @@ impl App {
             self.start_rename();
             return;
         }
+        if self.on_dictation_shortcut(key_event) {
+            return;
+        }
         // The tmux-style pane leader (`[panes] leader`): arm it, or apply the pending chord.
         // Checked before terminal input so the leader key doesn't reach the shell.
         if self.on_leader(key_event) {
@@ -5027,11 +5244,7 @@ impl App {
         }
         // Copy / paste (`⌘C`/`⌘V` on macOS, `Ctrl+Shift+C`/`Ctrl+Shift+V` on Linux). Its own
         // chord because it is the one binding whose modifier differs per platform.
-        if let Some(action) = clipboard_action(&key_event.logical_key, self.modifiers) {
-            match action {
-                ClipboardAction::Copy => self.copy_selection(),
-                ClipboardAction::Paste => self.paste(),
-            }
+        if self.on_clipboard_chord(&key_event.logical_key) {
             return;
         }
         // Platform combos (Cmd/Super + K/Q/B/L, font size, and the ⇧-modified dock/pin
@@ -5872,7 +6085,11 @@ impl ApplicationHandler<Wakeup> for App {
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: Wakeup) {
         match event {
             // New shell output arrived; ask the window to repaint.
-            Wakeup::Shell => self.request_redraw(),
+            Wakeup::Shell => {
+                self.drain_voice();
+                self.request_redraw();
+            }
+            Wakeup::Voice => self.drain_voice(),
             // A fresh working-tree status; record any new edits (repaints only if it changed).
             Wakeup::GitPoll => self.drain_git_poll(),
             // Fresh per-pane cwds from the poll thread; apply them (status line, titles, git dock).
@@ -5881,6 +6098,12 @@ impl ApplicationHandler<Wakeup> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        if let Some(dictation) = self.dictation.take() {
+            dictation.job.shutdown();
+        }
+        if let Some(playback) = self.playback.take() {
+            playback.job.shutdown();
+        }
         // Never leave the user's working tree rewound: quitting mid-scrub puts the live state back
         // before anything else, so closing Skelly can never be how work goes missing.
         self.return_to_now();
@@ -5898,6 +6121,10 @@ impl ApplicationHandler<Wakeup> for App {
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::Focused(false) => {
+                self.cancel_dictation("Capture cancelled: window lost focus");
+                self.end_conversation();
+            }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput {
                 event: key_event, ..
@@ -5954,6 +6181,8 @@ impl ApplicationHandler<Wakeup> for App {
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }
+        // A rapid focus-away/back must cancel even when redraw requests coalesce.
+        self.drain_dictation();
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {

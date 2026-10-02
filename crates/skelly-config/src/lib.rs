@@ -71,9 +71,102 @@ pub struct Config {
     pub git: Git,
     /// `[shell]` - the shell program launched in each pane (the guide's "Shell & env").
     pub shell: Shell,
+    /// `[voice]` - opt-in local speech and Pi integration.
+    pub voice: Voice,
     /// `[keys]` - user keybinding overrides, `chord -> action`. Merged over the
     /// built-in bindings; empty by default (built-ins live in the binding registry).
     pub keys: BTreeMap<String, String>,
+}
+
+/// `[voice]` - all speech processing is local; the bridge does not enable the microphone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Voice {
+    /// Enable the Pi bridge for new panes. Disabling revokes existing bridges immediately.
+    pub enabled: bool,
+    /// Local whisper.cpp executable (one path, not a shell command).
+    pub whisper_program: String,
+    /// Path to an explicitly installed whisper.cpp ggml model; empty means not configured.
+    pub model_path: String,
+    /// Whisper language code, or "auto".
+    pub language: String,
+    /// Toggle recording with this modified letter chord; empty disables the shortcut.
+    pub dictation_shortcut: String,
+    /// Maximum recording duration, in seconds (5..=120).
+    pub max_recording_seconds: u16,
+    /// Toggle recording/submitting a spoken turn; distinct from editable dictation.
+    pub turn_shortcut: String,
+    /// Speak new settled replies only inside an explicitly armed voice conversation.
+    pub spoken_replies: bool,
+    /// Installed local voice name; empty uses the system default.
+    pub speech_voice: String,
+    /// Speech rate in words per minute (80..=400).
+    pub speech_rate: u16,
+    /// Explicit delivery policy, captured before each spoken turn.
+    pub busy_delivery: VoiceDelivery,
+}
+
+/// Busy-agent policy for spoken turns. Ordinary dictation never submits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum VoiceDelivery {
+    /// Refuse a turn if Pi is busy (default).
+    #[default]
+    Idle,
+    /// Steer at Pi\'s next supported boundary, without cancelling tools.
+    Steer,
+    /// Queue after the current run.
+    FollowUp,
+}
+
+impl Default for Voice {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            whisper_program: "whisper-cli".into(),
+            model_path: String::new(),
+            language: "en".into(),
+            dictation_shortcut: "ctrl+shift+d".into(),
+            max_recording_seconds: 60,
+            turn_shortcut: "ctrl+alt+shift+v".into(),
+            spoken_replies: true,
+            speech_voice: String::new(),
+            speech_rate: 180,
+            busy_delivery: VoiceDelivery::Idle,
+        }
+    }
+}
+
+/// Whether a voice shortcut is empty (disabled) or a modified ASCII letter chord.
+/// Control/Alt/Super is required; clipboard chords remain reserved on both platforms.
+#[must_use]
+pub fn valid_voice_shortcut(spec: &str) -> bool {
+    spec.is_empty()
+        || voice_chord(spec).is_some_and(|(mods, key)| {
+            let clipboard = matches!(key, b'c' | b'v')
+            && mods & 2 == 0 // Alt is not part of either clipboard spelling.
+            && (mods & 8 != 0 || mods == 5); // Super, or Ctrl+Shift.
+            !clipboard
+        })
+}
+
+fn voice_chord(spec: &str) -> Option<(u8, u8)> {
+    let parts: Vec<_> = spec.split('+').map(str::trim).collect();
+    let (key, modifiers) = parts.split_last()?;
+    if key.len() != 1 || !key.as_bytes()[0].is_ascii_alphabetic() {
+        return None;
+    }
+    let bits = modifiers.iter().try_fold(0_u8, |bits, part| {
+        let bit = match part.to_ascii_lowercase().as_str() {
+            "ctrl" => 1,
+            "alt" => 2,
+            "shift" => 4,
+            "cmd" | "super" => 8,
+            _ => return None,
+        };
+        Some(bits | bit)
+    })?;
+    (bits & 0b1011 != 0).then_some((bits, key.as_bytes()[0].to_ascii_lowercase()))
 }
 
 /// `[appearance]`.
@@ -453,6 +546,48 @@ impl Config {
                 self.sidebar.width
             ));
         }
+        if self.voice.whisper_program.trim().is_empty()
+            || [&self.voice.whisper_program, &self.voice.model_path]
+                .iter()
+                .any(|s| s.len() > 4096 || s.chars().any(char::is_control))
+        {
+            return invalid(
+                "voice paths must be bounded paths, with a non-empty whisper_program".into(),
+            );
+        }
+        if self.voice.language != "auto"
+            && (!(2..=3).contains(&self.voice.language.len())
+                || !self.voice.language.bytes().all(|b| b.is_ascii_lowercase()))
+        {
+            return invalid("voice.language must be a lowercase language code or auto".into());
+        }
+        if !valid_voice_shortcut(&self.voice.turn_shortcut) {
+            return invalid(
+                "voice.turn_shortcut must be a modified letter chord (not copy/paste), or empty"
+                    .into(),
+            );
+        }
+        if !self.voice.turn_shortcut.is_empty()
+            && voice_chord(&self.voice.turn_shortcut) == voice_chord(&self.voice.dictation_shortcut)
+        {
+            return invalid("voice turn and dictation shortcuts must be distinct".into());
+        }
+        if self.voice.speech_voice.len() > 128
+            || self.voice.speech_voice.chars().any(char::is_control)
+            || !(80..=400).contains(&self.voice.speech_rate)
+        {
+            return invalid(
+                "voice speech voice must be bounded text; speech_rate must be 80..=400".into(),
+            );
+        }
+        if !valid_voice_shortcut(&self.voice.dictation_shortcut) {
+            return invalid(
+                "voice.dictation_shortcut must be a modified letter chord (not copy/paste), or empty".into(),
+            );
+        }
+        if !(5..=120).contains(&self.voice.max_recording_seconds) {
+            return invalid("voice.max_recording_seconds must be 5..=120".into());
+        }
         if self.panes.max == 0 || self.panes.max > MAX_PANES {
             return invalid(format!(
                 "panes.max = {} (must be 1..={MAX_PANES})",
@@ -486,6 +621,92 @@ mod tests {
     }
 
     #[test]
+    fn voice_setup_defaults_and_validation() {
+        let mut c = Config::default();
+        assert!(!c.voice.enabled);
+        assert!(c.voice.model_path.is_empty());
+        assert_eq!(c.voice.whisper_program, "whisper-cli");
+        assert_eq!(c.voice.language, "en");
+        for shortcut in ["", "ctrl+shift+d", "ALT+x", "cmd+d"] {
+            assert!(valid_voice_shortcut(shortcut));
+        }
+        for shortcut in ["d", "shift+d", "ctrl+enter", "ctrl+x+d", "ctrl+", "nope+d"] {
+            assert!(!valid_voice_shortcut(shortcut));
+        }
+        c.voice.max_recording_seconds = 121;
+        assert!(c.validate().is_err());
+        c.voice.max_recording_seconds = 60;
+        c.voice.language = "--file".into();
+        assert!(c.validate().is_err());
+        c.voice.language = "auto".into();
+        c.voice.model_path = "/tmp/with spaces/model.bin".into();
+        assert!(c.validate().is_ok());
+        assert_eq!(
+            Config::from_toml_str(&c.to_toml_string().unwrap()).unwrap(),
+            c
+        );
+    }
+
+    #[test]
+    fn speech_settings_round_trip_and_enforce_limits() {
+        let mut config = Config::from_toml_str(
+            "[voice]\nturn_shortcut = ''\nspoken_replies = false\nbusy_delivery = 'follow_up'\nspeech_voice = 'installed voice'\nspeech_rate = 200"
+        ).unwrap();
+        assert_eq!(config.voice.busy_delivery, VoiceDelivery::FollowUp);
+        assert!(!config.voice.spoken_replies);
+        assert_eq!(
+            Config::from_toml_str(&config.to_toml_string().unwrap()).unwrap(),
+            config
+        );
+        for rate in [79, 401] {
+            config.voice.speech_rate = rate;
+            assert!(config.validate().is_err());
+        }
+        config.voice.speech_rate = 180;
+        config.voice.speech_voice = "invalid\nvoice".into();
+        assert!(config.validate().is_err());
+        assert_eq!(Voice::default().busy_delivery, VoiceDelivery::Idle);
+        assert!(Voice::default().spoken_replies);
+    }
+
+    #[test]
+    fn voice_defaults_and_custom_chords_leave_clipboard_reserved() {
+        let mut config = Config::default();
+        assert_ne!(config.voice.turn_shortcut, "ctrl+shift+v");
+        for chord in ["ctrl+shift+c", "SHIFT+CTRL+V", "cmd+v", "super+shift+c"] {
+            config.voice.turn_shortcut = chord.into();
+            assert!(
+                config.validate().is_err(),
+                "clipboard chord {chord} cannot record/send"
+            );
+            config.voice.turn_shortcut = String::new();
+            config.voice.dictation_shortcut = chord.into();
+            assert!(
+                config.validate().is_err(),
+                "clipboard chord {chord} cannot record"
+            );
+        }
+    }
+
+    #[test]
+    fn dictation_and_submission_cannot_share_a_chord() {
+        let mut config = Config::default();
+        config.voice.turn_shortcut = "SHIFT+CTRL+D".into();
+        assert!(
+            config.validate().is_err(),
+            "a dictation chord must never ambiguously submit"
+        );
+        config.voice.turn_shortcut = "super+d".into();
+        config.voice.dictation_shortcut = "cmd+d".into();
+        assert!(
+            config.validate().is_err(),
+            "modifier aliases are the same chord"
+        );
+        config.voice.turn_shortcut = String::new();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn defaults_are_valid() {
         Config::default()
             .validate()
@@ -515,6 +736,18 @@ mod tests {
         assert_eq!(
             Config::from_toml_str(&text).expect("reparse").shell.program,
             "zsh"
+        );
+    }
+
+    #[test]
+    fn voice_is_opt_in_and_round_trips() {
+        assert!(!Config::default().voice.enabled);
+        assert!(!Config::from_toml_str("").unwrap().voice.enabled);
+        let config = Config::from_toml_str("[voice]\nenabled = true\n").unwrap();
+        assert!(config.voice.enabled);
+        assert_eq!(
+            Config::from_toml_str(&config.to_toml_string().unwrap()).unwrap(),
+            config
         );
     }
 

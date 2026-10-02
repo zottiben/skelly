@@ -37,6 +37,7 @@ agent as co-author. `CHANGELOG.md` is generated from commits - never hand-edit i
 cargo fmt --all --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --workspace --all-features
+npm --prefix integrations/pi test
 RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --workspace
 cargo deny check
 ```
@@ -58,4 +59,15 @@ was recorded; and it has been **run**, not just compiled.
 `rustup` installs the pinned toolchain from `rust-toolchain.toml` automatically on
 first `cargo` invocation. Formatting auto-runs on save via the repo hook. Install
 `cargo-deny` (`cargo install cargo-deny --locked`) to run the supply-chain gate
-locally.
+locally. The Pi companion extension and Rust/Node bridge integration test also require
+Node.js **22.19+** (CI uses Node 24); they make no model calls and need no API credentials.
+Linux builds also need ALSA headers and pkg-config (`libasound2-dev pkg-config` on
+Debian/Ubuntu); running needs the ALSA runtime library. Voice tests use fixtures,
+not a microphone or downloaded model. Explicit local speech setup and the hardware
+verification checklist are in [`integrations/pi/README.md`](integrations/pi/README.md).
+Packaging tests use a temporary HOME and fake download transport, plus real ad-hoc
+signing on macOS; they never install into Applications or enable Pi/Voice.
+CI synthesizes known text to a file with native say/espeak-ng (no speaker output).
+The tag workflow calls the same quality gates before building release artifacts.
+Run `shellcheck install.sh packaging/{macos,linux}/bundle.sh packaging/voice-assets.sh`
+when editing packaging. Release/device verification remains a separate gate.

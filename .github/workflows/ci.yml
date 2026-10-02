@@ -1,12 +1,13 @@
 name: CI
 
 on:
+  workflow_call:
   pull_request:
   push:
     branches: [main]
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ${{ github.workflow }}-ci-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -29,6 +30,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt, clippy
+      # The local Pi bridge has dependency-free Node tests and a Rust/Node wire test.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Linux audio build dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config espeak-ng
       - uses: Swatinem/rust-cache@v2
       - name: format
         run: cargo fmt --all --check
@@ -36,6 +44,22 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: test
         run: cargo test --workspace --all-features
+      - name: Pi companion extension
+        run: npm --prefix integrations/pi test
+      - name: Native speech synthesis (file only, no speaker)
+        shell: bash
+        run: |
+          set -eu
+          TMP="$(mktemp -d)"
+          trap 'rm -rf "$TMP"' EXIT
+          printf '%s' 'Skelly local speech smoke test.' > "$TMP/input.txt"
+          if [ "$RUNNER_OS" = macOS ]; then
+            /usr/bin/say -f "$TMP/input.txt" -o "$TMP/output.aiff"
+            test -s "$TMP/output.aiff"
+          else
+            espeak-ng -f "$TMP/input.txt" -w "$TMP/output.wav"
+            test -s "$TMP/output.wav"
+          fi
       - name: doc
         run: cargo doc --no-deps --workspace
         env:

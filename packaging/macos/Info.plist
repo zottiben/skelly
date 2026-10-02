@@ -27,6 +27,8 @@
   <string>11.0</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.developer-tools</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>Skelly records only when you start dictation or a spoken turn, transcribes locally, and passes text to Pi as a draft or a submitted turn.</string>
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSSupportsAutomaticGraphicsSwitching</key>
