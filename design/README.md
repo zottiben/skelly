@@ -82,6 +82,26 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-10-02 - **Discoverable, pane-local voice controls.** User requested buttons
+  alongside the shortcuts. With `[voice] enabled`, each live pane reserves a 32px
+  footer above its optional status line: **Dictate** records into Pi's editable draft;
+  **Voice** records/sends a spoken turn. Active controls say **Stop & insert** versus
+  **Stop & send**, with **Cancel** during capture/transcription; armed conversations
+  offer **Talk / send** and **End voice**, and playback offers **Stop audio**. The
+  overflow menu includes replies-only mode, mute/unmute, transcript recovery and Voice
+  settings as applicable. Narrow panes collapse to **Voice…**, not overlapping buttons.
+  Tooltips explain actions and show configured shortcuts. No new setting: controls
+  follow `voice.enabled` and remain visible when `appearance.show_status_line` is off.
+  A pane without a foreground registered Pi (or with a modal approval) shows an
+  unavailable explanation; capture never falls back to its shell. Clicking focuses
+  that pane, cancels prior-pane local work and uses the existing guarded handlers.
+  Menus revalidate pane/session and action state before acting; stale Stop cannot start
+  a new recording. Esc dismisses an open overflow menu first; otherwise it keeps the
+  existing voice cancel/stop/end behavior. Overlays/docks block clicks into covered
+  controls. Stop/end/mute never abort Pi; explicit agent abort stays a separate palette
+  command. Buttons use semantic tokens in both themes. Automated UI captures are not
+  device acceptance.
+
 - 2026-10-02 - **Voice release hardening and distribution.** The final spoken-turn
   default is **Ctrl+Alt+Shift+V**, superseding the earlier Ctrl+Shift+V choice below:
   v0.1.12 reserves Ctrl+Shift+C/V for clipboard on both platforms. Voice config rejects

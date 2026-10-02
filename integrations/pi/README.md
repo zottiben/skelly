@@ -115,6 +115,23 @@ deterministic Pi API test host. No provider/model is started and no microphone
 permission is requested. This proves protocol interoperability, not a manual GUI
 or audio-device test.
 
+## Pane buttons
+
+Once **Settings → Voice → Pi voice bridge** is enabled, each live pane has a voice
+footer—even with the normal status line hidden. No shortcuts to memorise:
+
+- **Dictate** → **Stop & insert** adds speech to Pi's editable draft, without sending.
+- **Voice** → **Stop & send** sends a spoken turn to Pi and arms local spoken replies.
+- **Cancel** discards capture/transcription; **Stop audio** interrupts playback;
+  **End voice** ends local voice mode. None of these aborts Pi's work.
+- **···** offers replies-only mode, mute/unmute, copy last transcript and Voice settings.
+  Narrow splits show a **Voice…** button opening the same actions.
+
+Hover a button for its explanation and configured shortcut. Buttons operate on their
+own pane, focusing it first. Capture is unavailable without a connected foreground Pi
+or while Pi needs a modal interaction; the footer explains why. Enabling Voice still
+requires a **new pane** and the companion extension below—no shell input fallback.
+
 ## Local speech path
 
 1. Explicitly install [whisper.cpp](https://github.com/ggml-org/whisper.cpp)
@@ -133,22 +150,22 @@ or audio-device test.
    whisper_program = "/absolute/path/to/whisper-cli"
    model_path = "~/Models/whisper/ggml-base.en.bin"
    language = "en"                     # language code or "auto"
-   dictation_shortcut = "ctrl+shift+d"  # empty disables; palette still works
+   dictation_shortcut = "ctrl+shift+d"  # empty disables shortcut; buttons/palette still work
    max_recording_seconds = 60          # 5–120
    ```
 
    Changes made in Settings apply to the next utterance and are saved to
    config.toml. Restart Skelly after editing the file externally.
-3. In a **new pane**, run Pi with the companion extension as above. Focus that Pi
-   pane and press **Ctrl+Shift+D**, or choose **Voice: start/stop dictation**.
+3. In a **new pane**, run Pi with the companion extension as above. Click **Dictate**
+   in that pane, press **Ctrl+Shift+D**, or choose **Voice: start/stop dictation**.
    Missing setup fails before microphone access. On macOS, grant permission to
    Skelly (or the launching terminal for a development binary); permission prompts
    can cancel the first attempt when focus changes, so start again after granting it.
-4. Speak, then press the shortcut again. The persistent card changes from
+4. Speak, then click **Stop & insert** (or press the shortcut again). The card changes from
    **Recording** to **Transcribing locally**. The OS default input is used, and
    stops before inference. The duration limit also stops capture automatically.
    Finished text is inserted into the **same Pi draft**, without sending it.
-5. **Esc** or **Voice: cancel dictation** discards in-flight work. Switching
+5. **Cancel**, **Esc** or **Voice: cancel dictation** discards in-flight work. Switching
    pane/session/foreground process, opening Settings, window blur, disabling Voice
    or exiting also cancels. These controls do not abort Pi or undo text already
    inserted. While cancelling, wait for cleanup before starting another recording.
@@ -174,15 +191,16 @@ After completing the dictation setup:
 1. On macOS, playback uses the built-in `/usr/bin/say` and an installed voice.
    On Linux, explicitly install `espeak-ng` using your distribution's package
    manager. Skelly does not install voices or use a cloud speech fallback.
-2. Focus the connected Pi pane and press **Ctrl+Alt+Shift+V** (or **Voice:
-   record/send spoken turn**). This is **not dictation**: pressing it again stops
-   capture, transcribes and **sends** the turn to Pi. Normal model/tool usage and
+2. Click **Voice** in the connected Pi pane, press **Ctrl+Alt+Shift+V**, or choose
+   **Voice: record/send spoken turn**. This is **not dictation**: **Stop & send**
+   (or the shortcut again) stops capture, transcribes and **sends** the turn to Pi. Normal model/tool usage and
    charges apply; existing approval dialogs still require interaction in Pi.
 3. The original Pi session remains armed for speech. New settled assistant replies,
    including replies to **typed turns**, are read locally. For replies-only mode,
    use **Voice: start/end conversation**; this opens no microphone.
-4. Continue with the same record/send shortcut. During playback, the first press
-   stops audio; **press again after cleanup** to record. This is turn-based:
+4. Continue with **Talk / send** or the same record/send shortcut. During playback,
+   **Stop audio** stops speech; **wait for cleanup** before recording again. The
+   shortcut likewise stops playback first, then records on a second press. This is turn-based:
    there is no always-on listening, simultaneous capture/playback, or echo cancellation.
 5. **Esc** cancels capture, otherwise stops playback, otherwise ends the armed
    conversation. The palette also has **stop playback**, **mute/unmute spoken

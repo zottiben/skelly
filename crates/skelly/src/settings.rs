@@ -696,6 +696,16 @@ impl Settings {
         self.selected = 0;
     }
 
+    /// Jump from a pane's voice controls to their existing config-backed setup.
+    pub(crate) fn open_voice(&mut self) {
+        self.open();
+        self.category = CATEGORIES
+            .iter()
+            .position(|c| c.label == "Voice")
+            .unwrap_or(0);
+        self.editing = None;
+    }
+
     /// Close the settings view.
     pub(crate) fn close(&mut self) {
         self.open = false;
@@ -1506,6 +1516,16 @@ mod tests {
         // >= 3 quads: the active-category subtle fill + accent bar + the focused-control fill.
         assert!(paint.quads.len() >= 3);
         assert!(paint.nav_divider_x > panel.x);
+    }
+
+    #[test]
+    fn pane_setup_opens_voice_without_changing_config() {
+        let mut settings = Settings::new();
+        settings.editing = Some("unfinished setting".into());
+        settings.open_voice();
+        assert!(settings.open);
+        assert!(settings.editing.is_none());
+        assert_eq!(settings.controls()[settings.selected].key, "voice.enabled");
     }
 
     #[test]

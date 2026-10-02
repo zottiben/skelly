@@ -70,7 +70,7 @@ impl Dictation {
             Phase::Recording => format!(
                 "Recording · {} stops · Esc cancels",
                 if shortcut.is_empty() {
-                    "Voice palette"
+                    "pane Stop button"
                 } else {
                     shortcut
                 }
@@ -344,13 +344,16 @@ impl App {
     }
 
     fn voice_snapshot(&self) -> std::io::Result<Snapshot> {
+        self.voice_snapshot_for(self.active_tab().tree.focused())
+    }
+
+    fn voice_snapshot_for(&self, pane: skelly_pane::PaneId) -> std::io::Result<Snapshot> {
         if !self.config.voice.enabled {
             return Err(std::io::Error::other(
                 "Enable Voice and open a new pane first",
             ));
         }
         let tab = self.active_tab();
-        let pane = tab.tree.focused();
         let bridge = tab
             .voice_bridges
             .get(&pane)
@@ -378,6 +381,206 @@ impl App {
         snapshot
             .target
             .ok_or_else(|| std::io::Error::other("Pi disconnected"))
+    }
+
+    pub(crate) fn pane_voice_controls(
+        &self,
+        pane: skelly_pane::PaneId,
+    ) -> crate::voicebar::Controls {
+        use crate::voicebar::{Activity, Controls};
+        let snapshot = self.voice_snapshot_for(pane);
+        let target = snapshot.as_ref().ok().and_then(|s| s.target.as_ref());
+        let focused = pane == self.active_tab().tree.focused();
+        let activity = if let Some(capture) = self
+            .dictation
+            .as_ref()
+            .filter(|d| focused || Some(&d.target) == target)
+        {
+            Activity::Capture {
+                phase: capture.phase,
+                spoken: capture.delivery.is_some(),
+            }
+        } else if let Some(playback) = self.playback.as_ref().filter(|_| focused) {
+            if playback.cancelling {
+                Activity::Stopping
+            } else {
+                Activity::Speaking
+            }
+        } else if self
+            .conversation
+            .as_ref()
+            .is_some_and(|c| Some(c.target()) == target)
+        {
+            Activity::Armed
+        } else {
+            Activity::Idle
+        };
+        let availability = snapshot.map_err(|e| e.to_string()).and_then(|s| {
+            if s.blocked {
+                Err("Pi is waiting for a modal interaction".into())
+            } else {
+                Ok(s.busy)
+            }
+        });
+        Controls::new(
+            availability,
+            activity,
+            &self.config.voice,
+            self.voice_transcript.is_some(),
+        )
+    }
+
+    pub(crate) fn voice_bar(
+        &mut self,
+        pane: skelly_pane::PaneId,
+        rect: skelly_render::PxRect,
+    ) -> Option<crate::voicebar::Bar> {
+        if !self.config.voice.enabled || self.active_tab().panes.get(&pane)?.exit_status().is_some()
+        {
+            return None;
+        }
+        let controls = self.pane_voice_controls(pane);
+        let scale = crate::scale32(self.scale);
+        let status_h =
+            crate::voicebar::reserved_height(false, self.config.appearance.show_status_line, scale);
+        Some(crate::voicebar::Bar::layout(
+            controls,
+            rect,
+            status_h,
+            scale,
+            &mut self.measure,
+        ))
+    }
+
+    pub(crate) fn push_voice_bars(
+        &mut self,
+        quads: &mut Vec<skelly_render::ChromeQuad>,
+        labels: &mut Vec<skelly_render::ProseLabel>,
+    ) {
+        let hovered_pane = self.voice_bar_at_pointer().map(|(id, _)| id);
+        let scale = crate::scale32(self.scale);
+        for (id, rect) in self.active_tab().tree.layout(self.viewport_rect()) {
+            let rect = skelly_render::PxRect {
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+            };
+            if let Some(bar) = self.voice_bar(id, rect) {
+                let pointer = (hovered_pane == Some(id)).then(|| crate::point_f32(self.pointer));
+                let (q, l) = bar.paint(pointer, scale, &self.theme, &mut self.measure);
+                quads.extend(q);
+                labels.extend(l);
+            }
+        }
+    }
+
+    /// A covered footer cannot receive input, even if its terminal remains alive underneath.
+    pub(crate) fn voice_bar_at_pointer(
+        &mut self,
+    ) -> Option<(skelly_pane::PaneId, crate::voicebar::Bar)> {
+        if self.settings.open
+            || self.palette.open
+            || self.confirm.is_some()
+            || self.onboarding.is_some()
+            || self.cheatsheet_open
+            || self.context_menu.is_some()
+            || self.pointer_in_find_bar()
+            || self.pointer_in_right_dock()
+            || self.on_dock_edge()
+            || self.on_sidebar_edge()
+            || self
+                .dock_button_rect()
+                .is_some_and(|r| crate::voicebar::contains(r, crate::point_f32(self.pointer)))
+            || (self.sidebar.visible()
+                && crate::point_f32(self.pointer).0 < self.sidebar_width_px())
+        {
+            return None;
+        }
+        let (id, rect) = self.pane_at_pointer()?;
+        let bar = self.voice_bar(
+            id,
+            skelly_render::PxRect {
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: rect.h,
+            },
+        )?;
+        crate::voicebar::contains(bar.rect, crate::point_f32(self.pointer)).then_some((id, bar))
+    }
+
+    pub(crate) fn on_voice_bar_click(&mut self) -> bool {
+        let Some((pane, bar)) = self.voice_bar_at_pointer() else {
+            return false;
+        };
+        let action = bar
+            .hit(crate::point_f32(self.pointer))
+            .and_then(|b| b.action);
+        if pane != self.active_tab().tree.focused() {
+            self.cancel_dictation("Capture cancelled: pane changed");
+            self.end_conversation();
+            self.active_tab_mut().tree.set_focus(pane);
+            self.drain_dictation();
+        }
+        self.selecting = false;
+        self.dock_focused = false;
+        if let Some(action) = action {
+            self.run_voice_control(action);
+        }
+        self.request_redraw();
+        true
+    }
+
+    pub(crate) fn run_voice_control(&mut self, action: crate::voicebar::Action) {
+        use crate::voicebar::Action;
+        match action {
+            Action::Dictate => self.toggle_dictation(),
+            Action::Turn => self.toggle_spoken_turn(),
+            Action::Cancel => self.cancel_dictation("Capture cancelled"),
+            Action::End => self.end_conversation(),
+            Action::StopPlayback => self.stop_playback(),
+            Action::Conversation => self.toggle_conversation(),
+            Action::Mute => self.toggle_voice_mute(),
+            Action::CopyTranscript => self.copy_voice_transcript(),
+            Action::Settings => {
+                self.open_settings();
+                self.settings.open_voice();
+            }
+            Action::More => {
+                let pane = self.active_tab().tree.focused();
+                let target = self.voice_snapshot().ok().and_then(|s| s.target);
+                self.context_menu = Some(crate::contextmenu::ContextMenu::for_voice(
+                    crate::point_f32(self.pointer),
+                    pane,
+                    target,
+                    self.pane_voice_controls(pane),
+                ));
+            }
+        }
+        self.request_redraw();
+    }
+
+    pub(crate) fn run_voice_menu_action(
+        &mut self,
+        menu: &crate::contextmenu::ContextMenu,
+        action: crate::voicebar::Action,
+    ) {
+        let Some((pane, target)) = menu.voice_context() else {
+            return;
+        };
+        let current = self.voice_snapshot_for(*pane).ok().and_then(|s| s.target);
+        if *pane != self.active_tab().tree.focused()
+            || *target != current
+            || !menu.voice_action_is_current(action, &self.pane_voice_controls(*pane))
+        {
+            self.show_toast(
+                "Voice state changed; reopen the pane controls",
+                ToastKind::Info,
+            );
+            return;
+        }
+        self.run_voice_control(action);
     }
 
     pub(crate) fn toggle_dictation(&mut self) {

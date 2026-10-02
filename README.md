@@ -19,8 +19,7 @@ binary and a desktop entry. You can also grab a build from the
 
 ### Update
 
-Once Skelly is installed, upgrade in place - no need to remember the install
-command:
+**Skelly 0.1.11 and newer** can upgrade in place:
 
 ```sh
 skelly update           # install the latest release
@@ -30,6 +29,18 @@ skelly update --check   # only report whether a newer release exists
 It re-runs the same install script, so an update and a fresh install do exactly the
 same thing. `--force` reinstalls the current version, and `--version v0.1.8` installs
 a specific release. Restart any open window afterwards to pick up the new build.
+
+**Upgrading from 0.1.10 or earlier?** Those binaries do not implement `update`
+(or `--version`): arguments are ignored and another terminal window opens. Run
+this one-time bootstrap instead, then restart Skelly:
+
+```sh
+curl -fsSL https://zottiben.github.io/skelly/install.sh | sh
+```
+
+This replaces the installed app without resetting your configuration. After that,
+`skelly update` works normally. If it still opens a window, check `command -v skelly`
+for an older copy earlier on your PATH.
 
 <details>
 <summary>Build from source</summary>
