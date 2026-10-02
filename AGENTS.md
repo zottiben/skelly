@@ -9,8 +9,9 @@ of scope for v0.1).
 walking skeleton, core terminal, the Skelly shell UX, and the signature features -
 the git diff dock and the session timeline + non-destructive rewind); **M5 (hardening
 & release) is in progress.** `ROADMAP.md` is the milestone tracker (what's done /
-next), `docs/adr/` records the architecture decisions, and the `skelly-build-state`
-memory holds the live working narrative. Don't restate milestone status here - keep
+next), and `docs/adr/` records the architecture decisions. Implementation plans,
+slices, decisions and progress live in **ai-planner** (`aip status` / `aip resume`),
+not memory narratives or plan markdown files. Don't restate milestone status here - keep
 this file to durable facts and the Hard rules.
 
 **Stack:** Rust (pinned stable via `rust-toolchain.toml`, edition 2021), cargo
@@ -27,6 +28,8 @@ the direct `wgpu` dep aligned to `glyphon`'s pin.
   logic, no UI/GPU/PTY deps - a leaf like `skelly-config` (ADR-0005). The binary owns
   the wiring (pane -> terminal, rendering, keys).
 - `crates/skelly-session/` - session timeline, non-destructive rewind (shadow worktree), git diff
+- `crates/skelly-voice/` - local voice integration and the private per-pane Pi bridge;
+  `integrations/pi/` holds the companion extension (no terminal scraping or second agent)
 - `crates/skelly-config/` - `config.toml` load/watch/schema (the source of truth; Hard rule 1)
 
 **Commands** (from repo root - standard cargo)

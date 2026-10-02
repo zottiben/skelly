@@ -211,6 +211,14 @@ if [ "$OS" = "darwin" ]; then
   echo "Installed Skelly ${VERSION} to ${APP_DIR}/Skelly.app"
   echo "Launch it from Spotlight/Launchpad, or run 'skelly' in a terminal."
 else
+  # Ship the matching companion but leave installation/enablement in Pi explicit.
+  # Older pinned releases have no companion; do not break their install path.
+  if [ -d "${TMPDIR}/share/skelly/pi" ]; then
+    COMPANION="$HOME/.local/share/skelly/pi"
+    mkdir -p "$COMPANION"
+    cp "${TMPDIR}/share/skelly/pi/"* "$COMPANION/"
+    echo "Optional Pi bridge: pi install \"$COMPANION\""
+  fi
   install_bin "${TMPDIR}/skelly"
   # Desktop entry + icon for the application menu (best-effort, user-scoped).
   APPS="$HOME/.local/share/applications"

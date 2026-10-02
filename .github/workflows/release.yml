@@ -40,9 +40,14 @@ jobs:
             exit 1
           fi
 
+  checks:
+    name: release quality gates
+    needs: verify
+    uses: ./.github/workflows/ci.yml
+
   macos:
     name: macOS universal .app
-    needs: verify
+    needs: [verify, checks]
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -114,7 +119,7 @@ jobs:
 
   linux:
     name: Linux ${{ matrix.arch }}
-    needs: verify
+    needs: [verify, checks]
     strategy:
       fail-fast: false
       matrix:
@@ -129,15 +134,15 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
 
+      - name: Audio build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+
       - name: Build and archive
         run: |
           set -eux
           VERSION="${GITHUB_REF_NAME#v}"
           cargo build --release -p skelly --target ${{ matrix.target }}
-          mkdir -p stage
-          cp "target/${{ matrix.target }}/release/skelly" stage/skelly
-          cp packaging/linux/skelly.png stage/skelly.png
-          tar czf "skelly-v${VERSION}-linux-${{ matrix.arch }}.tar.gz" -C stage skelly skelly.png
+          sh packaging/linux/bundle.sh "target/${{ matrix.target }}/release/skelly" "$VERSION" . "${{ matrix.arch }}"
 
       - uses: actions/upload-artifact@v4
         with:

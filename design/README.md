@@ -23,6 +23,15 @@ The guide flags these as "Confirm first" - genuine product/architecture calls to
 settle before or as the relevant code lands. Resolve each, then replace its line
 with the decision + date.
 
+- [~] **Local voice backends and setup** - _Engine path selected 2026-10-01: local
+  `whisper.cpp` (`whisper-cli`) for transcription, CPAL for native capture, macOS `say`
+  and a separately installed Linux `espeak-ng` executable for speech output. No cloud
+  fallback, API credentials, or automatic large model downloads. The bridge opt-in key is
+  `[voice] enabled = false`; the dictation settings/controls and explicit model setup are
+  settled below, including turn-based playback controls. Real-device benchmarking remains
+  separate verification, not implied by fixture tests.
+  Track implementation in ai-planner
+  `local-voice-mvp`, not this decision log._
 - [~] **Timeline AI-actions contract** - _v1 resolved 2026-07-12: the timeline is
   an in-session event log Skelly records itself (see decision log); the model
   carries an `Agent` actor and a `record()` API, but the **transport** by which
@@ -72,6 +81,123 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
+
+- 2026-10-02 - **Voice release hardening and distribution.** The final spoken-turn
+  default is **Ctrl+Alt+Shift+V**, superseding the earlier Ctrl+Shift+V choice below:
+  v0.1.12 reserves Ctrl+Shift+C/V for clipboard on both platforms. Voice config rejects
+  both clipboard spellings (Ctrl+Shift and Cmd/Super) instead of shadowing paste.
+  Worker panics terminate with a visible error/wakeup, not a permanently busy HUD.
+  Engines run in their own process group; cancellation/deadlines kill the unreaped
+  engine and its helpers and reap the leader. Normal engine completion must finish
+  its helpers; this is not a sandbox for hostile/detached programs. Normal Quit joins
+  worker cleanup; crashes/forced termination can leave private files or processes.
+  Bundle the matching Pi companion without enabling it: macOS Resources/pi and Linux
+  share/skelly/pi (installed user-scoped under ~/.local/share/skelly/pi). No engines,
+  models or voices are bundled/downloaded. Linux requires the ALSA runtime; the
+  optional espeak-ng executable remains separately installed. Both macOS signing
+  paths carry microphone metadata; notarization still requires configured Developer
+  ID credentials. Release tags run the full reusable quality gates before packaging.
+  Voice remains experimental until packaged microphone/recognition/audible-playback
+  checks pass on both OSes. Fixtures, container checks and file-only synthesis are
+  not substitutes; track outstanding acceptance in ai-planner.
+
+- 2026-10-01 - **Turn-based voice and local spoken replies.** Ctrl+Shift+V starts a
+  **record/send** turn, distinct from Ctrl+Shift+D editable dictation. Stopping a spoken
+  recording transcribes and dispatches a literal Pi prompt; the HUD explicitly says stop
+  sends. Starting a spoken turn also arms a conversation pinned to that Pi connection.
+  The palette can start/end a conversation without opening the microphone. While armed,
+  **new** successful assistant-visible settled replies in that session are spoken, including
+  replies to typed turns; this is session-wide observation, not per-request correlation.
+  Cached replies are not replayed on arm/unmute/reconnect. A monotonic connection-local
+  settlement revision distinguishes identical successive answers. Keep only the newest
+  pending reply; drop replies received while muted, recording/transcribing, busy or modal,
+  and stop current audio when Pi resumes work or opens a modal.
+  Native Speech controls map 1:1 to `[voice]`: `turn_shortcut = "ctrl+shift+v"`,
+  `spoken_replies = true` (effective only in an explicitly armed conversation),
+  `busy_delivery = "idle"` (Refuse / Steer / Follow up), `speech_voice = ""` (system
+  default), `speech_rate = 180` (80–400 wpm). A separate Speech category keeps all rows
+  reachable in normal-height windows. Reject shortcut collisions, including reordered/cased
+  modifiers and Cmd/Super aliases, so dictation cannot ambiguously submit. Busy policy is
+  captured per utterance; the default rejects busy turns, never silently queues them.
+  Esc cancels capture first, otherwise stops local playback, otherwise ends the conversation.
+  Palette Stop playback, Mute/unmute, and End conversation never cancel agent work; only
+  **Voice: abort Pi in this pane** sends the explicit abort operation. Dispatch acknowledgments
+  distinguish inserted drafts, submitted prompts and cancellation requests. End/blur/settings/
+  pane/session/foreground changes/disable/quit cancel local work; already dispatched Pi work
+  continues. Starting capture during playback first stops it and asks the user to press again
+  after cleanup: no simultaneous microphone/speaker and no claim of echo cancellation.
+  TTS runs off-thread via macOS `/usr/bin/say` or separately installed Linux `espeak-ng`,
+  using installed voices and the OS output device. Speak bounded Markdown prose (at most 2000
+  characters plus an ellipsis), excluding code, HTML, images, tables, footnotes and URL
+  destinations. Strip brackets/control characters to neutralize engine speech/phoneme markup.
+  Text is passed in a private temporary file, never command-line text or a shell command;
+  subprocesses have a five-minute deadline, are killed/reaped on interruption, and private
+  files are removed on normal completion/error/cancel (crashes may leave them). The complete
+  reply always remains in Pi. No speech credentials, cloud fallback or automatic voice download.
+
+- 2026-10-01 - **Local dictation controls and setup.** Ctrl+Shift+D toggles one utterance
+  per window; the palette exposes Start/stop dictation, Cancel dictation, and Copy last
+  transcript. Esc cancels, key repeat does not toggle, and dictation only inserts into Pi's
+  editable draft (never Enter). Opening/recording/transcribing/cancelling states reuse the
+  semantic-token toast card persistently while work runs. The target is captured before
+  capture; changing pane/session/foreground process, opening Settings, losing window focus,
+  disabling Voice or quitting cancels the job. Ordinary Pi typing and approvals stay in Pi.
+  New 1:1 Voice controls/config keys: `whisper_program = "whisper-cli"`,
+  `model_path = ""`, `language = "en"`, `dictation_shortcut = "ctrl+shift+d"`,
+  `max_recording_seconds = 60` (5–120). Text rows use Enter to edit/save, Esc to discard,
+  Ctrl/Cmd+A to select all and Ctrl/Cmd+V to paste; invalid values never commit. Empty
+  shortcut disables it; otherwise use Ctrl/Alt/Cmd/Super plus an ASCII letter, optionally
+  Shift. A configured shortcut reports setup errors even when Voice is off, never falls
+  through to the shell. Engine/language/limit changes apply to the next utterance.
+  Setup is deliberately explicit: install whisper.cpp >=1.8.2 and separately obtain a
+  compatible ggml model (base.en is an English starting point, tiny.en trades accuracy for
+  speed); use a multilingual model for other languages. Prefer absolute executable paths
+  for Finder launches. Missing executable/model fails **before** microphone access. Native
+  CPAL uses the OS default input; whisper.cpp's built-in miniaudio decoder resamples the
+  private mono WAV to 16 kHz. No cloud fallback, download, credentials, partial text streaming
+  or always-on listening. A two-minute inference deadline, bounded audio/text and low-signal
+  rejection limit runaway work. Raw audio/result files are private temporary files removed on
+  normal completion/error/cancel; crashes may leave private temporary files (not secure erase).
+  One completed transcript remains in memory until the next utterance, disabling Voice or
+  exit, so a rejected/uncertain insertion can be copied explicitly; never replay or overwrite
+  the clipboard automatically. Cancellation does not abort Pi or undo already inserted text.
+
+- 2026-10-01 - **Pi bridge contract and local engine boundary.** A small Pi companion
+  extension connects to a private, per-shell-incarnation Unix socket using a random
+  capability inherited through the shell environment. Only an explicitly registered Pi
+  session can receive voice input; the first integration targets directly launched local
+  foreground Pi (SSH, tmux and process-wrapper routing are not inferred). LF-delimited
+  JSON is bounded, session/connection identities guard stale work, and uncertain delivery
+  is never automatically replayed. Modal approvals remain in Pi; draft insertion never
+  submits. `[voice] enabled` defaults to `false`, enables endpoints for **new** panes, and
+  disabling it revokes all endpoints including inactive workspaces. Until microphone capture
+  lands, the palette command **Voice: insert clipboard into Pi draft** exercises the same
+  insertion path with no PTY fallback; ordinary paste is unchanged. No shortcut is reserved
+  for this bridge-only command. Native controls/settings use existing semantic tokens.
+  Audio engines will run behind local adapters: `whisper-cli` for STT, CPAL for capture,
+  macOS `say` / Linux `espeak-ng` for TTS. Linux TTS is a separately installed executable,
+  not a GPL library linked into Skelly. See `integrations/pi/README.md` for the bridge setup
+  and protocol, and [ADR-0009](../docs/adr/0009-local-voice-pi-bridge.md) for the boundary.
+  Implementation slices and verification live in ai-planner `local-voice-mvp`.
+
+- 2026-10-01 - **Dictation and voice MVP: local speech around the existing Pi session.**
+  User-approved scope: use a chained **on-device speech-to-text -> Pi -> on-device
+  text-to-speech** pipeline, not GPT-Live / Realtime or another hosted speech service.
+  The reason is no new API keys or speech-service charges; ordinary Pi model usage is
+  unchanged, and this does not make the coding agent itself offline. Local speech models
+  may require a one-time download; engine selection is refined above and setup remains open.
+  **Dictation** inserts editable text into the current Pi prompt without submitting or
+  overwriting a draft. **Voice conversation** submits spoken turns to that same session
+  and speaks its assistant-visible replies; it is turn-based for the MVP, not natural
+  full-duplex conversation. Keep the approved native Skelly controls, configurable
+  shortcuts, semantic tokens, and small companion Pi extension over a private local
+  connection. Pi retains its conversation, selected model, tools, extensions and approvals;
+  do not replace its TUI, scrape terminal output, or run a second agent session.
+  Bind input to the intended pane/session and reject stale results rather than falling
+  back to shell input. Keep stopping playback separate from cancelling agent work.
+  Microphone capture is opt-in and raw audio is not retained by default. Settings belong
+  in `config.toml`; audio/voice work stays outside the terminal core and off the UI thread.
+  Full-duplex voice and hosted audio providers are deferred, not prerequisites for this MVP.
 
 - 2026-09-07 - **Copy/paste is `Ctrl+Shift+C`/`Ctrl+Shift+V` on Linux (was: the whole
   command modifier mapped to `Super` on both platforms, "waits on the full `[keys]`

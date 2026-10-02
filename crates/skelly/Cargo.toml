@@ -33,6 +33,7 @@ tempfile = "3"
 
 [dependencies]
 skelly-config = { path = "../skelly-config" }
+skelly-voice = { path = "../skelly-voice" }
 serde.workspace = true
 # Persist the workspace/tab/pane layout to a JSON state file for launch-time restore.
 serde_json.workspace = true

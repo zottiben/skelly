@@ -1,0 +1,25 @@
+[package]
+name = "skelly-voice"
+description = "Local voice integration and the private bridge to an existing agent session."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+cpal = "0.18.2"
+hound = "3.5"
+rtrb = "0.4"
+nix = { version = "0.28", features = ["signal", "process"] }
+pulldown-cmark = { version = "0.13.4", default-features = false }
+serde_json.workspace = true
+tempfile = "3"
+getrandom = { version = "0.3", features = ["std"] }

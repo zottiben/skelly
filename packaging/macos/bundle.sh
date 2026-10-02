@@ -27,13 +27,14 @@ mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
 cp "$BIN" "$CONTENTS/MacOS/skelly"
 chmod +x "$CONTENTS/MacOS/skelly"
 cp "$HERE/skelly.icns" "$CONTENTS/Resources/skelly.icns"
+sh "$HERE/../voice-assets.sh" "$CONTENTS/Resources/pi"
 sed "s/__VERSION__/$VERSION/g" "$HERE/Info.plist" > "$CONTENTS/Info.plist"
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
 if [ "$IDENTITY" = "-" ]; then
   # Ad-hoc: a bare signature so Gatekeeper/AMFI will launch it (curl downloads carry
   # no com.apple.quarantine, so no "unidentified developer" prompt on install).
-  codesign --force --deep --sign - "$APP"
+  codesign --force --deep --entitlements "$HERE/entitlements.plist" --sign - "$APP"
 else
   # Developer ID: hardened runtime + entitlements + secure timestamp, ready for
   # `notarytool submit` + `stapler staple`.

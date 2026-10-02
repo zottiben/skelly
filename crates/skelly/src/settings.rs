@@ -52,7 +52,7 @@ const SLIDER_TRACK_H: f32 = 6.0;
 const SLIDER_KNOB: f32 = 14.0;
 const SLIDER_VALUE_GAP: f32 = 12.0;
 /// The footer hint line.
-const FOOTER: &str = "up/down move   left/right change   tab category   esc close";
+const FOOTER: &str = "up/down move   left/right change   enter edit   tab category   esc close";
 
 /// One editable control. It maps to exactly one `config.toml` key (Hard rule 1):
 /// `key` is the dotted TOML path (also what the round-trip test asserts against), and
@@ -69,6 +69,11 @@ struct Control {
 /// The shape of a control's value, with the getter/setter bound to its config key.
 /// All closures are non-capturing so they coerce to `fn` pointers in the static table.
 enum Kind {
+    /// A bounded string edited explicitly with Enter; validated before committing.
+    Text {
+        get: fn(&Config) -> &str,
+        set: fn(&mut Config, String),
+    },
     /// An on/off switch.
     Toggle {
         /// Read the current state.
@@ -112,6 +117,7 @@ impl Kind {
     /// The value as displayed to the right of the label.
     fn value(&self, c: &Config) -> String {
         match self {
+            Kind::Text { get, .. } => get(c).to_owned(),
             Kind::Toggle { get, .. } => if get(c) { "On" } else { "Off" }.to_owned(),
             Kind::Choice { options, get, .. } => {
                 let i = get(c).min(options.len().saturating_sub(1));
@@ -142,6 +148,7 @@ impl Kind {
     /// Change the value by a signed `←/→` nudge, staying within bounds.
     fn adjust(&self, c: &mut Config, delta: i32) {
         match self {
+            Kind::Text { .. } => {}
             // `→`/`←` map to On/Off so direction reads intuitively.
             Kind::Toggle { set, .. } => set(c, delta > 0),
             Kind::Choice {
@@ -174,6 +181,7 @@ impl Kind {
                 set(c, (get(c) + 1) % n);
             }
             Kind::Range { .. } => self.adjust(c, 1),
+            Kind::Text { .. } => {}
         }
     }
 }
@@ -513,6 +521,128 @@ static CATEGORIES: &[Category] = &[
             },
         }],
     },
+    Category {
+        icon: 'v',
+        label: "Voice",
+        controls: &[
+            Control {
+                label: "Pi voice bridge (new panes)",
+                key: "voice.enabled",
+                kind: Kind::Toggle {
+                    get: |c| c.voice.enabled,
+                    set: |c, v| c.voice.enabled = v,
+                },
+            },
+            Control {
+                label: "Whisper executable",
+                key: "voice.whisper_program",
+                kind: Kind::Text {
+                    get: |c| &c.voice.whisper_program,
+                    set: |c, v| c.voice.whisper_program = v,
+                },
+            },
+            Control {
+                label: "Model path",
+                key: "voice.model_path",
+                kind: Kind::Text {
+                    get: |c| &c.voice.model_path,
+                    set: |c, v| c.voice.model_path = v,
+                },
+            },
+            Control {
+                label: "Language (code or auto)",
+                key: "voice.language",
+                kind: Kind::Text {
+                    get: |c| &c.voice.language,
+                    set: |c, v| c.voice.language = v,
+                },
+            },
+            Control {
+                label: "Dictation shortcut",
+                key: "voice.dictation_shortcut",
+                kind: Kind::Text {
+                    get: |c| &c.voice.dictation_shortcut,
+                    set: |c, v| c.voice.dictation_shortcut = v,
+                },
+            },
+            Control {
+                label: "Recording limit",
+                key: "voice.max_recording_seconds",
+                kind: Kind::Range {
+                    min: 5,
+                    max: 120,
+                    step: 5,
+                    divisor: 1,
+                    suffix: "s",
+                    get: |c| i32::from(c.voice.max_recording_seconds),
+                    set: |c, v| c.voice.max_recording_seconds = u16::try_from(v).unwrap_or(60),
+                },
+            },
+        ],
+    },
+    Category {
+        icon: 's',
+        label: "Speech",
+        controls: &[
+            Control {
+                label: "Spoken replies (voice mode)",
+                key: "voice.spoken_replies",
+                kind: Kind::Toggle {
+                    get: |c| c.voice.spoken_replies,
+                    set: |c, v| c.voice.spoken_replies = v,
+                },
+            },
+            Control {
+                label: "Record/send shortcut",
+                key: "voice.turn_shortcut",
+                kind: Kind::Text {
+                    get: |c| &c.voice.turn_shortcut,
+                    set: |c, v| c.voice.turn_shortcut = v,
+                },
+            },
+            Control {
+                label: "Busy Pi delivery",
+                key: "voice.busy_delivery",
+                kind: Kind::Choice {
+                    options: &["Refuse", "Steer", "Follow up"],
+                    cycle: false,
+                    get: |c| match c.voice.busy_delivery {
+                        skelly_config::VoiceDelivery::Idle => 0,
+                        skelly_config::VoiceDelivery::Steer => 1,
+                        skelly_config::VoiceDelivery::FollowUp => 2,
+                    },
+                    set: |c, i| {
+                        c.voice.busy_delivery = match i {
+                            1 => skelly_config::VoiceDelivery::Steer,
+                            2 => skelly_config::VoiceDelivery::FollowUp,
+                            _ => skelly_config::VoiceDelivery::Idle,
+                        }
+                    },
+                },
+            },
+            Control {
+                label: "Speech voice (optional)",
+                key: "voice.speech_voice",
+                kind: Kind::Text {
+                    get: |c| &c.voice.speech_voice,
+                    set: |c, v| c.voice.speech_voice = v,
+                },
+            },
+            Control {
+                label: "Speech rate",
+                key: "voice.speech_rate",
+                kind: Kind::Range {
+                    min: 80,
+                    max: 400,
+                    step: 10,
+                    divisor: 1,
+                    suffix: " wpm",
+                    get: |c| i32::from(c.voice.speech_rate),
+                    set: |c, v| c.voice.speech_rate = u16::try_from(v).unwrap_or(180),
+                },
+            },
+        ],
+    },
 ];
 
 /// Digits after the decimal point implied by a display `divisor` (10 -> 1, 100 -> 2).
@@ -543,6 +673,8 @@ pub(crate) struct Settings {
     pub(crate) open: bool,
     category: usize,
     selected: usize,
+    pub(crate) editing: Option<String>,
+    select_all: bool,
 }
 
 impl Settings {
@@ -552,6 +684,8 @@ impl Settings {
             open: false,
             category: 0,
             selected: 0,
+            editing: None,
+            select_all: false,
         }
     }
 
@@ -565,6 +699,75 @@ impl Settings {
     /// Close the settings view.
     pub(crate) fn close(&mut self) {
         self.open = false;
+        self.editing = None;
+    }
+
+    /// Enter starts a text edit without changing the live configuration.
+    pub(crate) fn start_text_edit(&mut self, config: &Config) -> bool {
+        let Some(Control {
+            kind: Kind::Text { get, .. },
+            ..
+        }) = self.controls().get(self.selected)
+        else {
+            return false;
+        };
+        self.editing = Some(get(config).into());
+        self.select_all = false;
+        true
+    }
+
+    /// Only validated edits reach the shared config; errors preserve the editable draft.
+    pub(crate) fn commit_text(
+        &mut self,
+        config: &mut Config,
+    ) -> Result<Option<&'static str>, skelly_config::ConfigError> {
+        let Some(value) = &self.editing else {
+            return Ok(None);
+        };
+        let Some(Control {
+            key,
+            kind: Kind::Text { set, .. },
+            ..
+        }) = self.controls().get(self.selected)
+        else {
+            return Ok(None);
+        };
+        let mut candidate = config.clone();
+        set(&mut candidate, value.clone());
+        candidate.validate()?;
+        *config = candidate;
+        self.editing = None;
+        Ok(Some(key))
+    }
+
+    pub(crate) fn select_text(&mut self) {
+        self.select_all = true;
+    }
+
+    pub(crate) fn backspace_text(&mut self) {
+        if let Some(text) = &mut self.editing {
+            if self.select_all {
+                text.clear();
+            } else {
+                text.pop();
+            }
+        }
+        self.select_all = false;
+    }
+
+    pub(crate) fn append_text(&mut self, text: &str) {
+        if let Some(draft) = &mut self.editing {
+            if self.select_all && text.chars().any(|c| !c.is_control()) {
+                draft.clear();
+                self.select_all = false;
+            }
+            for c in text.chars().filter(|c| !c.is_control()) {
+                if draft.len() + c.len_utf8() > 4096 {
+                    break;
+                }
+                draft.push(c);
+            }
+        }
     }
 
     /// The controls of the active category.
@@ -646,7 +849,11 @@ impl Settings {
         push_right(
             &mut labels,
             measure,
-            "esc to close",
+            if self.editing.is_some() {
+                "enter save · esc cancel"
+            } else {
+                "esc to close"
+            },
             FontRole::Caption,
             theme.fg_muted,
             content_right,
@@ -800,6 +1007,7 @@ impl Settings {
                 control,
                 config,
                 focused,
+                self.editing.as_deref().filter(|_| focused),
                 content_x,
                 content_right,
                 y,
@@ -833,6 +1041,7 @@ fn push_control(
     control: &Control,
     config: &Config,
     focused: bool,
+    editing: Option<&str>,
     content_x: f32,
     content_right: f32,
     top: f32,
@@ -855,6 +1064,35 @@ fn push_control(
         scale,
     );
     match &control.kind {
+        Kind::Text { get, .. } => {
+            let value = editing.unwrap_or_else(|| get(config));
+            let value =
+                if editing.is_none() && value.is_empty() && control.key == "voice.speech_voice" {
+                    "(system default)"
+                } else {
+                    value
+                };
+            let display = text_value(value, editing.is_some());
+            let left = content_x + (content_right - content_x) * 0.52;
+            push_row(
+                labels,
+                measure,
+                &display,
+                FontRole::Label,
+                if focused {
+                    theme.accent
+                } else {
+                    theme.fg_secondary
+                },
+                left,
+                top,
+                CTRL_ROW_H,
+                scale,
+            );
+            if let Some(label) = labels.last_mut() {
+                label.max_w = (content_right - left).max(0.0);
+            }
+        }
         Kind::Toggle { get, .. } => {
             push_toggle(quads, get(config), content_right, top, scale, theme);
         }
@@ -909,6 +1147,24 @@ fn push_control(
                 theme,
             );
         }
+    }
+}
+
+/// Keep the end of a long path visible; the row clips to its value column.
+fn text_value(value: &str, editing: bool) -> String {
+    let value = if value.is_empty() { "(not set)" } else { value };
+    let tail: String = value
+        .chars()
+        .rev()
+        .take(36)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    if editing {
+        format!("{tail}▏")
+    } else {
+        format!("‹ {tail} ›")
     }
 }
 
@@ -1161,7 +1417,7 @@ fn push_right(
 
 #[cfg(test)]
 mod tests {
-    use super::{Settings, CATEGORIES};
+    use super::{Kind, Settings, CATEGORIES};
     use skelly_config::Config;
     use skelly_render::{PxRect, TextMeasure, Theme};
 
@@ -1253,6 +1509,111 @@ mod tests {
     }
 
     #[test]
+    fn voice_text_edits_are_validated_and_cancellable() {
+        let mut settings = Settings::new();
+        settings.category = CATEGORIES.iter().position(|c| c.label == "Voice").unwrap();
+        settings.selected = 3; // language
+        let mut config = Config::default();
+        assert!(settings.start_text_edit(&config));
+        settings.select_text();
+        settings.append_text("invalid-language");
+        assert!(settings.commit_text(&mut config).is_err());
+        assert_eq!(config.voice.language, "en");
+        assert_eq!(settings.editing.as_deref(), Some("invalid-language"));
+        settings.select_text();
+        settings.append_text("fr");
+        assert_eq!(
+            settings.commit_text(&mut config).unwrap(),
+            Some("voice.language")
+        );
+        assert_eq!(config.voice.language, "fr");
+        settings.selected = 2; // model path
+        settings.start_text_edit(&config);
+        settings.append_text("/tmp/private model.bin");
+        settings.close();
+        assert!(config.voice.model_path.is_empty());
+        assert!(settings.editing.is_none());
+    }
+
+    #[test]
+    fn voice_settings_use_the_active_theme() {
+        for theme_name in ["ossein-dark", "ossein-light"] {
+            let mut settings = Settings::new();
+            settings.category = CATEGORIES.iter().position(|c| c.label == "Voice").unwrap();
+            settings.selected = 2;
+            let config = Config::default();
+            let theme = Theme::resolve(theme_name);
+            let mut measure = TextMeasure::new(1.0);
+            let paint = settings.build(
+                PxRect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1000.0,
+                    h: 680.0,
+                },
+                1.0,
+                &config,
+                &theme,
+                &mut measure,
+            );
+            assert!(paint
+                .labels
+                .iter()
+                .any(|label| label.text == "Model path" && label.color == theme.fg_primary));
+            assert!(paint
+                .labels
+                .iter()
+                .any(|label| label.text.contains("(not set)") && label.color == theme.accent));
+        }
+    }
+
+    #[test]
+    #[ignore = "manual GPU capture: writes /tmp/skelly-{voice,speech}-settings-<theme>.png"]
+    fn capture_voice_settings() {
+        for category in ["Voice", "Speech"] {
+            for theme_name in ["ossein-dark", "ossein-light"] {
+                let mut settings = Settings::new();
+                settings.category = CATEGORIES.iter().position(|c| c.label == category).unwrap();
+                settings.selected = 2;
+                let mut config = Config::default();
+                config.voice.enabled = true;
+                config.voice.model_path = "~/Models/whisper/ggml-base.en.bin".into();
+                config.appearance.theme = theme_name.into();
+                let theme = Theme::resolve(theme_name);
+                let mut measure = TextMeasure::new(1.0);
+                let panel = PxRect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 1000.0,
+                    h: 680.0,
+                };
+                let paint = settings.build(panel, 1.0, &config, &theme, &mut measure);
+                let view = skelly_render::CaptureSettings {
+                    panel,
+                    nav_divider_x: paint.nav_divider_x,
+                    quads: paint.quads,
+                    labels: paint.labels,
+                };
+                let rgba =
+                    skelly_render::capture_settings_rgba(&config.appearance, 1000, 680, 1.0, &view);
+                let file = std::fs::File::create(format!(
+                    "/tmp/skelly-{}-settings-{theme_name}.png",
+                    category.to_ascii_lowercase()
+                ))
+                .unwrap();
+                let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 1000, 680);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                encoder
+                    .write_header()
+                    .unwrap()
+                    .write_image_data(&rgba)
+                    .unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn every_control_round_trips_exactly_one_config_key() {
         // AGENTS Hard rule 1, enforced: changing any single control must alter exactly
         // one `config.toml` leaf, and it must be the key the control declares. We diff
@@ -1264,7 +1625,20 @@ mod tests {
                 let before: toml::Value =
                     toml::from_str(&config.to_toml_string().unwrap()).unwrap();
 
-                control.kind.adjust(&mut config, 1);
+                if let Kind::Text { set, .. } = control.kind {
+                    let value = match control.key {
+                        "voice.language" => "fr",
+                        "voice.dictation_shortcut" => "alt+d",
+                        "voice.turn_shortcut" => "alt+v",
+                        _ => "/tmp/local-voice-fixture",
+                    };
+                    set(&mut config, value.into());
+                } else {
+                    control.kind.adjust(&mut config, 1);
+                }
+                config
+                    .validate()
+                    .expect("every control writes a valid config");
                 if config == Config::default() {
                     // A no-op nudge (toggle already on, range at its max): go the other
                     // way so the control actually changes.
