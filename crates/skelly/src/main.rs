@@ -30,6 +30,7 @@ mod timeline;
 mod toast;
 mod tooltip;
 mod voice;
+mod voicebar;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1226,12 +1227,12 @@ impl App {
             return;
         };
         let inset = self.pane_inset();
-        // Reserve the status-line strip only when it is shown (design §10.6 toggle).
-        let status_h = if self.config.appearance.show_status_line {
-            statusline::HEIGHT * scale32(self.scale)
-        } else {
-            0.0
-        };
+        // Voice controls remain reachable even with the ordinary status line hidden.
+        let status_h = voicebar::reserved_height(
+            self.config.voice.enabled,
+            self.config.appearance.show_status_line,
+            scale32(self.scale),
+        );
         let viewport = self.viewport_rect();
         let proxy = self.proxy.clone();
         let shell = self.config.shell.program.clone();
@@ -1518,6 +1519,7 @@ impl App {
                 labels.extend(l);
             }
         }
+        self.push_voice_bars(&mut quads, &mut labels);
         // The empty state (design §10.2): a pristine single-pane tab shows the mark + hint chips,
         // which fade out together once the tab goes live (`empty_alpha` drives the fade).
         if let Some(alpha) = self.empty_alpha(Instant::now()) {
@@ -1543,6 +1545,12 @@ impl App {
             self.push_find_overlay(&mut quads, &mut labels, focused_rect, &query, hit, searched);
         }
         (scrims, quads, labels)
+    }
+
+    fn pointer_in_find_bar(&self) -> bool {
+        self.find.is_some()
+            && point_f32(self.pointer).1
+                >= dim_f32(self.size.1) - statusline::HEIGHT * scale32(self.scale)
     }
 
     /// Draw the find-match highlight over the focused pane and the find bar along the window
@@ -1825,7 +1833,7 @@ impl App {
             .flatten();
         // A transient toast (design §12) reuses the overlay card at the lowest priority.
         let toast = self.build_toast_frame();
-        // A hover tooltip (design §09) reuses the overlay card at the very lowest priority.
+        // Hover help temporarily takes precedence over toasts, including the voice HUD.
         let tooltip = self
             .tooltip_visible
             .then(|| self.build_tooltip_frame())
@@ -1880,8 +1888,8 @@ impl App {
                 })
                 .or_else(|| overlay.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
                 .or_else(|| confirm.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
-                .or_else(|| toast.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
-                .or_else(|| tooltip.as_ref().map(|f| (f.panel, &f.quads, &f.labels)));
+                .or_else(|| tooltip.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
+                .or_else(|| toast.as_ref().map(|f| (f.panel, &f.quads, &f.labels)));
             match overlay_frame {
                 Some((panel, quads, labels)) => renderer.set_overlay(Some(&OverlayView {
                     panel,
@@ -2400,6 +2408,7 @@ impl App {
                 } else {
                     self.clear_voice_bridges();
                 }
+                self.sync_layout();
             }
             _ => {}
         }
@@ -3323,6 +3332,8 @@ impl App {
         if let Some((message, kind)) = feedback {
             self.show_toast(message, kind);
         }
+        // Connection/modal/busy changes also update the per-pane controls without PTY output.
+        self.request_redraw();
     }
 
     /// Paste the clipboard contents into the focused pane's shell.
@@ -3795,7 +3806,10 @@ impl App {
 
     /// The tooltip label for the icon-only element under the pointer (design §09), or `None` when
     /// the pointer is not over one (or over a tab whose title is already visible in the panel).
-    fn tooltip_label_at_pointer(&self) -> Option<String> {
+    fn tooltip_label_at_pointer(&mut self) -> Option<String> {
+        if let Some((_, bar)) = self.voice_bar_at_pointer() {
+            return bar.hit(point_f32(self.pointer)).map(|b| b.hint.clone());
+        }
         let label = match self.sidebar_hit()? {
             sidebar::Hit::Util(action) => match action {
                 sidebar::UtilAction::Settings => "Settings  \u{2318},",
@@ -3826,7 +3840,7 @@ impl App {
         if !self.tooltip_visible {
             return None;
         }
-        let label = self.hover_tip.as_ref()?.0.clone();
+        let label = self.tooltip_label_at_pointer()?;
         let scale = scale32(self.scale);
         let surface = (dim_f32(self.size.0), dim_f32(self.size.1));
         let size = tooltip::natural_size(&label, scale, &mut self.measure);
@@ -3856,7 +3870,7 @@ impl App {
                         "muted"
                     },
                     if self.config.voice.turn_shortcut.is_empty() {
-                        "palette"
+                        "Talk / send"
                     } else {
                         &self.config.voice.turn_shortcut
                     }
@@ -3869,7 +3883,12 @@ impl App {
             .or(self.toast.as_ref())
             .or(ready.as_ref())?;
         let size = toast.natural_size(scale, &mut self.measure);
-        let panel = toast::place(size, surface, scale);
+        let reserved = if self.config.voice.enabled {
+            voicebar::reserved_height(true, self.config.appearance.show_status_line, scale)
+        } else {
+            0.0
+        };
+        let panel = toast::place(size, (surface.0, (surface.1 - reserved).max(0.0)), scale);
         let (quads, labels) = toast.build(panel, scale, &self.theme, &mut self.measure);
         Some(OnboardingFrame {
             panel,
@@ -3886,9 +3905,22 @@ impl App {
         self.context_menu.as_ref()?.hit(panel, scale, px, py)
     }
 
+    fn on_context_menu_click(&mut self, state: ElementState) {
+        if state == ElementState::Pressed {
+            match self.context_menu_hit() {
+                Some(i) => {
+                    if let Some(action) = self.context_menu.as_mut().and_then(|m| m.action_at(i)) {
+                        self.run_menu_action(action);
+                    }
+                }
+                None => self.close_context_menu(),
+            }
+        }
+    }
+
     /// Run a chosen menu action against the active (right-clicked) tab, then close the menu.
     fn run_menu_action(&mut self, action: MenuAction) {
-        self.context_menu = None;
+        let menu = self.context_menu.take();
         match action {
             MenuAction::TogglePin => self.toggle_pin(),
             MenuAction::Rename => self.start_rename(),
@@ -3897,6 +3929,11 @@ impl App {
             MenuAction::MoveToGroup(gi) => self.move_active_tab_to_group(Some(gi)),
             MenuAction::RemoveFromGroup => self.move_active_tab_to_group(None),
             MenuAction::Close => self.request_close_tab(),
+            MenuAction::Voice(action) => {
+                if let Some(menu) = menu {
+                    self.run_voice_menu_action(&menu, action);
+                }
+            }
         }
         self.request_redraw();
     }
@@ -4237,11 +4274,11 @@ impl App {
             return;
         }
         let inset = self.pane_inset();
-        let status_h = if self.config.appearance.show_status_line {
-            statusline::HEIGHT * scale32(self.scale)
-        } else {
-            0.0
-        };
+        let status_h = voicebar::reserved_height(
+            self.config.voice.enabled,
+            self.config.appearance.show_status_line,
+            scale32(self.scale),
+        );
         let viewport = self.viewport_rect();
         let active_ws = state.active_workspace.min(state.workspaces.len() - 1);
         let mut workspaces = Vec::with_capacity(state.workspaces.len());
@@ -5140,8 +5177,7 @@ impl App {
     /// Handle a key press: the palette (when open), platform combos (quit/copy/paste/
     /// palette), pane chords, scrollback keys, then terminal input to the focused pane.
     fn on_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
-        if key_event.state != ElementState::Pressed || self.on_voice_escape(&key_event.logical_key)
-        {
+        if key_event.state != ElementState::Pressed {
             return;
         }
         // A key during either overlay's fade-out settles it shut, then routes as if it were
@@ -5168,6 +5204,9 @@ impl App {
                 self.cheatsheet_open = false;
                 self.request_redraw();
             }
+            return;
+        }
+        if self.on_voice_escape(&key_event.logical_key) {
             return;
         }
         // The scrollback find bar (§11) captures input while open (typing / navigate / Esc). `⌘F`
@@ -5370,10 +5409,22 @@ impl App {
             }
             return;
         }
+        let voice_button = self
+            .voice_bar_at_pointer()
+            .and_then(|(_, bar)| bar.hit(point_f32(self.pointer)).map(|b| b.action.is_some()));
+        if voice_button.is_some() || self.hover_tip.is_some() {
+            self.request_redraw();
+        }
         // Show a horizontal-resize cursor when hovering either draggable edge (dock or sidebar).
         if let Some(window) = self.window.as_ref() {
             window.set_cursor(if self.on_dock_edge() || self.on_sidebar_edge() {
                 CursorIcon::EwResize
+            } else if let Some(enabled) = voice_button {
+                if enabled {
+                    CursorIcon::Pointer
+                } else {
+                    CursorIcon::NotAllowed
+                }
             } else {
                 CursorIcon::Default
             });
@@ -5435,17 +5486,7 @@ impl App {
         // The right-click tab menu captures clicks: an item runs its action, a click elsewhere
         // dismisses it (design §08). Either way nothing behind the menu reacts.
         if self.context_menu.is_some() {
-            if state == ElementState::Pressed {
-                match self.context_menu_hit() {
-                    Some(i) => {
-                        let action = self.context_menu.as_mut().and_then(|m| m.action_at(i));
-                        if let Some(action) = action {
-                            self.run_menu_action(action);
-                        }
-                    }
-                    None => self.close_context_menu(),
-                }
-            }
+            self.on_context_menu_click(state);
             return;
         }
         // A click during an overlay's fade-out dismisses it (and is consumed) instead of
@@ -5453,8 +5494,19 @@ impl App {
         if self.settle_confirm_close() || self.settle_palette_close() {
             return;
         }
+        if self.settings.open
+            || self.palette.open
+            || self.confirm.is_some()
+            || self.cheatsheet_open
+            || self.pointer_in_find_bar()
+        {
+            return;
+        }
         match state {
             ElementState::Pressed => {
+                if self.on_voice_bar_click() {
+                    return;
+                }
                 // The expand toggle straddles the dock's left edge, so check it *before* the
                 // resize-edge grab - a click on the handle flips the dock width, not a resize.
                 if let Some(btn) = self.dock_button_rect() {

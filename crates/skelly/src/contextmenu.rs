@@ -6,6 +6,9 @@
 //! and the pixel -> item hit-test. The binary owns opening it (right-click -> focus the tab +
 //! anchor here), routing keys / clicks, and running each action against that tab.
 //!
+//! The same overlay also hosts the pane voice footer's overflow menu, with a captured Pi
+//! target and state validation before dispatch. Unavailable voice actions are not menu items.
+//!
 //! The guide's "Move to group ›" submenu is realized as flat rows (the overlay is a single card):
 //! a `Move to <group>` per other group, "New group", and "Remove from group" when grouped.
 
@@ -47,6 +50,8 @@ pub(crate) enum MenuAction {
     RemoveFromGroup,
     /// Close the tab (`⌘W`).
     Close,
+    /// A pane-local voice control; never a terminal write or an implicit Pi abort.
+    Voice(crate::voicebar::Action),
 }
 
 /// One laid-out menu entry: an actionable item or a divider rule.
@@ -79,6 +84,7 @@ pub(crate) struct ContextMenu {
     /// The pointer position (physical px) the menu was opened at; it opens down-right from here,
     /// clamped inside the window by [`ContextMenu::place`].
     anchor: (f32, f32),
+    voice_context: Option<(skelly_pane::PaneId, Option<skelly_voice::bridge::Target>)>,
 }
 
 impl ContextMenu {
@@ -138,7 +144,54 @@ impl ContextMenu {
             entries,
             selected: 0,
             anchor,
+            voice_context: None,
         }
+    }
+
+    pub(crate) fn for_voice(
+        anchor: (f32, f32),
+        pane: skelly_pane::PaneId,
+        target: Option<skelly_voice::bridge::Target>,
+        controls: crate::voicebar::Controls,
+    ) -> Self {
+        let entries = controls
+            .buttons
+            .into_iter()
+            .filter_map(|button| {
+                Some(Entry::Item {
+                    label: button.menu_label().into(),
+                    hint: "",
+                    action: MenuAction::Voice(button.action?),
+                    danger: false,
+                })
+            })
+            .collect();
+        Self {
+            entries,
+            selected: 0,
+            anchor,
+            voice_context: Some((pane, target)),
+        }
+    }
+
+    pub(crate) fn voice_context(
+        &self,
+    ) -> Option<&(skelly_pane::PaneId, Option<skelly_voice::bridge::Target>)> {
+        self.voice_context.as_ref()
+    }
+
+    /// Reject a stale menu whose Stop action would now start a new recording instead.
+    pub(crate) fn voice_action_is_current(
+        &self,
+        action: crate::voicebar::Action,
+        controls: &crate::voicebar::Controls,
+    ) -> bool {
+        self.entries.iter().any(|entry| {
+            matches!(entry,
+            Entry::Item { action: MenuAction::Voice(old), label, .. }
+                if *old == action && controls.buttons.iter().any(|button|
+                    button.action == Some(action) && button.menu_label() == label))
+        })
     }
 
     /// Move the highlight one step forward (`delta >= 0`) or back, wrapping and skipping dividers.
