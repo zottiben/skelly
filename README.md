@@ -67,6 +67,25 @@ cargo test --workspace   # run the test suite
 Right now the binary loads `~/.config/skelly/config.toml` (or spec defaults when
 there is no file) and reports the resolved settings.
 
+## Pane leader and terminal shortcuts
+
+The default pane-command prefix is **Ctrl+Alt+A** (Ctrl+Option+A on macOS), followed
+by a pane key such as `h/j/k/l` to move focus or `z` to toggle zoom. Plain **Ctrl+A**
+reaches the foreground program, preserving shell line navigation and Neovim mappings.
+
+**Upgrading from 0.1.14 or earlier:** updates preserve your configuration, including
+`leader = "ctrl+a"` written automatically by onboarding or a settings save. Updating
+alone does not replace that saved value. To free Ctrl+A, change the existing `[panes]`
+entry in `~/.config/skelly/config.toml` (or `$XDG_CONFIG_HOME/skelly/config.toml`):
+
+```toml
+[panes]
+leader = "ctrl+alt+a"
+```
+
+Alternatively, remove the `leader` line to use the new default. Restart Skelly to
+apply it. Other custom leaders and an empty string (disabled) remain supported.
+
 ## Optional local voice (experimental)
 
 Voice is off by default. With Pi running directly in a Skelly pane, local

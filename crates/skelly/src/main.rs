@@ -666,7 +666,7 @@ struct App {
     /// A stack of recently-closed tabs' titles, for `⇧⌘T` reopen (design §11) - a fresh tab is
     /// opened carrying the title back (the shell itself can't be resurrected).
     closed_titles: Vec<String>,
-    /// Whether the tmux-style pane leader (`[panes] leader`, default `ctrl+a`, §11) was just
+    /// Whether the tmux-style pane leader (`[panes] leader`, default `ctrl+alt+a`) was just
     /// pressed, so the next key is a leader pane chord (`hjkl`/`⇧hjkl`/`z`/`x`/`|`/`-`).
     leader_pending: bool,
     /// Whether the keybinding cheatsheet overlay (`⌘/`, §11) is open. While up it captures input
@@ -4980,7 +4980,7 @@ impl App {
         }
     }
 
-    /// Handle the tmux-style pane leader (`[panes] leader`, default `ctrl+a`, §11). Returns
+    /// Handle the tmux-style pane leader (`[panes] leader`, default `ctrl+alt+a`). Returns
     /// whether the key was consumed. Pressing the leader arms it; the next key is a leader pane
     /// chord (`hjkl`/`⇧hjkl`/`z`/`x`/`|`/`-`), or anything else cancels it.
     fn on_leader(&mut self, key_event: &KeyEvent) -> bool {
@@ -7713,8 +7713,22 @@ mod tests {
     }
 
     #[test]
+    fn default_pane_leader_leaves_terminal_ctrl_keys_alone() {
+        let leader = parse_leader(&skelly_config::Config::default().panes.leader);
+        // Ctrl+A must reach LazyVim/readline; Ctrl+D must remain unchanged too.
+        for key in [KeyCode::KeyA, KeyCode::KeyD] {
+            assert_ne!(leader, Some((ModifiersState::CONTROL, key)));
+            assert_eq!(pane_action(key, ModifiersState::CONTROL), None);
+        }
+    }
+
+    #[test]
     fn leader_parses_and_decodes_pane_chords() {
-        // The default `ctrl+a` leader parses to Ctrl + KeyA.
+        assert_eq!(
+            parse_leader(&skelly_config::Config::default().panes.leader),
+            Some((ModifiersState::CONTROL | ModifiersState::ALT, KeyCode::KeyA))
+        );
+        // Explicit legacy prefixes are still supported.
         assert_eq!(
             parse_leader("ctrl+a"),
             Some((ModifiersState::CONTROL, KeyCode::KeyA))

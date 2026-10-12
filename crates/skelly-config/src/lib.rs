@@ -266,7 +266,7 @@ pub enum TabTitle {
 pub struct Panes {
     /// Maximum panes per tab. Hard cap 8 (Hard rule 4). Valid range 1..=8.
     pub max: u8,
-    /// tmux-style leader chord for pane control.
+    /// tmux-style leader chord for pane control (default Ctrl+Alt+A leaves Ctrl+A to the terminal).
     pub leader: String,
     /// New splits inherit the focused pane's working directory.
     pub split_inherits_cwd: bool,
@@ -360,7 +360,7 @@ impl Default for Panes {
     fn default() -> Self {
         Self {
             max: 8,
-            leader: "ctrl+a".to_owned(),
+            leader: "ctrl+alt+a".to_owned(),
             split_inherits_cwd: true,
         }
     }
@@ -615,9 +615,25 @@ mod tests {
         assert_eq!(c.sidebar.mode, SidebarMode::Fixed);
         assert_eq!(c.tabs.title, TabTitle::Cwd);
         assert_eq!(c.panes.max, 8);
-        assert_eq!(c.panes.leader, "ctrl+a");
+        assert_eq!(c.panes.leader, "ctrl+alt+a");
         assert!(c.session.shadow_worktree);
         assert_eq!(c.git.diff_view, DiffView::Unified);
+    }
+
+    #[test]
+    fn pane_leader_default_applies_only_when_not_configured() {
+        for text in ["", "[panes]\nmax = 4\n"] {
+            let config = Config::from_toml_str(text).expect("parse partial config");
+            assert_eq!(config.panes.leader, "ctrl+alt+a");
+        }
+        // Existing users may deliberately use the old prefix, another key, or no leader.
+        for leader in ["ctrl+a", "ctrl+b", "ctrl+alt+a", ""] {
+            let text = format!("[panes]\nleader = {leader:?}\n");
+            let config = Config::from_toml_str(&text).expect("parse explicit leader");
+            assert_eq!(config.panes.leader, leader);
+            let saved = config.to_toml_string().expect("serialize config");
+            assert_eq!(Config::from_toml_str(&saved).unwrap().panes.leader, leader);
+        }
     }
 
     #[test]

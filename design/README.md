@@ -82,6 +82,16 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-10-12 - **Pane leader defaults to Ctrl+Alt+A, leaving Ctrl+A to the terminal.**
+  User reported LazyVim's start-of-line mapping no longer worked; Skelly consumed
+  Ctrl+A before forwarding terminal input. Change `[panes] leader` from `ctrl+a`
+  to `ctrl+alt+a` (Ctrl+Option+A on macOS), superseding the guide's §11 default
+  and earlier decisions below. Pane suffixes and direct Alt shortcuts are unchanged.
+  Preserve explicitly configured leaders, including the legacy prefix and empty
+  (disabled) value: upgrades do not rewrite user preferences. Existing users can
+  change the value or remove the old line, then restart Skelly. The cheatsheet names
+  the **default** rather than claiming it is the user's configured chord.
+
 - 2026-10-02 - **Discoverable, pane-local voice controls.** User requested buttons
   alongside the shortcuts. With `[voice] enabled`, each live pane reserves a 32px
   footer above its optional status line: **Dictate** records into Pi's editable draft;

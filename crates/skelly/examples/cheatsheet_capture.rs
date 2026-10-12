@@ -37,7 +37,7 @@ const GLOBAL: Group = Group(
 );
 const PANES: Group = Group(
     "Panes",
-    "Leader = \u{2303}A (tmux-style).",
+    "Default leader = \u{2303}\u{2325}A (tmux-style).",
     &[
         Bind("Split right / down", "\u{2325}| \u{2325}-"),
         Bind("Move focus", "\u{2325}H J K L"),
