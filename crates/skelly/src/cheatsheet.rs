@@ -49,7 +49,7 @@ const GLOBAL: Group = Group {
 };
 const PANES: Group = Group {
     title: "Panes",
-    note: "Leader = \u{2303}A (tmux-style).",
+    note: "Default leader = \u{2303}\u{2325}A (tmux-style).",
     binds: &[
         b("Split right / down", "\u{2325}| \u{2325}-"),
         b("Move focus", "\u{2325}H J K L"),
@@ -337,6 +337,7 @@ mod tests {
         assert!(joined.contains("Keybindings"));
         assert!(joined.contains("Command palette"));
         assert!(joined.contains("Cycle layout preset"));
+        assert!(joined.contains("Default leader = \u{2303}\u{2325}A"));
         assert!(joined.contains("Reopen closed"));
 
         // Layout sanity: every label starts inside the card, and the bottom-most row stays within
