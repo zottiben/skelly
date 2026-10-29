@@ -180,14 +180,16 @@ pub(crate) enum UtilAction {
     Git,
 }
 
-/// The utility-bar actions in the guide's left-to-right order, paired with their glyphs
-/// (⚙ settings · ◐ theme · ⟲ timeline · ⑂ git). Rendered as glyph labels - the same unicode
-/// the mockup itself uses - so no bespoke icon subsystem is needed yet.
-const UTIL_ICONS: [(UtilAction, &str); 4] = [
-    (UtilAction::Settings, "\u{2699}"),
-    (UtilAction::Theme, "\u{25D0}"),
-    (UtilAction::Timeline, "\u{27F2}"),
-    (UtilAction::Git, "\u{2442}"),
+/// The utility-bar actions in the guide's left-to-right order, paired with their glyphs and
+/// the role that draws each (⚙ settings · ◐ theme · ⟲ timeline · ⑂ git). Rendered as glyph
+/// labels - the same unicode the mockup itself uses - except the gear: no bundled face has
+/// U+2699 and the platform fallback resolves it to a color emoji, so it draws the bundled
+/// Codicon `settings-gear` (an outline gear, like the guide's text-presentation ⚙).
+const UTIL_ICONS: [(UtilAction, &str, FontRole); 4] = [
+    (UtilAction::Settings, "\u{EB51}", FontRole::Icon),
+    (UtilAction::Theme, "\u{25D0}", FontRole::H2),
+    (UtilAction::Timeline, "\u{27F2}", FontRole::H2),
+    (UtilAction::Git, "\u{2442}", FontRole::H2),
 ];
 /// Horizontal padding of the full-panel utility row from the sidebar edges; the four icons
 /// spread evenly across the inner width between these pads.
@@ -493,7 +495,7 @@ fn utility_slots(panel: PxRect, scale: f32) -> Vec<(UtilAction, PxRect)> {
     UTIL_ICONS
         .iter()
         .enumerate()
-        .map(|(i, (action, _))| {
+        .map(|(i, (action, _, _))| {
             (
                 *action,
                 PxRect {
@@ -1176,15 +1178,14 @@ fn push_utility_bar(
     ));
     // Larger than default UI text (§05 `h2`, 20px) so the toggles read as real touch targets,
     // each centered in its evenly-spread slot.
-    let role = FontRole::H2;
-    let line_h = measure.line_height(role);
-    let cy = top + (UTIL_H * scale - line_h) * 0.5;
-    for ((_, glyph), (_, slot)) in UTIL_ICONS.iter().zip(utility_slots(panel, scale)) {
+    for ((_, glyph, role), (_, slot)) in UTIL_ICONS.iter().zip(utility_slots(panel, scale)) {
+        let role = *role;
         let gw = measure.width(glyph, role, None);
+        let line_h = measure.line_height(role);
         labels.push(ProseLabel {
             text: (*glyph).to_owned(),
             x: slot.x + (slot.w - gw) * 0.5,
-            y: cy,
+            y: top + (UTIL_H * scale - line_h) * 0.5,
             role,
             color: theme.fg_muted,
             weight: None,
@@ -1233,7 +1234,7 @@ fn push_label(
 mod tests {
     use super::{build, hit, GroupSpan, Hit, Sidebar, UtilAction, View, UTIL_ICONS};
     use skelly_config::SidebarMode;
-    use skelly_render::{PxRect, TextMeasure, Theme};
+    use skelly_render::{FontRole, PxRect, TextMeasure, Theme};
 
     /// A tall panel so a small tab list never scrolls, at 2x DPI.
     fn panel() -> PxRect {
@@ -1558,15 +1559,21 @@ mod tests {
         let mut m = TextMeasure::new(2.0);
         let paint = build(&view(2, 0, false), panel(), 2.0, &theme, &mut m);
         // Each utility glyph is drawn once, in the footer (below the tab list).
-        for (_, glyph) in UTIL_ICONS {
+        for (_, glyph, _) in UTIL_ICONS {
             assert!(
                 paint.labels.iter().any(|l| l.text == glyph),
                 "utility glyph {glyph:?} should be drawn"
             );
         }
+        // The gear draws from the bundled icon font: U+2699 would fall back to a color emoji.
+        assert!(paint
+            .labels
+            .iter()
+            .any(|l| l.text == "\u{EB51}" && l.role == FontRole::Icon));
+        assert!(paint.labels.iter().all(|l| l.text != "\u{2699}"));
         // The slim rail has no room for the footer, so it omits the glyphs entirely.
         let rail = build(&view(2, 0, true), panel(), 2.0, &theme, &mut m);
-        for (_, glyph) in UTIL_ICONS {
+        for (_, glyph, _) in UTIL_ICONS {
             assert!(
                 rail.labels.iter().all(|l| l.text != glyph),
                 "rail should omit utility glyph {glyph:?}"
