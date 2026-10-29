@@ -1,9 +1,11 @@
 //! The "close with a running job" confirm modal (design §12 "Process running on close"):
 //! a centered overlay that warns before a close (`⌥w` pane / `⌘W` tab) which would kill a
 //! running foreground job, so a job is never destroyed silently. Confirmed with `Enter` or
-//! a second press of the close chord, dismissed with `Esc`. This module is pure state +
-//! layout (a proportional display list); the binary owns detecting the job (via
-//! `Terminal::foreground_job_pid` plus the process name), routing keys, and closing.
+//! a second press of the close chord, dismissed with `Esc`. Removing a workspace closes every
+//! tab in it, so it always asks - naming a running job when there is one, else the workspace.
+//! This module is pure state + layout (a proportional display list); the binary owns
+//! detecting the job (via `Terminal::foreground_job_pid` plus the process name), routing
+//! keys, and closing.
 
 use skelly_render::{FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
 
@@ -27,6 +29,8 @@ pub(crate) enum CloseTarget {
     Pane,
     /// The active tab and every pane in it (`⌘W`).
     Tab,
+    /// The workspace at this index, with every tab in it.
+    Workspace(usize),
 }
 
 impl CloseTarget {
@@ -35,37 +39,63 @@ impl CloseTarget {
         match self {
             CloseTarget::Pane => "pane",
             CloseTarget::Tab => "tab",
+            CloseTarget::Workspace(_) => "workspace",
         }
     }
 }
 
-/// A pending confirm: the close it guards and the running process it would kill.
+/// A pending confirm: the close it guards and what it would destroy.
 pub(crate) struct Confirm {
     /// The close this modal guards (so the binary knows what to close on confirm).
     pub(crate) target: CloseTarget,
-    /// The name of the foreground job the close would end (shown in the message).
-    process: String,
+    /// The title as `(before, subject, after)`; the subject (a process or workspace name)
+    /// draws in `accent`.
+    title: (String, String, String),
+    /// The action line under the title.
+    action: String,
+    /// The key-hint line.
+    hint: &'static str,
 }
 
 impl Confirm {
     /// A pending confirm for closing `target`, which would kill the foreground job named
     /// `process`.
     pub(crate) fn new(target: CloseTarget, process: String) -> Self {
-        Self { target, process }
+        Self {
+            target,
+            title: ("\"".to_owned(), process, "\" is still running".to_owned()),
+            action: format!("Close this {} and end it?", target.noun()),
+            hint: HINT,
+        }
     }
 
-    /// The `"<proc>" is still running` title, split so the process name draws in `accent`.
+    /// A pending confirm for removing workspace `index`, named `name`, with nothing running
+    /// in its `tabs` tabs.
+    pub(crate) fn remove_workspace(index: usize, name: String, tabs: usize) -> Self {
+        Self {
+            target: CloseTarget::Workspace(index),
+            title: ("Remove \"".to_owned(), name, "\"?".to_owned()),
+            action: if tabs == 1 {
+                "Its tab will close.".to_owned()
+            } else {
+                format!("Its {tabs} tabs will close.")
+            },
+            hint: REMOVE_HINT,
+        }
+    }
+
+    /// The title runs, the subject in `accent`.
     fn title_runs(&self, theme: &Theme) -> [(String, Srgb); 3] {
         [
-            ("\"".to_owned(), theme.fg_primary),
-            (self.process.clone(), theme.accent),
-            ("\" is still running".to_owned(), theme.fg_primary),
+            (self.title.0.clone(), theme.fg_primary),
+            (self.title.1.clone(), theme.accent),
+            (self.title.2.clone(), theme.fg_primary),
         ]
     }
 
     /// The action question naming the target.
     fn action(&self) -> String {
-        format!("Close this {} and end it?", self.target.noun())
+        self.action.clone()
     }
 
     /// The modal's natural panel size in **physical** px (including padding), for the binary
@@ -79,7 +109,7 @@ impl Confirm {
             .sum();
         let width = title_w
             .max(measure.width(&self.action(), FontRole::Body, None))
-            .max(measure.width(HINT, FontRole::Caption, None))
+            .max(measure.width(self.hint, FontRole::Caption, None))
             + 2.0 * PAD * scale;
         let height = (PAD + TITLE_H + GAP + ACTION_H + GAP2 + HINT_H + PAD) * scale;
         (width, height)
@@ -135,7 +165,7 @@ impl Confirm {
         y += ACTION_H * scale + GAP2 * scale;
         push_centered(
             &mut labels,
-            HINT,
+            self.hint,
             FontRole::Caption,
             theme.fg_muted,
             panel,
@@ -150,6 +180,8 @@ impl Confirm {
 
 /// The dismiss hint line.
 const HINT: &str = "\u{21b5} close    esc cancel";
+/// The dismiss hint line for a removal with nothing running.
+const REMOVE_HINT: &str = "\u{21b5} remove    esc cancel";
 
 /// Push a single label horizontally centered in `panel` and vertically centered in a row of
 /// `row_h` logical px whose top is physical `top`.
@@ -225,5 +257,35 @@ mod tests {
         );
         let joined: String = labels.iter().map(|l| l.text.clone()).collect();
         assert!(joined.contains("Close this tab"));
+    }
+
+    #[test]
+    fn removing_an_idle_workspace_names_it_and_counts_its_tabs() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(1.0);
+        let confirm = Confirm::remove_workspace(1, "Work".to_owned(), 3);
+        assert_eq!(confirm.target, CloseTarget::Workspace(1));
+        let (w, h) = confirm.natural_size(1.0, &mut m);
+        let labels = confirm.build(
+            PxRect {
+                x: 0.0,
+                y: 0.0,
+                w,
+                h,
+            },
+            1.0,
+            &theme,
+            &mut m,
+        );
+        let joined: String = labels.iter().map(|l| l.text.clone()).collect();
+        assert!(joined.contains("Remove \"Work\"?"));
+        assert!(joined.contains("Its 3 tabs will close."));
+        assert!(joined.contains("remove    esc cancel"));
+        assert!(labels
+            .iter()
+            .any(|l| l.text == "Work" && l.color == theme.accent));
+        // A running job in it takes the usual close wording.
+        let busy = Confirm::new(CloseTarget::Workspace(1), "cargo".to_owned());
+        assert_eq!(busy.action(), "Close this workspace and end it?");
     }
 }

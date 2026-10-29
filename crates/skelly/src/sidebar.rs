@@ -128,7 +128,7 @@ pub(crate) struct View<'a> {
     pub(crate) tab_count: usize,
     /// Index of the active tab.
     pub(crate) active_tab: usize,
-    /// One chip glyph per workspace (its name's first letter); a trailing `+` is always added.
+    /// One chip glyph per workspace (its picked icon); a trailing `+` is always added.
     pub(crate) chips: &'a [char],
     /// Index of the active workspace (highlighted chip).
     pub(crate) active_chip: usize,
@@ -935,7 +935,6 @@ fn push_chips(
     let slots = chip_slots(view, panel, scale);
     let radius = CHIP_RADIUS * scale;
     let stroke = scale.max(1.0);
-    let line = measure.line_height(FontRole::Mono);
     for (i, slot) in slots.iter().enumerate() {
         let is_add = i >= view.chips.len();
         let active = !is_add && i == view.active_chip;
@@ -963,17 +962,16 @@ fn push_chips(
         } else {
             quads.push(ChromeQuad::rounded(*slot, theme.bg_surface, radius));
         }
-        let glyph = if is_add {
-            "+".to_owned()
-        } else {
-            view.chips[i].to_string()
-        };
-        let gw = measure.width(&glyph, FontRole::Mono, None);
+        let glyph = if is_add { '+' } else { view.chips[i] };
+        let role = crate::workspace::icon_role(glyph);
+        let glyph = glyph.to_string();
+        let gw = measure.width(&glyph, role, None);
+        let line = measure.line_height(role);
         labels.push(ProseLabel {
             text: glyph,
             x: slot.x + (slot.w - gw) * 0.5,
             y: slot.y + (slot.h - line) * 0.5,
-            role: FontRole::Mono,
+            role,
             color: if active { theme.accent } else { theme.fg_muted },
             weight: None,
             max_w: f32::MAX,

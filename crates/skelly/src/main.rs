@@ -31,6 +31,7 @@ mod toast;
 mod tooltip;
 mod voice;
 mod voicebar;
+mod workspace;
 mod zoom;
 
 use std::collections::{HashMap, HashSet};
@@ -80,12 +81,6 @@ const TITLE_STRIP: f32 = 38.0;
 /// at least this wide it covers them; when it is narrower (hidden, or the slim rail) the pane
 /// viewport must reserve the title strip so the top-left pane never sits under the lights.
 const TRAFFIC_LIGHT_WIDTH: f32 = 80.0;
-/// The workspace-chip icons (design §08 #2), a curated set of distinct geometric marks assigned
-/// to workspaces by position - a stable, recognizable icon per workspace instead of an initial
-/// derived from its name (the guide's `P`/`W` were only illustrative).
-const WORKSPACE_ICONS: [char; 8] = [
-    '\u{25C6}', '\u{25CF}', '\u{25B2}', '\u{25A0}', '\u{2605}', '\u{25C7}', '\u{25CB}', '\u{25A1}',
-];
 /// The dock's expand/collapse toggle: a square handle (logical px) that straddles the dock's
 /// left edge - half over the dock, half over the terminal - vertically centered, so it reads
 /// unmistakably as a "expand this panel" control and sits clear of the header content.
@@ -297,6 +292,15 @@ struct Tab {
     group: Option<usize>,
 }
 
+/// What an inline sidebar rename edits.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RenameTarget {
+    /// The active tab's custom title.
+    Tab,
+    /// The group at this index (its header).
+    Group(usize),
+}
+
 /// A collapsible tab group (design §08 #5): a named header with a member count that clusters
 /// tabs ("Groups map to a working directory or project"). Collapsing hides its children in the
 /// sidebar but keeps their shells running. Groups belong to a workspace.
@@ -364,8 +368,10 @@ impl Tab {
 /// that own their own cwd. Per-workspace *theme* is an open decision (no config key for it yet;
 /// see design/README.md "Per-workspace cwd/theme isolation"), so the UI theme stays global.
 struct Workspace {
-    /// The display name; its first letter is the sidebar chip glyph.
+    /// The display name (the chip's tooltip and the Workspaces page).
     name: String,
+    /// The sidebar chip glyph, picked from [`workspace::ICONS`] (design §08 #2).
+    icon: char,
     /// The stashed `(tabs, active, groups)` for an *inactive* workspace; `None` while it is
     /// active (its tabs/groups are live in `App.tabs`/`active`/`groups`). Each workspace
     /// isolates its own collapsible groups (design §08 #2).
@@ -660,9 +666,10 @@ struct App {
     /// The first-run onboarding modal (design §10.1), shown once on a fresh install (no config
     /// file yet). While set, it captures input; Skip/Start write the config and dismiss it.
     onboarding: Option<onboarding::Onboarding>,
-    /// The in-progress rename buffer for the active tab (design §11 `F2`); `Some` = the tab's
-    /// sidebar row is an editable field. Typing edits it, `Enter` commits, `Esc` cancels.
-    renaming: Option<String>,
+    /// The in-progress inline rename: what it renames (the active tab, design §11 `F2`, or a
+    /// group header) and the draft. `Some` = that sidebar row is an editable field. Typing
+    /// edits it, `Enter` commits, `Esc` cancels.
+    renaming: Option<(RenameTarget, String)>,
     /// A stack of recently-closed tabs' titles, for `⇧⌘T` reopen (design §11) - a fresh tab is
     /// opened carrying the title back (the shell itself can't be resurrected).
     closed_titles: Vec<String>,
@@ -845,6 +852,7 @@ impl App {
             groups: Vec::new(),
             workspaces: vec![Workspace {
                 name: "Personal".to_owned(),
+                icon: workspace::ICONS[0],
                 stash: None,
             }],
             active_workspace: 0,
@@ -1893,9 +1901,9 @@ impl App {
             .flatten();
         // A transient toast (design §12) reuses the overlay card at the lowest priority.
         let toast = self.build_toast_frame();
-        // Hover help temporarily takes precedence over toasts, including the voice HUD.
-        let tooltip = self
-            .tooltip_visible
+        // Hover help temporarily takes precedence over toasts, including the voice HUD. The
+        // settings view covers the sidebar, so nothing under it can show help.
+        let tooltip = (self.tooltip_visible && !self.settings.open)
             .then(|| self.build_tooltip_frame())
             .flatten();
         let show_overlay = onboarding.is_none() && cheatsheet.is_none();
@@ -2194,15 +2202,10 @@ impl App {
         .unwrap_or_else(|| format!("Tab {}", i + 1))
     }
 
-    /// The workspace chip glyphs: a curated set of distinct geometric marks assigned by position
-    /// (the guide's `P`/`W` initials were only illustrative). Each workspace gets a stable,
-    /// recognizable icon rather than a letter derived from its name.
+    /// The workspace chip glyphs: each workspace's picked icon (the guide's `P`/`W` initials
+    /// were only illustrative).
     fn workspace_chips(&self) -> Vec<char> {
-        self.workspaces
-            .iter()
-            .enumerate()
-            .map(|(i, _)| WORKSPACE_ICONS[i % WORKSPACE_ICONS.len()])
-            .collect()
+        self.workspaces.iter().map(|w| w.icon).collect()
     }
 
     /// The tab indices split into `(unpinned, pinned)` - the unpinned show in the tab list, the
@@ -2229,19 +2232,27 @@ impl App {
         let titles = self.tab_titles();
         let running = self.tab_running();
         let chips = self.workspace_chips();
-        let layout = self.tab_layout();
+        let mut layout = self.tab_layout();
         // The tab list shows the unpinned tabs in display order (ungrouped, then each group's
         // members); the grid shows the pinned ones (glyph = the tab title's first letter).
         // `active_tab` is the active tab's position in the ordered list, or `usize::MAX` when the
         // active tab is pinned (then `active_pinned` marks its tile).
         let mut list_titles: Vec<String> =
             layout.ordered.iter().map(|&i| titles[i].clone()).collect();
-        // While renaming (F2), the active tab's row is an editable field: show the buffer + a
-        // caret in place of its title.
-        if let Some(buf) = &self.renaming {
-            if let Some(pos) = layout.ordered.iter().position(|&i| i == self.active) {
-                list_titles[pos] = format!("{buf}\u{2502}");
+        // While renaming (F2, or a group from its menu), that row is an editable field: show the
+        // buffer + a caret in place of its title or group name.
+        match &self.renaming {
+            Some((RenameTarget::Tab, buf)) => {
+                if let Some(pos) = layout.ordered.iter().position(|&i| i == self.active) {
+                    list_titles[pos] = format!("{buf}\u{2502}");
+                }
             }
+            Some((RenameTarget::Group(gi), buf)) => {
+                if let Some(span) = layout.spans.get_mut(*gi) {
+                    span.name = format!("{buf}\u{2502}");
+                }
+            }
+            None => {}
         }
         let list_running: Vec<bool> = layout.ordered.iter().map(|&i| running[i]).collect();
         let pinned_glyphs: Vec<char> = layout
@@ -2311,14 +2322,17 @@ impl App {
             w,
             h: (h - top).max(1.0),
         };
+        let entries = self.workspace_entries();
         let paint = self.settings.build(
             content_panel,
             scale,
             &self.config,
+            &entries,
             &self.theme,
             &mut self.measure,
         );
         self.settings_targets = paint.targets;
+        self.settings.settle_rows(paint.rows_first);
         SettingsFrame {
             panel: bg_panel,
             nav_divider_x: paint.nav_divider_x,
@@ -3667,23 +3681,30 @@ impl App {
     }
 
     /// Shared close gate: close immediately when nothing is running, else arm the confirm
-    /// modal (with the same rise-in entrance as the palette).
+    /// modal (with the same rise-in entrance as the palette). Removing a workspace always
+    /// asks - it closes every tab in it.
     fn request_close(&mut self, target: CloseTarget) {
-        match self.foreground_job_name(target) {
-            Some(process) => {
-                self.confirm = Some(Confirm::new(target, process));
-                let from = overlay_offset_logical(self.confirm_anim).unwrap_or(OVERLAY_RISE);
-                self.confirm_anim = Some(OverlayAnim {
-                    anim: motion::Anim::start(Instant::now(), motion::BASE),
-                    from,
-                    to: 0.0,
-                    curve: motion::DECELERATE,
-                    closing: false,
-                });
-                self.request_redraw();
-            }
-            None => self.perform_close(target),
-        }
+        let confirm = match (self.foreground_job_name(target), target) {
+            (Some(process), _) => Some(Confirm::new(target, process)),
+            (None, CloseTarget::Workspace(w)) => self.workspaces.get(w).map(|ws| {
+                Confirm::remove_workspace(w, ws.name.clone(), self.workspace_tabs(w).len())
+            }),
+            (None, _) => None,
+        };
+        let Some(confirm) = confirm else {
+            self.perform_close(target);
+            return;
+        };
+        self.confirm = Some(confirm);
+        let from = overlay_offset_logical(self.confirm_anim).unwrap_or(OVERLAY_RISE);
+        self.confirm_anim = Some(OverlayAnim {
+            anim: motion::Anim::start(Instant::now(), motion::BASE),
+            from,
+            to: 0.0,
+            curve: motion::DECELERATE,
+            closing: false,
+        });
+        self.request_redraw();
     }
 
     /// Perform the actual close for `target` (after a confirm, or when nothing is running),
@@ -3695,6 +3716,7 @@ impl App {
         match target {
             CloseTarget::Pane => self.apply_pane_action(PaneAction::Close),
             CloseTarget::Tab => self.close_tab(),
+            CloseTarget::Workspace(w) => self.remove_workspace(w),
         }
     }
 
@@ -3740,8 +3762,9 @@ impl App {
     }
 
     /// The name of a foreground job that closing `target` would kill, if any: the focused
-    /// pane's shell for a pane close, any pane in the active tab for a tab close. Falls back
-    /// to a generic label when the process name can't be read.
+    /// pane's shell for a pane close, any pane in the active tab for a tab close, any pane in
+    /// any of its tabs for a workspace. Falls back to a generic label when the process name
+    /// can't be read.
     fn foreground_job_name(&self, target: CloseTarget) -> Option<String> {
         let ws = self.active_tab();
         let pid = match target {
@@ -3750,6 +3773,11 @@ impl App {
                 .get(&ws.tree.focused())
                 .and_then(Terminal::foreground_job_pid),
             CloseTarget::Tab => ws.panes.values().find_map(Terminal::foreground_job_pid),
+            CloseTarget::Workspace(w) => self
+                .workspace_tabs(w)
+                .iter()
+                .flat_map(|tab| tab.panes.values())
+                .find_map(Terminal::foreground_job_pid),
         }?;
         Some(process_name(pid).unwrap_or_else(|| "a process".to_owned()))
     }
@@ -3838,6 +3866,14 @@ impl App {
                 tab.group = remap.get(g).copied().flatten();
             }
         }
+        // A group being renamed follows its new index, or the rename ends with the group.
+        if let Some((RenameTarget::Group(g), draft)) = self.renaming.take() {
+            self.renaming = remap
+                .get(g)
+                .copied()
+                .flatten()
+                .map(|g| (RenameTarget::Group(g), draft));
+        }
     }
 
     /// `⌘1…9` - jump to the nth tab (0-based) within the active tab's group (design §11: "Number
@@ -3893,14 +3929,31 @@ impl App {
 
     /// Right-click (design §08 "Right-click any tab for the full action menu"): open the tab
     /// action menu when the click lands on a sidebar tab. The tab is focused first (right-click
-    /// selects), then the menu opens anchored at the pointer.
+    /// selects), then the menu opens anchored at the pointer. A workspace chip or a group
+    /// header opens its own menu (rename, icon / collapse, remove) without switching.
     fn on_right_click(&mut self) {
         if self.context_menu.is_some() {
             self.close_context_menu();
         }
-        if let Some(sidebar::Hit::Tab(index)) = self.sidebar_hit() {
-            self.goto_tab(index);
-            self.open_context_menu();
+        let anchor = point_f32(self.pointer);
+        match self.sidebar_hit() {
+            Some(sidebar::Hit::Tab(index)) => {
+                self.goto_tab(index);
+                self.open_context_menu();
+            }
+            Some(sidebar::Hit::Workspace(w)) => {
+                let removable = self.workspaces.len() > 1;
+                self.context_menu = Some(ContextMenu::for_workspace(anchor, w, removable));
+                self.request_redraw();
+            }
+            Some(sidebar::Hit::GroupHeader(gi)) => {
+                if let Some(group) = self.groups.get(gi) {
+                    let menu = ContextMenu::for_group(anchor, gi, group.collapsed);
+                    self.context_menu = Some(menu);
+                    self.request_redraw();
+                }
+            }
+            _ => {}
         }
     }
 
@@ -4070,6 +4123,13 @@ impl App {
                     self.run_voice_menu_action(&menu, action);
                 }
             }
+            MenuAction::RenameWorkspace(w) => self.open_workspace_page(w, true),
+            MenuAction::WorkspaceIcon(w) => self.open_workspace_page(w, false),
+            MenuAction::NewWorkspace => self.add_workspace(),
+            MenuAction::RemoveWorkspace(w) => self.request_remove_workspace(w),
+            MenuAction::RenameGroup(gi) => self.start_group_rename(gi),
+            MenuAction::ToggleGroup(gi) => self.toggle_group(gi),
+            MenuAction::RemoveGroup(gi) => self.remove_group(self.active_workspace, gi),
         }
         self.request_redraw();
     }
@@ -4141,23 +4201,47 @@ impl App {
             .get(self.active)
             .cloned()
             .unwrap_or_default();
-        self.renaming = Some(title);
+        self.renaming = Some((RenameTarget::Tab, title));
+        self.request_redraw();
+    }
+
+    /// Begin renaming group `gi` inline: its sidebar header becomes an editable field seeded
+    /// with its name. `Enter` commits, `Esc` cancels.
+    fn start_group_rename(&mut self, gi: usize) {
+        let Some(group) = self.groups.get(gi) else {
+            return;
+        };
+        self.renaming = Some((RenameTarget::Group(gi), group.name.clone()));
         self.request_redraw();
     }
 
     /// Feed a key to the in-progress rename (a typed char, `Backspace`, `Enter` = commit,
     /// `Esc` = cancel). Returns whether the rename consumed the key.
     fn on_rename_key(&mut self, key_event: &KeyEvent) -> bool {
-        let Some(buf) = self.renaming.as_mut() else {
+        let Some((_, buf)) = self.renaming.as_mut() else {
             return false;
         };
         match key_event.logical_key.as_ref() {
             Key::Named(NamedKey::Enter) => {
-                let name = self.renaming.take().unwrap_or_default();
+                let Some((target, name)) = self.renaming.take() else {
+                    return true;
+                };
                 let trimmed = name.trim();
-                // An empty name clears the custom title back to the automatic one.
-                self.active_tab_mut().custom_title =
-                    (!trimmed.is_empty()).then(|| trimmed.to_owned());
+                match target {
+                    // An empty name clears the custom title back to the automatic one.
+                    RenameTarget::Tab => {
+                        self.active_tab_mut().custom_title =
+                            (!trimmed.is_empty()).then(|| trimmed.to_owned());
+                    }
+                    // A group always has a name; an empty draft keeps the old one.
+                    RenameTarget::Group(gi) => {
+                        if let Some(group) = self.groups.get_mut(gi) {
+                            if !trimmed.is_empty() {
+                                trimmed.clone_into(&mut group.name);
+                            }
+                        }
+                    }
+                }
             }
             Key::Named(NamedKey::Escape) => self.renaming = None,
             Key::Named(NamedKey::Backspace) => {
@@ -4301,6 +4385,8 @@ impl App {
         if index == self.active_workspace || index >= self.workspaces.len() {
             return;
         }
+        // A half-typed rename names a tab or group of the workspace being left; drop it.
+        self.renaming = None;
         self.stash_active_workspace();
         let (tabs, active, groups) = self.workspaces[index]
             .stash
@@ -4317,20 +4403,163 @@ impl App {
 
     /// Add a new workspace (the `+` chip) with a fresh single tab, and switch to it.
     fn add_workspace(&mut self) {
+        self.renaming = None;
         self.stash_active_workspace();
-        // The first two get the guide's "Personal"/"Work" names (chips P / W); the rest are
-        // numbered.
-        let name = match self.workspaces.len() {
-            1 => "Work".to_owned(),
-            n => format!("Space {}", n + 1),
-        };
-        self.workspaces.push(Workspace { name, stash: None });
+        let taken: Vec<&str> = self.workspaces.iter().map(|w| w.name.as_str()).collect();
+        let name = workspace::free_name(&taken);
+        let icon = workspace::free_icon(&self.workspace_chips());
+        self.workspaces.push(Workspace {
+            name,
+            icon,
+            stash: None,
+        });
         self.tabs = vec![Tab::new()];
         self.active = 0;
         self.groups = Vec::new();
         self.active_workspace = self.workspaces.len() - 1;
         self.selecting = false;
         self.sync_layout();
+        self.request_redraw();
+    }
+
+    /// The tabs of workspace `w`: live for the active one, else its stash (empty if none).
+    fn workspace_tabs(&self, w: usize) -> &[Tab] {
+        if w == self.active_workspace {
+            return &self.tabs;
+        }
+        self.workspaces
+            .get(w)
+            .and_then(|ws| ws.stash.as_ref())
+            .map_or(&[][..], |(tabs, _, _)| tabs.as_slice())
+    }
+
+    /// The tabs + groups of workspace `w` to edit: live for the active one, else its stash.
+    fn workspace_layout_mut(&mut self, w: usize) -> Option<(&mut Vec<Tab>, &mut Vec<TabGroup>)> {
+        if w == self.active_workspace {
+            return Some((&mut self.tabs, &mut self.groups));
+        }
+        let (tabs, _, groups) = self.workspaces.get_mut(w)?.stash.as_mut()?;
+        Some((tabs, groups))
+    }
+
+    /// Every workspace with its groups and tab counts, for the Settings > Workspaces page.
+    fn workspace_entries(&self) -> Vec<workspace::Entry> {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .map(|(w, ws)| {
+                let tabs = self.workspace_tabs(w);
+                let groups = if w == self.active_workspace {
+                    self.groups.as_slice()
+                } else {
+                    ws.stash.as_ref().map_or(&[][..], |(_, _, g)| g.as_slice())
+                };
+                workspace::Entry {
+                    name: ws.name.clone(),
+                    icon: ws.icon,
+                    tabs: tabs.len(),
+                    active: w == self.active_workspace,
+                    groups: groups
+                        .iter()
+                        .enumerate()
+                        .map(|(gi, g)| workspace::GroupEntry {
+                            name: g.name.clone(),
+                            tabs: tabs.iter().filter(|t| t.group == Some(gi)).count(),
+                        })
+                        .collect(),
+                }
+            })
+            .collect()
+    }
+
+    /// The Workspaces page row in focus, clamped to the rows that exist now.
+    fn focused_workspace_row(&self) -> workspace::Row {
+        let rows = workspace::rows(&self.workspace_entries());
+        rows[self.settings.selected_row().min(rows.len() - 1)]
+    }
+
+    /// Open the Settings > Workspaces page on workspace `w`, optionally renaming it.
+    fn open_workspace_page(&mut self, w: usize, rename: bool) {
+        let rows = workspace::rows(&self.workspace_entries());
+        let row = rows
+            .iter()
+            .position(|&r| r == workspace::Row::Workspace(w))
+            .unwrap_or(0);
+        let name = rename.then(|| self.workspaces.get(w).map(|ws| ws.name.clone()));
+        self.settings.open_workspaces(row, name.flatten());
+        self.request_redraw();
+    }
+
+    /// Rename workspace `w`; an empty name keeps the old one.
+    fn rename_workspace(&mut self, w: usize, name: &str) {
+        let name = name.trim();
+        if let Some(ws) = self.workspaces.get_mut(w) {
+            if !name.is_empty() {
+                name.clone_into(&mut ws.name);
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Give workspace `w` the chip icon `icon`.
+    fn set_workspace_icon(&mut self, w: usize, icon: char) {
+        if let Some(ws) = self.workspaces.get_mut(w) {
+            ws.icon = icon;
+        }
+        self.request_redraw();
+    }
+
+    /// Rename group `gi` of workspace `w`; an empty name keeps the old one.
+    fn rename_group(&mut self, w: usize, gi: usize, name: &str) {
+        let name = name.trim();
+        if let Some(group) = self
+            .workspace_layout_mut(w)
+            .and_then(|(_, groups)| groups.get_mut(gi))
+        {
+            if !name.is_empty() {
+                name.clone_into(&mut group.name);
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Remove group `gi` of workspace `w`, keeping its tabs (they rejoin the ungrouped list).
+    fn remove_group(&mut self, w: usize, gi: usize) {
+        if matches!(self.renaming, Some((RenameTarget::Group(_), _))) && w == self.active_workspace
+        {
+            self.renaming = None;
+        }
+        if let Some((tabs, groups)) = self.workspace_layout_mut(w) {
+            ungroup(tabs, groups, gi);
+        }
+        self.request_redraw();
+    }
+
+    /// Ask to remove workspace `w` (it closes every tab in it): always confirmed, naming a job
+    /// still running in it if there is one. The last workspace cannot be removed.
+    fn request_remove_workspace(&mut self, w: usize) {
+        if self.workspaces.len() > 1 && w < self.workspaces.len() {
+            self.request_close(CloseTarget::Workspace(w));
+        }
+    }
+
+    /// Remove workspace `w`, dropping its tabs (which ends their shells). Removing the one on
+    /// screen shows its neighbour first. The last workspace stays.
+    fn remove_workspace(&mut self, w: usize) {
+        if self.workspaces.len() <= 1 || w >= self.workspaces.len() {
+            return;
+        }
+        if w == self.active_workspace {
+            self.switch_workspace(if w + 1 < self.workspaces.len() {
+                w + 1
+            } else {
+                w - 1
+            });
+        }
+        self.workspaces.remove(w);
+        if self.active_workspace > w {
+            self.active_workspace -= 1;
+        }
         self.request_redraw();
     }
 
@@ -4345,11 +4574,11 @@ impl App {
             .enumerate()
             .map(|(i, ws)| {
                 if i == self.active_workspace {
-                    Self::workspace_snapshot(&ws.name, &self.tabs, self.active, &self.groups)
+                    Self::workspace_snapshot(ws, &self.tabs, self.active, &self.groups)
                 } else if let Some((tabs, active, groups)) = &ws.stash {
-                    Self::workspace_snapshot(&ws.name, tabs, *active, groups)
+                    Self::workspace_snapshot(ws, tabs, *active, groups)
                 } else {
-                    Self::workspace_snapshot(&ws.name, &[], 0, &[])
+                    Self::workspace_snapshot(ws, &[], 0, &[])
                 }
             })
             .collect();
@@ -4360,13 +4589,14 @@ impl App {
     }
 
     fn workspace_snapshot(
-        name: &str,
+        ws: &Workspace,
         tabs: &[Tab],
         active: usize,
         groups: &[TabGroup],
     ) -> session_state::WorkspaceState {
         session_state::WorkspaceState {
-            name: name.to_owned(),
+            name: ws.name.clone(),
+            icon: Some(ws.icon),
             active,
             groups: groups
                 .iter()
@@ -4437,15 +4667,19 @@ impl App {
                 tabs.push(Tab::new());
             }
             let active = wss.active.min(tabs.len() - 1);
+            // A session saved before icons were pickable showed each chip by position.
+            let icon = wss.icon.unwrap_or_else(|| workspace::positional_icon(i));
             if i == active_ws {
                 live = Some((tabs, active, groups));
                 workspaces.push(Workspace {
                     name: wss.name,
+                    icon,
                     stash: None,
                 });
             } else {
                 workspaces.push(Workspace {
                     name: wss.name,
+                    icon,
                     stash: Some((tabs, active, groups)),
                 });
             }
@@ -4751,11 +4985,9 @@ impl App {
             let command = self.modifiers.super_key() || self.modifiers.control_key();
             match key_event.logical_key.as_ref() {
                 Key::Named(NamedKey::Escape) => self.settings.editing = None,
-                Key::Named(NamedKey::Enter) => match self.settings.commit_text(&mut self.config) {
-                    Ok(Some(key)) => self.apply_setting_change(key),
-                    Ok(None) => {}
-                    Err(error) => self.show_toast(error.to_string(), ToastKind::Error),
-                },
+                Key::Named(NamedKey::Enter) => {
+                    self.commit_settings_edit();
+                }
                 Key::Named(NamedKey::Backspace) => self.settings.backspace_text(),
                 Key::Character(ch) if command && ch.eq_ignore_ascii_case("a") => {
                     self.settings.select_text();
@@ -4773,6 +5005,15 @@ impl App {
                 _ => {}
             }
             self.request_redraw();
+            return;
+        }
+        if self.settings.on_workspaces_page()
+            && !matches!(
+                key_event.logical_key.as_ref(),
+                Key::Named(NamedKey::Escape | NamedKey::Tab)
+            )
+        {
+            self.on_workspaces_key(key_event);
             return;
         }
         match key_event.logical_key.as_ref() {
@@ -5690,16 +5931,10 @@ impl App {
         let (px, py) = point_f32(self.pointer);
         let target = settings::target_at(&self.settings_targets, px, py);
         if let Some(editing) = self.settings.editing_index() {
-            if target == Some(Target::Text(editing)) {
+            let on_the_draft = matches!(target,
+                Some(Target::Text(i) | Target::Workspaces(workspace::Target::Row(i))) if i == editing);
+            if on_the_draft || !self.commit_settings_edit() {
                 return;
-            }
-            match self.settings.commit_text(&mut self.config) {
-                Ok(Some(key)) => self.apply_setting_change(key),
-                Ok(None) => {}
-                Err(error) => {
-                    self.show_toast(error.to_string(), ToastKind::Error);
-                    return;
-                }
             }
         }
         let Some(target) = target else {
@@ -5737,11 +5972,126 @@ impl App {
                 self.settings.start_text_edit(&self.config);
                 None
             }
+            Target::Workspaces(target) => {
+                self.on_workspaces_click(target);
+                None
+            }
         };
         if let Some(key) = written {
             self.apply_setting_change(key);
         }
         self.request_redraw();
+    }
+
+    /// Commit the open settings text edit, as Enter or a click elsewhere does: a config value
+    /// is validated first (an invalid draft stays open behind its error toast, returning
+    /// `false`); a Workspaces-page rename applies to its row.
+    fn commit_settings_edit(&mut self) -> bool {
+        if self.settings.on_workspaces_page() {
+            let row = self.focused_workspace_row();
+            if let Some(name) = self.settings.editing.take() {
+                match row {
+                    workspace::Row::Workspace(w) => self.rename_workspace(w, &name),
+                    workspace::Row::Group { workspace, group } => {
+                        self.rename_group(workspace, group, &name);
+                    }
+                    workspace::Row::Add => {}
+                }
+            }
+            return true;
+        }
+        match self.settings.commit_text(&mut self.config) {
+            Ok(Some(key)) => self.apply_setting_change(key),
+            Ok(None) => {}
+            Err(error) => {
+                self.show_toast(error.to_string(), ToastKind::Error);
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Keys on the Settings > Workspaces page: `↑/↓` move between rows, `←/→` step the focused
+    /// row's workspace icon, Enter renames the row (or adds a workspace on "New workspace"),
+    /// and Delete / Backspace removes it - a workspace after a confirm, a group keeping its tabs.
+    fn on_workspaces_key(&mut self, key_event: &KeyEvent) {
+        let entries = self.workspace_entries();
+        let count = workspace::rows(&entries).len();
+        self.settings.move_row(0, count);
+        let row = self.focused_workspace_row();
+        match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::ArrowUp) => self.settings.move_row(-1, count),
+            Key::Named(NamedKey::ArrowDown) => self.settings.move_row(1, count),
+            Key::Named(dir @ (NamedKey::ArrowLeft | NamedKey::ArrowRight)) => {
+                if let Some(w) = row.workspace() {
+                    let delta = if dir == NamedKey::ArrowRight { 1 } else { -1 };
+                    self.set_workspace_icon(w, workspace::step_icon(entries[w].icon, delta));
+                }
+            }
+            Key::Named(NamedKey::Enter) => self.activate_workspace_row(row),
+            Key::Named(NamedKey::Delete | NamedKey::Backspace) => self.remove_workspace_row(row),
+            _ => {}
+        }
+        self.request_redraw();
+    }
+
+    /// A click on the Workspaces page: focus a row, rename or remove it from its buttons, give
+    /// the focused row's workspace an icon, or add a workspace.
+    fn on_workspaces_click(&mut self, target: workspace::Target) {
+        let rows = workspace::rows(&self.workspace_entries());
+        match target {
+            workspace::Target::Row(i) => self.settings.select_row(i),
+            workspace::Target::Rename(i) => {
+                self.settings.select_row(i);
+                if let Some(&row) = rows.get(i) {
+                    self.activate_workspace_row(row);
+                }
+            }
+            workspace::Target::Remove(i) => {
+                self.settings.select_row(i);
+                if let Some(&row) = rows.get(i) {
+                    self.remove_workspace_row(row);
+                }
+            }
+            workspace::Target::Icon(icon) => {
+                if let Some(w) = self.focused_workspace_row().workspace() {
+                    self.set_workspace_icon(w, icon);
+                }
+            }
+            workspace::Target::Add => self.activate_workspace_row(workspace::Row::Add),
+        }
+    }
+
+    /// Enter on a Workspaces-page row: rename a workspace or group from its current name, or
+    /// add a workspace (switching to it, its row focused) from "New workspace".
+    fn activate_workspace_row(&mut self, row: workspace::Row) {
+        let entries = self.workspace_entries();
+        match row {
+            workspace::Row::Workspace(w) => self.settings.start_rename(entries[w].name.clone()),
+            workspace::Row::Group { workspace, group } => {
+                let name = entries[workspace].groups[group].name.clone();
+                self.settings.start_rename(name);
+            }
+            workspace::Row::Add => {
+                self.add_workspace();
+                let added = workspace::Row::Workspace(self.workspaces.len() - 1);
+                let rows = workspace::rows(&self.workspace_entries());
+                if let Some(i) = rows.iter().position(|&r| r == added) {
+                    self.settings.select_row(i);
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Remove a Workspaces-page row: a workspace through the confirm modal, a group at once
+    /// (its tabs stay, ungrouped).
+    fn remove_workspace_row(&mut self, row: workspace::Row) {
+        match row {
+            workspace::Row::Workspace(w) => self.request_remove_workspace(w),
+            workspace::Row::Group { workspace, group } => self.remove_group(workspace, group),
+            workspace::Row::Add => {}
+        }
     }
 
     /// Pointer motion over the settings view: drag a grabbed slider, else track the hovered
@@ -5766,7 +6116,9 @@ impl App {
         if let Some(window) = self.window.as_ref() {
             window.set_cursor(match hover {
                 Some(Target::Text(_)) => CursorIcon::Text,
-                Some(Target::Row(_)) | None => CursorIcon::Default,
+                Some(Target::Row(_) | Target::Workspaces(workspace::Target::Row(_))) | None => {
+                    CursorIcon::Default
+                }
                 Some(_) => CursorIcon::Pointer,
             });
         }
@@ -5779,14 +6131,19 @@ impl App {
         if self.settle_confirm_close() || self.settle_palette_close() {
             return;
         }
-        // The settings view covers the panes; a wheel over it must not scroll a hidden terminal.
-        if self.settings.open {
-            return;
-        }
         let lines = match delta {
             MouseScrollDelta::LineDelta(_, y) => wheel_lines(f64::from(y)),
             MouseScrollDelta::PixelDelta(pos) => wheel_lines(pos.y / 20.0),
         };
+        // The settings view covers the panes; a wheel over it must not scroll a hidden terminal.
+        // It scrolls the Workspaces page's rows, the one settings list that can overflow.
+        if self.settings.open {
+            if lines != 0 && self.settings.on_workspaces_page() {
+                self.settings.scroll_rows(lines);
+                self.request_redraw();
+            }
+            return;
+        }
         if lines == 0 {
             return;
         }
@@ -6850,6 +7207,22 @@ fn cycle_index(active: usize, count: usize, forward: bool) -> usize {
     }
 }
 
+/// Remove group `gi` from `groups`, moving its tabs back to the ungrouped list and shifting
+/// later groups' members down one index so every `Tab.group` stays valid.
+fn ungroup(tabs: &mut [Tab], groups: &mut Vec<TabGroup>, gi: usize) {
+    if gi >= groups.len() {
+        return;
+    }
+    groups.remove(gi);
+    for tab in tabs {
+        tab.group = match tab.group {
+            Some(g) if g == gi => None,
+            Some(g) if g > gi => Some(g - 1),
+            other => other,
+        };
+    }
+}
+
 /// The new active-tab index after closing the tab at `active`, where `count` is the
 /// tab count *before* removal (always >= 2 when a tab is actually closed). Clamps into
 /// the surviving range so focus lands on a real tab.
@@ -7352,8 +7725,8 @@ mod tests {
         index_after_close, interval_ms, kitty_csi, kitty_modifier_code, order, overlay_panel_top,
         overlay_rise_offset, pane_action, pane_dims, panic_message, parse_chord, pointer_cell_in,
         poll_wait, process_name, resolve_cell, selection_cells, selection_text, shell_escape_path,
-        super_chord, tab_action, xterm_modifier_code, ClipboardAction, Duration, Instant,
-        PaneAction, Selection, SuperChord, TabAction,
+        super_chord, tab_action, ungroup, xterm_modifier_code, ClipboardAction, Duration, Instant,
+        PaneAction, Selection, SuperChord, Tab, TabAction, TabGroup,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -8143,5 +8516,30 @@ mod tests {
         // Closing one of two tabs always lands on the sole survivor (index 0).
         assert_eq!(index_after_close(1, 2), 0);
         assert_eq!(index_after_close(0, 2), 0);
+    }
+
+    #[test]
+    fn removing_a_group_keeps_its_tabs_and_reindexes_the_later_groups() {
+        let group = |name: &str| TabGroup {
+            name: name.to_owned(),
+            collapsed: false,
+        };
+        let mut groups = vec![group("a"), group("b"), group("c")];
+        let mut tabs: Vec<Tab> = [Some(0), Some(1), None, Some(2), Some(1)]
+            .into_iter()
+            .map(|g| {
+                let mut tab = Tab::new();
+                tab.group = g;
+                tab
+            })
+            .collect();
+        ungroup(&mut tabs, &mut groups, 1);
+        let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["a", "c"]);
+        let members: Vec<Option<usize>> = tabs.iter().map(|t| t.group).collect();
+        assert_eq!(members, [Some(0), None, None, Some(1), None]);
+        // An index past the end is a no-op.
+        ungroup(&mut tabs, &mut groups, 5);
+        assert_eq!(groups.len(), 2);
     }
 }

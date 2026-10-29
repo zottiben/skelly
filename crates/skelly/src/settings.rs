@@ -17,9 +17,14 @@
 //! on exactly what is on screen. The theme picker cycles (it has too many / too-long options to
 //! fit a segmented control; the guide's swatch *cards* remain a visual follow-up). Deferred: the
 //! keybindings / advanced categories (they need the `[keys]` registry).
+//!
+//! The nav ends with the Workspaces page ([`crate::workspace`]): a manager over the session
+//! layout rather than the config, so it sits outside [`CATEGORIES`] and the one-key contract.
 
 use skelly_config::{Config, CursorStyle, DiffView, SidebarMode, TabTitle};
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
+
+use crate::workspace;
 
 /// Settings-view layout constants in **logical** px (multiplied by the DPI scale). Tuned to
 /// the guide's settings screen: a left category nav strip and a right control panel.
@@ -54,6 +59,11 @@ const SLIDER_KNOB: f32 = 14.0;
 const SLIDER_VALUE_GAP: f32 = 12.0;
 /// The footer hint line.
 const FOOTER: &str = "up/down move   left/right change   enter edit   tab category   esc close";
+/// The footer hint line on the Workspaces page.
+const WORKSPACES_FOOTER: &str =
+    "up/down move   left/right icon   enter rename   delete remove   tab category   esc close";
+/// The Workspaces page's nav entry, after every config category.
+const WORKSPACES_NAV: (char, &str) = ('*', "Workspaces");
 
 /// One editable control. It maps to exactly one `config.toml` key (Hard rule 1):
 /// `key` is the dotted TOML path (also what the round-trip test asserts against), and
@@ -672,6 +682,8 @@ pub(crate) struct Paint {
     /// Every clickable rect drawn this frame (physical px), in draw order: a widget's own
     /// target follows its row's, so [`target_at`] (which searches last-first) prefers it.
     pub(crate) targets: Vec<(PxRect, Target)>,
+    /// The Workspaces page's first drawn row, to keep as its scroll ([`Settings::settle_rows`]).
+    pub(crate) rows_first: usize,
 }
 
 /// What a click on the settings view lands on. Indices address the active category's
@@ -711,6 +723,8 @@ pub(crate) enum Target {
     },
     /// A text value: start editing it.
     Text(usize),
+    /// Something on the Workspaces page.
+    Workspaces(workspace::Target),
 }
 
 impl Target {
@@ -721,7 +735,7 @@ impl Target {
             Target::Segment { index, .. }
             | Target::Cycle { index, .. }
             | Target::Slider { index, .. } => Some(index),
-            Target::Close | Target::Category(_) => None,
+            Target::Close | Target::Category(_) | Target::Workspaces(_) => None,
         }
     }
 }
@@ -748,6 +762,10 @@ pub(crate) struct Settings {
     pub(crate) hover: Option<Target>,
     /// The slider being dragged (its control index + track), between press and release.
     pub(crate) drag: Option<Target>,
+    /// The Workspaces page's scroll: its first drawn row.
+    rows_first: usize,
+    /// Whether the next paint scrolls the focused Workspaces-page row into view.
+    reveal_row: bool,
 }
 
 impl Settings {
@@ -761,6 +779,8 @@ impl Settings {
             select_all: false,
             hover: None,
             drag: None,
+            rows_first: 0,
+            reveal_row: false,
         }
     }
 
@@ -857,16 +877,80 @@ impl Settings {
         }
     }
 
-    /// The controls of the active category.
+    /// The controls of the active category (none on the Workspaces page).
     fn controls(&self) -> &'static [Control] {
-        CATEGORIES[self.category.min(CATEGORIES.len() - 1)].controls
+        CATEGORIES.get(self.category).map_or(&[], |c| c.controls)
+    }
+
+    /// Whether the Workspaces page is showing (its rows, not config controls, take input).
+    pub(crate) fn on_workspaces_page(&self) -> bool {
+        self.category == CATEGORIES.len()
+    }
+
+    /// Open the view on the Workspaces page with row `row` focused, optionally straight into
+    /// renaming it from `name`.
+    pub(crate) fn open_workspaces(&mut self, row: usize, name: Option<String>) {
+        self.open();
+        self.category = CATEGORIES.len();
+        self.selected = row;
+        self.editing = name;
+        self.select_all = self.editing.is_some();
+        self.reveal_row = true;
+    }
+
+    /// The focused row on the Workspaces page.
+    pub(crate) fn selected_row(&self) -> usize {
+        self.selected
+    }
+
+    /// Move the Workspaces-page focus by `delta` over `count` rows, clamped.
+    pub(crate) fn move_row(&mut self, delta: i32, count: usize) {
+        let last = i32::try_from(count.saturating_sub(1)).unwrap_or(0);
+        let cur = i32::try_from(self.selected).unwrap_or(0);
+        self.selected = usize::try_from((cur + delta).clamp(0, last)).unwrap_or(0);
+        self.reveal_row = true;
+    }
+
+    /// Focus Workspaces-page row `row`, dropping an open rename of another row.
+    pub(crate) fn select_row(&mut self, row: usize) {
+        if row != self.selected {
+            self.editing = None;
+        }
+        self.selected = row;
+        self.reveal_row = true;
+    }
+
+    /// Scroll the Workspaces-page rows by wheel `lines` (positive = up), leaving focus put.
+    pub(crate) fn scroll_rows(&mut self, lines: i32) {
+        let by = usize::try_from(lines.unsigned_abs()).unwrap_or(usize::MAX);
+        self.rows_first = if lines > 0 {
+            self.rows_first.saturating_sub(by)
+        } else {
+            self.rows_first.saturating_add(by)
+        };
+        self.reveal_row = false;
+    }
+
+    /// Keep the Workspaces-page scroll the last paint settled on (see [`Paint::rows_first`]).
+    pub(crate) fn settle_rows(&mut self, first: usize) {
+        self.rows_first = first;
+        self.reveal_row = false;
+    }
+
+    /// Start renaming the focused Workspaces-page row from its current `name`, all selected
+    /// so typing replaces it.
+    pub(crate) fn start_rename(&mut self, name: String) {
+        self.editing = Some(name);
+        self.select_all = true;
     }
 
     /// Switch to the category at nav index `index` (a click), resetting the control selection.
     pub(crate) fn select_category(&mut self, index: usize) {
-        if index < CATEGORIES.len() && index != self.category {
+        if index <= CATEGORIES.len() && index != self.category {
             self.category = index;
             self.selected = 0;
+            self.rows_first = 0;
+            self.editing = None;
         }
     }
 
@@ -959,15 +1043,17 @@ impl Settings {
         Some(control.key)
     }
 
-    /// Switch category by `delta` (wrapping), resetting the control selection.
+    /// Switch category by `delta` (wrapping, through the Workspaces page), resetting the
+    /// control selection.
     pub(crate) fn cycle_category(&mut self, forward: bool) {
-        let n = CATEGORIES.len();
+        let n = CATEGORIES.len() + 1;
         self.category = if forward {
             (self.category + 1) % n
         } else {
             (self.category + n - 1) % n
         };
         self.selected = 0;
+        self.rows_first = 0;
     }
 
     /// Move the control selection by `delta`, clamped to the active category.
@@ -1008,6 +1094,7 @@ impl Settings {
         panel: PxRect,
         scale: f32,
         config: &Config,
+        workspaces: &[workspace::Entry],
         theme: &Theme,
         measure: &mut TextMeasure,
     ) -> Paint {
@@ -1018,12 +1105,101 @@ impl Settings {
         let mut labels = Vec::new();
         let mut targets = Vec::new();
 
-        // Header: the active category name (heading) + an esc hint.
         let hy = panel.y + PAD * scale;
+        self.push_header(
+            &mut labels,
+            &mut targets,
+            measure,
+            (content_x, content_right),
+            hy,
+            scale,
+            theme,
+        );
+        let body_top = hy + HEADER_H * scale;
+        self.push_nav(
+            &mut quads,
+            &mut labels,
+            &mut targets,
+            measure,
+            panel,
+            nav_divider_x,
+            body_top,
+            scale,
+            theme,
+        );
+        // The footer sits at the panel's foot; the Workspaces rows scroll above it.
+        let fy = panel.y + panel.h - PAD * scale - FontRole::Caption.line_height_px(scale);
+        let mut rows_first = 0;
+        if self.on_workspaces_page() {
+            rows_first = self.push_workspaces(
+                &mut quads,
+                &mut labels,
+                &mut targets,
+                measure,
+                workspaces,
+                (content_x, content_right, nav_divider_x),
+                (body_top, fy - PAD * scale),
+                scale,
+                theme,
+            );
+        } else {
+            self.push_controls(
+                &mut quads,
+                &mut labels,
+                &mut targets,
+                measure,
+                config,
+                (content_x, content_right, nav_divider_x),
+                body_top,
+                scale,
+                theme,
+            );
+        }
         push_row(
             &mut labels,
             measure,
-            CATEGORIES[self.category].label,
+            if self.on_workspaces_page() {
+                WORKSPACES_FOOTER
+            } else {
+                FOOTER
+            },
+            FontRole::Caption,
+            theme.fg_muted,
+            content_x,
+            fy,
+            0.0,
+            scale,
+        );
+
+        Paint {
+            nav_divider_x,
+            quads,
+            labels,
+            targets,
+            rows_first,
+        }
+    }
+
+    /// Draw the header at `hy`: the active category name (heading) + an esc hint, which is
+    /// also the close button unless a text edit is open. `x = (content_x, content_right)`.
+    #[allow(clippy::too_many_arguments, reason = "one focused header builder")]
+    fn push_header(
+        &self,
+        labels: &mut Vec<ProseLabel>,
+        targets: &mut Vec<(PxRect, Target)>,
+        measure: &mut TextMeasure,
+        x: (f32, f32),
+        hy: f32,
+        scale: f32,
+        theme: &Theme,
+    ) {
+        let (content_x, content_right) = x;
+        push_row(
+            labels,
+            measure,
+            nav_entries()
+                .nth(self.category)
+                .map_or(WORKSPACES_NAV.1, |(_, label)| label),
             FontRole::H2,
             theme.fg_primary,
             content_x,
@@ -1038,7 +1214,7 @@ impl Settings {
             "esc to close"
         };
         push_right(
-            &mut labels,
+            labels,
             measure,
             hint,
             FontRole::Caption,
@@ -1060,51 +1236,60 @@ impl Settings {
                 Target::Close,
             ));
         }
+    }
 
-        let body_top = hy + HEADER_H * scale;
-        self.push_nav(
-            &mut quads,
-            &mut labels,
-            &mut targets,
-            measure,
-            panel,
-            nav_divider_x,
-            body_top,
-            scale,
-            theme,
-        );
-        self.push_controls(
-            &mut quads,
-            &mut labels,
-            &mut targets,
-            measure,
-            config,
-            (content_x, content_right, nav_divider_x),
-            body_top,
-            scale,
-            theme,
-        );
-
-        // Footer.
-        let fy = panel.y + panel.h - PAD * scale - FontRole::Caption.line_height_px(scale);
-        push_row(
-            &mut labels,
-            measure,
-            FOOTER,
-            FontRole::Caption,
-            theme.fg_muted,
-            content_x,
-            fy,
-            0.0,
-            scale,
-        );
-
-        Paint {
-            nav_divider_x,
+    /// Draw the Workspaces page: the session's workspaces and groups, focused + hovered from
+    /// this view's state. `x = (content_x, content_right, nav_divider_x)`, `y = (top, bottom)`;
+    /// returns the first row drawn (its scroll).
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "mirrors push_controls, the other content-page builder"
+    )]
+    fn push_workspaces(
+        &self,
+        quads: &mut Vec<ChromeQuad>,
+        labels: &mut Vec<ProseLabel>,
+        targets: &mut Vec<(PxRect, Target)>,
+        measure: &mut TextMeasure,
+        entries: &[workspace::Entry],
+        x: (f32, f32, f32),
+        y: (f32, f32),
+        scale: f32,
+        theme: &Theme,
+    ) -> usize {
+        let (content_x, content_right, nav_divider_x) = x;
+        let hover = match self.hover {
+            Some(Target::Workspaces(t)) => Some(t),
+            _ => None,
+        };
+        let page = workspace::Page {
+            entries,
+            selected: self.selected,
+            editing: self.editing.as_deref(),
+            hover,
+            first: self.rows_first,
+            reveal: self.reveal_row,
+        };
+        let area = workspace::Area {
+            x: content_x,
+            right: content_right,
+            band_x: nav_divider_x,
+            band_right: content_right + PAD * scale,
+            top: y.0,
+            bottom: y.1,
+        };
+        let mut out = workspace::Out {
             quads,
             labels,
-            targets,
-        }
+            targets: Vec::new(),
+        };
+        let first = page.build(&area, scale, theme, measure, &mut out);
+        targets.extend(
+            out.targets
+                .into_iter()
+                .map(|(rect, t)| (rect, Target::Workspaces(t))),
+        );
+        first
     }
 
     /// Draw the left category nav: each category's icon + label, the active one behind an
@@ -1123,7 +1308,7 @@ impl Settings {
         theme: &Theme,
     ) {
         let mut y = body_top;
-        for (index, category) in CATEGORIES.iter().enumerate() {
+        for (index, (icon, name)) in nav_entries().enumerate() {
             let active = index == self.category;
             let row = PxRect {
                 x: panel.x,
@@ -1166,7 +1351,7 @@ impl Settings {
             } else {
                 theme.fg_secondary
             };
-            let label = format!("{} {}", category.icon, category.label);
+            let label = format!("{icon} {name}");
             push_row(
                 labels,
                 measure,
@@ -1255,8 +1440,16 @@ impl Default for Settings {
     }
 }
 
+/// Every nav entry as `(icon, label)`: the config categories, then the Workspaces page.
+fn nav_entries() -> impl Iterator<Item = (char, &'static str)> {
+    CATEGORIES
+        .iter()
+        .map(|c| (c.icon, c.label))
+        .chain(std::iter::once(WORKSPACES_NAV))
+}
+
 /// A lighter wash than the focused row's `accent.subtle` band, for the row under the pointer.
-fn hover_fill(theme: &Theme, base: Srgb) -> Srgb {
+pub(crate) fn hover_fill(theme: &Theme, base: Srgb) -> Srgb {
     theme.accent.over(base, theme.accent_subtle_alpha * 0.45)
 }
 
@@ -1681,7 +1874,7 @@ fn push_slider(
 /// Push one label vertically centered in a row of `row_h` logical px whose top is physical
 /// `top` (`row_h = 0` places the label's top at `top`).
 #[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
-fn push_row(
+pub(crate) fn push_row(
     labels: &mut Vec<ProseLabel>,
     measure: &mut TextMeasure,
     text: &str,
@@ -1782,8 +1975,11 @@ mod tests {
         // Cycling category resets the control selection.
         settings.cycle_category(true); // Appearance -> Sidebar
         assert_eq!(settings.selected_index(), 0);
-        // Sidebar -> Appearance -> (wrap) the last category.
+        // Sidebar -> Appearance -> (wrap) the Workspaces page, then the last config category.
         settings.cycle_category(false);
+        settings.cycle_category(false);
+        assert_eq!(settings.category_label(), "Workspaces");
+        assert!(settings.on_workspaces_page());
         settings.cycle_category(false);
         assert_eq!(
             settings.category_label(),
@@ -1804,7 +2000,7 @@ mod tests {
             w: 1200.0,
             h: 800.0,
         };
-        let paint = settings.build(panel, 2.0, &config, &theme, &mut m);
+        let paint = settings.build(panel, 2.0, &config, &[], &theme, &mut m);
         // The active category (Appearance) heading + the focused control value draw in accent;
         // the active-category fill/bar + focused-control fill are among the quads.
         assert!(paint.labels.iter().any(|l| l.text == "Appearance"));
@@ -1838,7 +2034,7 @@ mod tests {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
         let settings = Settings::new();
-        let paint = settings.build(panel(), 2.0, &config, &theme, &mut m);
+        let paint = settings.build(panel(), 2.0, &config, &[], &theme, &mut m);
         let t = &paint.targets;
         for i in 0..CATEGORIES.len() {
             let (x, y) = center_of(t, |t| *t == Target::Category(i));
@@ -1906,7 +2102,7 @@ mod tests {
         let mut m = TextMeasure::new(1.0);
         let settings = Settings::new();
         let track_xs = |config: &Config, m: &mut TextMeasure| -> Vec<f32> {
-            let paint = settings.build(panel(), 1.0, config, &theme, m);
+            let paint = settings.build(panel(), 1.0, config, &[], &theme, m);
             paint
                 .targets
                 .iter()
@@ -1934,13 +2130,13 @@ mod tests {
         let mut m = TextMeasure::new(1.0);
         let mut settings = Settings::new();
         let plain = settings
-            .build(panel(), 1.0, &config, &theme, &mut m)
+            .build(panel(), 1.0, &config, &[], &theme, &mut m)
             .quads
             .len();
         settings.hover = Some(Target::Row(0)); // already focused: no extra wash
         assert_eq!(
             settings
-                .build(panel(), 1.0, &config, &theme, &mut m)
+                .build(panel(), 1.0, &config, &[], &theme, &mut m)
                 .quads
                 .len(),
             plain
@@ -1948,7 +2144,7 @@ mod tests {
         settings.hover = Some(Target::Toggle(4));
         assert_eq!(
             settings
-                .build(panel(), 1.0, &config, &theme, &mut m)
+                .build(panel(), 1.0, &config, &[], &theme, &mut m)
                 .quads
                 .len(),
             plain + 1
@@ -1956,11 +2152,52 @@ mod tests {
         settings.hover = Some(Target::Category(2));
         assert_eq!(
             settings
-                .build(panel(), 1.0, &config, &theme, &mut m)
+                .build(panel(), 1.0, &config, &[], &theme, &mut m)
                 .quads
                 .len(),
             plain + 1
         );
+    }
+
+    #[test]
+    fn the_workspaces_page_lists_rows_and_keeps_config_controls_out() {
+        let config = Config::default();
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(1.0);
+        let entries = vec![
+            crate::workspace::Entry {
+                name: "Personal".into(),
+                icon: crate::workspace::ICONS[0],
+                tabs: 2,
+                active: true,
+                groups: Vec::new(),
+            },
+            crate::workspace::Entry {
+                name: "Work".into(),
+                icon: crate::workspace::ICONS[9],
+                tabs: 1,
+                active: false,
+                groups: Vec::new(),
+            },
+        ];
+        let mut settings = Settings::new();
+        settings.open_workspaces(1, Some("Work".into()));
+        assert!(settings.on_workspaces_page());
+        assert_eq!(settings.editing_index(), Some(1));
+        assert!(settings.controls().is_empty(), "no config control here");
+        let paint = settings.build(panel(), 1.0, &config, &entries, &theme, &mut m);
+        assert!(paint.labels.iter().any(|l| l.text == "Workspaces"));
+        assert!(paint.labels.iter().any(|l| l.text == "Work\u{258f}"));
+        assert!(paint
+            .targets
+            .iter()
+            .any(|(_, t)| *t == Target::Workspaces(crate::workspace::Target::Add)));
+        // Rows clamp; a category click drops the open rename.
+        settings.move_row(10, 3);
+        assert_eq!(settings.selected_row(), 2);
+        settings.select_category(0);
+        assert!(settings.editing.is_none());
+        assert!(!settings.on_workspaces_page());
     }
 
     #[test]
@@ -2018,6 +2255,7 @@ mod tests {
                 },
                 1.0,
                 &config,
+                &[],
                 &theme,
                 &mut measure,
             );
@@ -2052,7 +2290,7 @@ mod tests {
                     w: 1000.0,
                     h: 680.0,
                 };
-                let paint = settings.build(panel, 1.0, &config, &theme, &mut measure);
+                let paint = settings.build(panel, 1.0, &config, &[], &theme, &mut measure);
                 let view = skelly_render::CaptureSettings {
                     panel,
                     nav_divider_x: paint.nav_divider_x,
@@ -2167,7 +2405,7 @@ mod tests {
     // Test-only introspection helpers.
     impl Settings {
         fn category_label(&self) -> &'static str {
-            CATEGORIES[self.category].label
+            super::nav_entries().nth(self.category).unwrap().1
         }
         fn selected_index(&self) -> usize {
             self.selected

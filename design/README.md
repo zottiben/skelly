@@ -82,6 +82,29 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-10-30 - **Workspaces and groups are managed from a Settings > Workspaces page and
+  from right-click menus.** User request: rename groups and remove them, and manage
+  workspaces - add, remove, rename, and pick an icon. The page is the last settings nav entry.
+  It lists each workspace (chip, name, tab count) with its groups indented beneath, then
+  "New workspace". The focused or hovered row shows Rename and Remove. Under the list, an
+  icon picker shows for the focused row's workspace. Keys: `↑/↓` move, `←/→` step the icon,
+  Enter renames, Delete removes. A long list scrolls between `↑ N more` / `↓ N more` lines,
+  as the sidebar does, and the wheel scrolls it. Right-clicking a workspace chip offers Rename,
+  Change icon (both open the page), New workspace, and Remove. Right-clicking a group header
+  offers an inline Rename (the header becomes the field, as `F2` does for a tab), Collapse or
+  Expand, and Remove group. Removing a group keeps its tabs, which return to the ungrouped
+  list. Removing a workspace closes every tab in it, so it always asks first. It names a running
+  job if there is one, else the workspace and its tab count. The last workspace cannot be
+  removed. Icons come from a fixed set of 24: the 8 earlier positional marks, then 16 Codicons
+  drawn from the bundled Nerd font. A session saved before icons existed restores each
+  workspace's mark by its position. New workspaces take the first free icon and the first free
+  name, so a removal never leads to a repeated name. The page edits session layout, not
+  `config.toml`, so it is outside the one-key-per-control contract (Hard rule 1) and has no
+  config keys. Confirm modals and toasts now draw over the settings view, so a removal can
+  ask from there.
+  _(was: workspaces fixed at their positional mark, groups only created and pruned when
+  empty)_
+
 - 2026-10-30 - **The settings view takes the mouse.** User request: the settings page must
   be clickable, not only keyboard-driven. A click on a nav row switches category; a click on
   a control row focuses it; a toggle flips; a segment chooses its option; the left or right

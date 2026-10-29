@@ -693,11 +693,12 @@ impl Renderer {
         // the git dock (only one right-dock surface open at a time), so at most one of
         // these two draws.
         self.timeline.draw(&self.device, &self.queue, &view, w, h)?;
-        // Passes 7-8: the command palette / overlay, loaded over everything.
-        self.overlay.draw(&self.device, &self.queue, &view, w, h)?;
-        // Passes 9-10: the full-window settings view, loaded over everything else. It is
-        // mutually exclusive with the palette, so the two never draw together.
+        // Passes 7-8: the full-window settings view, loaded over the panes + docks.
         self.settings.draw(&self.device, &self.queue, &view, w, h)?;
+        // Passes 9-10: the overlay card (palette, confirm modal, menus, toasts), loaded over
+        // everything - including settings, so a confirm or an error toast raised from the
+        // settings view shows on top of it. The palette never opens over settings.
+        self.overlay.draw(&self.device, &self.queue, &view, w, h)?;
         self.queue.present(frame);
         Ok(())
     }

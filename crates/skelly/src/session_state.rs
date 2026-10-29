@@ -19,11 +19,15 @@ pub(crate) struct SessionState {
     pub(crate) workspaces: Vec<WorkspaceState>,
 }
 
-/// One workspace's persisted layout (design §08 #2): its name, its tabs, its collapsible
-/// groups, and which tab was active.
+/// One workspace's persisted layout (design §08 #2): its name and chip icon, its tabs, its
+/// collapsible groups, and which tab was active.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct WorkspaceState {
     pub(crate) name: String,
+    /// The picked chip icon; `None` in a session saved before icons were pickable, which then
+    /// restores the icon it showed by position.
+    #[serde(default)]
+    pub(crate) icon: Option<char>,
     /// The active tab's index into `tabs`.
     pub(crate) active: usize,
     pub(crate) groups: Vec<GroupState>,
@@ -128,6 +132,7 @@ mod tests {
             workspaces: vec![
                 WorkspaceState {
                     name: "Personal".into(),
+                    icon: Some('\u{EB06}'),
                     active: 0,
                     groups: vec![GroupState {
                         name: "skelly".into(),
@@ -144,6 +149,7 @@ mod tests {
                 },
                 WorkspaceState {
                     name: "Work".into(),
+                    icon: None,
                     active: 0,
                     groups: vec![],
                     tabs: vec![TabState {
@@ -165,6 +171,8 @@ mod tests {
         assert_eq!(back.workspaces.len(), 2);
         let ws = &back.workspaces[0];
         assert_eq!(ws.name, "Personal");
+        assert_eq!(ws.icon, Some('\u{EB06}'));
+        assert_eq!(back.workspaces[1].icon, None);
         assert_eq!(ws.groups[0].name, "skelly");
         assert!(ws.groups[0].collapsed);
         let tab = &ws.tabs[0];
@@ -192,6 +200,7 @@ mod tests {
             "cwds":["~/a","~/b","~/c"],"pinned":false,"custom_title":null,"group":null,
             "activated":true}]}]}"#;
         let state: SessionState = serde_json::from_str(json).expect("legacy session parses");
+        assert_eq!(state.workspaces[0].icon, None, "no icon saved yet");
         let tab = &state.workspaces[0].tabs[0];
         let restored = PaneTree::from_layout(tab.cwds.len(), &tab.layout);
         assert_eq!(restored.count(), 3);

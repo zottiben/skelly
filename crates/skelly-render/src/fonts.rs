@@ -151,6 +151,10 @@ pub enum FontRole {
     /// one of the §05 display tokens but the guide's stated mono use ("code, and every token
     /// / keybinding label").
     Mono,
+    /// `icon` - Symbols Nerd Font Mono 400, 14px. A picked icon glyph in the chrome (a
+    /// workspace chip): naming the bundled icon family outright means a private-use codepoint
+    /// always draws its icon, never whatever system font happens to map the same codepoint.
+    Icon,
 }
 
 impl FontRole {
@@ -161,6 +165,7 @@ impl FontRole {
             Self::Display | Self::H1 | Self::H2 => FAMILY_DISPLAY,
             Self::Title | Self::Body | Self::Label | Self::Caption => FAMILY_SANS,
             Self::Micro | Self::Mono => FAMILY_MONO,
+            Self::Icon => FAMILY_NERD,
         }
     }
 
@@ -170,7 +175,7 @@ impl FontRole {
         match self {
             Self::Display => 700,
             Self::H1 | Self::H2 | Self::Title => 600,
-            Self::Body | Self::Caption | Self::Mono => 400,
+            Self::Body | Self::Caption | Self::Mono | Self::Icon => 400,
             Self::Label | Self::Micro => 500,
         }
     }
@@ -183,7 +188,7 @@ impl FontRole {
             Self::H1 => 34.0,
             Self::H2 => 20.0,
             Self::Title => 16.0,
-            Self::Body => 14.0,
+            Self::Body | Self::Icon => 14.0,
             Self::Label => 13.0,
             Self::Caption | Self::Mono => 12.0,
             Self::Micro => 10.5,
@@ -197,7 +202,7 @@ impl FontRole {
             Self::Display => 0.9,
             Self::H1 => 1.1,
             Self::H2 => 1.3,
-            Self::Title | Self::Label | Self::Caption | Self::Mono => 1.4,
+            Self::Title | Self::Label | Self::Caption | Self::Mono | Self::Icon => 1.4,
             Self::Body => 1.6,
             Self::Micro => 1.0,
         }
@@ -211,7 +216,7 @@ impl FontRole {
             Self::H1 => -1.0,
             Self::H2 => -0.4,
             Self::Micro => 1.5,
-            Self::Title | Self::Body | Self::Label | Self::Caption | Self::Mono => 0.0,
+            Self::Title | Self::Body | Self::Label | Self::Caption | Self::Mono | Self::Icon => 0.0,
         }
     }
 
@@ -224,14 +229,14 @@ impl FontRole {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_bundled, FontRole, FAMILY_DISPLAY, FAMILY_MONO, FAMILY_SANS};
+    use super::{load_bundled, FontRole, FAMILY_DISPLAY, FAMILY_MONO, FAMILY_NERD, FAMILY_SANS};
     use glyphon::fontdb;
 
     #[test]
     fn bundled_families_load_and_are_queryable() {
         let mut db = fontdb::Database::new();
         load_bundled(&mut db);
-        for family in [FAMILY_SANS, FAMILY_DISPLAY, FAMILY_MONO] {
+        for family in [FAMILY_SANS, FAMILY_DISPLAY, FAMILY_MONO, FAMILY_NERD] {
             assert!(
                 db.faces()
                     .any(|face| face.families.iter().any(|(name, _)| name == family)),

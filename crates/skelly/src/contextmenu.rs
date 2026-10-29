@@ -8,6 +8,8 @@
 //!
 //! The same overlay also hosts the pane voice footer's overflow menu, with a captured Pi
 //! target and state validation before dispatch. Unavailable voice actions are not menu items.
+//! It also hosts the workspace-chip menu (rename, icon, add, remove) and the group-header menu
+//! (rename, collapse, remove - the tabs stay).
 //!
 //! The guide's "Move to group ›" submenu is realized as flat rows (the overlay is a single card):
 //! a `Move to <group>` per other group, "New group", and "Remove from group" when grouped.
@@ -52,6 +54,20 @@ pub(crate) enum MenuAction {
     Close,
     /// A pane-local voice control; never a terminal write or an implicit Pi abort.
     Voice(crate::voicebar::Action),
+    /// Rename the workspace at this index (on the Workspaces page).
+    RenameWorkspace(usize),
+    /// Pick the icon of the workspace at this index (on the Workspaces page).
+    WorkspaceIcon(usize),
+    /// Add a workspace (the `+` chip).
+    NewWorkspace,
+    /// Remove the workspace at this index, closing its tabs (confirmed first).
+    RemoveWorkspace(usize),
+    /// Inline-rename the group at this index in its sidebar header.
+    RenameGroup(usize),
+    /// Collapse or expand the group at this index.
+    ToggleGroup(usize),
+    /// Remove the group at this index; its tabs move back to the ungrouped list.
+    RemoveGroup(usize),
 }
 
 /// One laid-out menu entry: an actionable item or a divider rule.
@@ -64,6 +80,16 @@ enum Entry {
         danger: bool,
     },
     Divider,
+}
+
+/// A plain (non-danger, hint-less) menu item.
+fn item(label: &str, action: MenuAction) -> Entry {
+    Entry::Item {
+        label: label.to_owned(),
+        hint: "",
+        action,
+        danger: false,
+    }
 }
 
 /// The inputs the menu is built from: the target tab's state + the other groups it could move to.
@@ -142,6 +168,49 @@ impl ContextMenu {
         });
         Self {
             entries,
+            selected: 0,
+            anchor,
+            voice_context: None,
+        }
+    }
+
+    /// Build the menu for the workspace chip at `index`; `removable` is false for the last
+    /// workspace, which cannot go.
+    pub(crate) fn for_workspace(anchor: (f32, f32), index: usize, removable: bool) -> Self {
+        let mut entries = vec![
+            item("Rename\u{2026}", MenuAction::RenameWorkspace(index)),
+            item("Change icon\u{2026}", MenuAction::WorkspaceIcon(index)),
+            item("New workspace", MenuAction::NewWorkspace),
+        ];
+        if removable {
+            entries.push(Entry::Divider);
+            entries.push(Entry::Item {
+                label: "Remove workspace".to_owned(),
+                hint: "",
+                action: MenuAction::RemoveWorkspace(index),
+                danger: true,
+            });
+        }
+        Self {
+            entries,
+            selected: 0,
+            anchor,
+            voice_context: None,
+        }
+    }
+
+    /// Build the menu for the group header at `index`.
+    pub(crate) fn for_group(anchor: (f32, f32), index: usize, collapsed: bool) -> Self {
+        Self {
+            entries: vec![
+                item("Rename\u{2026}", MenuAction::RenameGroup(index)),
+                item(
+                    if collapsed { "Expand" } else { "Collapse" },
+                    MenuAction::ToggleGroup(index),
+                ),
+                Entry::Divider,
+                item("Remove group", MenuAction::RemoveGroup(index)),
+            ],
             selected: 0,
             anchor,
             voice_context: None,
@@ -455,6 +524,60 @@ mod tests {
         assert!(texts.iter().any(|t| t == "Unpin tab"));
         assert!(texts.iter().any(|t| t == "Remove from group"));
         assert!(texts.iter().any(|t| t.contains("infra")));
+    }
+
+    /// Every action in `menu`, in order (dividers skipped).
+    fn actions(menu: &mut ContextMenu) -> Vec<MenuAction> {
+        (0..menu.entries.len())
+            .filter_map(|i| menu.action_at(i))
+            .collect()
+    }
+
+    #[test]
+    fn the_workspace_menu_offers_removal_only_when_another_workspace_remains() {
+        let mut menu = ContextMenu::for_workspace((0.0, 0.0), 2, true);
+        assert_eq!(
+            actions(&mut menu),
+            vec![
+                MenuAction::RenameWorkspace(2),
+                MenuAction::WorkspaceIcon(2),
+                MenuAction::NewWorkspace,
+                MenuAction::RemoveWorkspace(2),
+            ]
+        );
+        let mut last = ContextMenu::for_workspace((0.0, 0.0), 0, false);
+        assert!(!actions(&mut last).contains(&MenuAction::RemoveWorkspace(0)));
+    }
+
+    #[test]
+    fn the_group_menu_renames_toggles_and_removes_its_group() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(1.0);
+        let mut menu = ContextMenu::for_group((0.0, 0.0), 1, true);
+        assert_eq!(
+            actions(&mut menu),
+            vec![
+                MenuAction::RenameGroup(1),
+                MenuAction::ToggleGroup(1),
+                MenuAction::RemoveGroup(1),
+            ]
+        );
+        let (w, h) = menu.natural_size(1.0, &mut m);
+        let (_, labels) = menu.build(
+            PxRect {
+                x: 0.0,
+                y: 0.0,
+                w,
+                h,
+            },
+            1.0,
+            &theme,
+            &mut m,
+        );
+        assert!(
+            labels.iter().any(|l| l.text == "Expand"),
+            "a collapsed group expands"
+        );
     }
 
     #[test]
