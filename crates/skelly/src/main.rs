@@ -604,6 +604,8 @@ struct App {
     palette: Palette,
     /// The full-window settings view state.
     settings: Settings,
+    /// The settings view's clickable rects from its last paint, so a click hits what is drawn.
+    settings_targets: Vec<(PxRect, settings::Target)>,
     /// The persistent left sidebar (the tab list) state.
     sidebar: Sidebar,
     /// The proportional-text measurer for laying out chrome (the sidebar, and the other
@@ -808,6 +810,7 @@ impl App {
             theme,
             palette: Palette::new(),
             settings: Settings::new(),
+            settings_targets: Vec::new(),
             sidebar,
             measure: TextMeasure::new(1.0),
             status_cwd: String::new(),
@@ -2315,6 +2318,7 @@ impl App {
             &self.theme,
             &mut self.measure,
         );
+        self.settings_targets = paint.targets;
         SettingsFrame {
             panel: bg_panel,
             nav_divider_x: paint.nav_divider_x,
@@ -5459,6 +5463,11 @@ impl App {
             }
             return;
         }
+        // The settings view covers the window: its widgets take the pointer.
+        if self.settings.open {
+            self.on_settings_pointer();
+            return;
+        }
         // Dragging the dock's left edge resizes it.
         if self.dock_resizing {
             self.resize_dock_to_pointer();
@@ -5565,8 +5574,11 @@ impl App {
         if self.settle_confirm_close() || self.settle_palette_close() {
             return;
         }
-        if self.settings.open
-            || self.palette.open
+        if self.settings.open && self.confirm.is_none() {
+            self.on_settings_click(state);
+            return;
+        }
+        if self.palette.open
             || self.confirm.is_some()
             || self.cheatsheet_open
             || self.pointer_in_find_bar()
@@ -5665,11 +5677,110 @@ impl App {
         self.request_redraw();
     }
 
+    /// A left press or release over the settings view (design §10.9): run the widget under the
+    /// pointer - switch category, focus a row, flip a toggle, choose a segment, step a cycler, set
+    /// (and start dragging) a slider, or open a text edit. An open text edit commits first, as a
+    /// blur would; an invalid draft stays open with its error toast and swallows the click.
+    fn on_settings_click(&mut self, state: ElementState) {
+        use settings::Target;
+        if state == ElementState::Released {
+            self.settings.drag = None;
+            return;
+        }
+        let (px, py) = point_f32(self.pointer);
+        let target = settings::target_at(&self.settings_targets, px, py);
+        if let Some(editing) = self.settings.editing_index() {
+            if target == Some(Target::Text(editing)) {
+                return;
+            }
+            match self.settings.commit_text(&mut self.config) {
+                Ok(Some(key)) => self.apply_setting_change(key),
+                Ok(None) => {}
+                Err(error) => {
+                    self.show_toast(error.to_string(), ToastKind::Error);
+                    return;
+                }
+            }
+        }
+        let Some(target) = target else {
+            self.request_redraw();
+            return;
+        };
+        let written = match target {
+            Target::Close => {
+                self.settings.close();
+                None
+            }
+            Target::Category(index) => {
+                self.settings.select_category(index);
+                None
+            }
+            Target::Row(index) => {
+                self.settings.select(index);
+                None
+            }
+            Target::Toggle(index) => {
+                self.settings.select(index);
+                self.settings.activate(&mut self.config)
+            }
+            Target::Segment { index, option } => {
+                self.settings.choose(&mut self.config, index, option)
+            }
+            Target::Cycle { index, delta } => self.settings.step(&mut self.config, index, delta),
+            Target::Slider { index, x, w } => {
+                self.settings.drag = Some(target);
+                self.settings
+                    .slide(&mut self.config, index, (px - x) / w.max(1.0))
+            }
+            Target::Text(index) => {
+                self.settings.select(index);
+                self.settings.start_text_edit(&self.config);
+                None
+            }
+        };
+        if let Some(key) = written {
+            self.apply_setting_change(key);
+        }
+        self.request_redraw();
+    }
+
+    /// Pointer motion over the settings view: drag a grabbed slider, else track the hovered
+    /// widget (its row's hover wash) and show the matching cursor.
+    fn on_settings_pointer(&mut self) {
+        use settings::Target;
+        let (px, py) = point_f32(self.pointer);
+        if let Some(Target::Slider { index, x, w }) = self.settings.drag {
+            if let Some(key) = self
+                .settings
+                .slide(&mut self.config, index, (px - x) / w.max(1.0))
+            {
+                self.apply_setting_change(key);
+            }
+            return;
+        }
+        let hover = settings::target_at(&self.settings_targets, px, py);
+        if hover != self.settings.hover {
+            self.settings.hover = hover;
+            self.request_redraw();
+        }
+        if let Some(window) = self.window.as_ref() {
+            window.set_cursor(match hover {
+                Some(Target::Text(_)) => CursorIcon::Text,
+                Some(Target::Row(_)) | None => CursorIcon::Default,
+                Some(_) => CursorIcon::Pointer,
+            });
+        }
+    }
+
     /// Scroll the scrollback of the pane under the pointer by a wheel `delta`.
     fn on_mouse_wheel(&mut self, delta: MouseScrollDelta) {
         // A scroll during an overlay's fade-out dismisses it rather than scrolling the pane
         // behind the still-visible palette / confirm modal.
         if self.settle_confirm_close() || self.settle_palette_close() {
+            return;
+        }
+        // The settings view covers the panes; a wheel over it must not scroll a hidden terminal.
+        if self.settings.open {
             return;
         }
         let lines = match delta {

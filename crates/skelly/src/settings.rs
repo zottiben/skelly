@@ -9,13 +9,14 @@
 //! control declares its key path (for the round-trip contract) and a getter/setter
 //! pair, so reading and writing always go through the config, never a shadow copy.
 //!
-//! Keyboard-driven: a left category nav, a right control list, `↑/↓` to move between
-//! controls, `←/→` (and Enter) to change a value. Each control renders its §09 widget - a
-//! toggle switch, a segmented control, a compact `‹ value ›` cycler, or a slider (see
-//! [`push_control`]) - so the view matches the guide's §10.9 controls. The theme picker cycles
-//! (it has too many / too-long options to fit a segmented control; the guide's swatch *cards*
-//! remain a visual follow-up). Deferred: mouse hit-testing on the widgets (the keyboard model
-//! still drives edits); the keybindings / advanced categories (they need the `[keys]` registry).
+//! Keyboard- and mouse-driven: a left category nav, a right control list, `↑/↓` to move between
+//! controls, `←/→` (and Enter) to change a value, or a click on any nav row or widget. Each
+//! control renders its §09 widget - a toggle switch, a segmented control, a compact `‹ value ›`
+//! cycler, or a slider (see [`push_control`]) - so the view matches the guide's §10.9 controls.
+//! [`Settings::build`] records a [`Target`] for every clickable rect it draws, so a click lands
+//! on exactly what is on screen. The theme picker cycles (it has too many / too-long options to
+//! fit a segmented control; the guide's swatch *cards* remain a visual follow-up). Deferred: the
+//! keybindings / advanced categories (they need the `[keys]` registry).
 
 use skelly_config::{Config, CursorStyle, DiffView, SidebarMode, TabTitle};
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
@@ -128,21 +129,26 @@ impl Kind {
                 divisor,
                 suffix,
                 ..
-            } => {
-                let v = get(c);
-                if *divisor <= 1 {
-                    format!("{v}{suffix}")
-                } else {
-                    let decimals = decimals_for(*divisor);
-                    format!(
-                        "{:.*}{}",
-                        decimals,
-                        f64::from(v) / f64::from(*divisor),
-                        suffix
-                    )
-                }
-            }
+            } => range_text(get(c), *divisor, suffix),
         }
+    }
+
+    /// The widest readout a range control can show (its min or max, formatted), for
+    /// reserving a fixed readout column; `None` for other kinds.
+    fn readout_width(&self, measure: &mut TextMeasure) -> Option<f32> {
+        let Kind::Range {
+            min,
+            max,
+            divisor,
+            suffix,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let lo = measure.width(&range_text(*min, *divisor, suffix), FontRole::Mono, None);
+        let hi = measure.width(&range_text(*max, *divisor, suffix), FontRole::Mono, None);
+        Some(lo.max(hi))
     }
 
     /// Change the value by a signed `←/→` nudge, staying within bounds.
@@ -630,6 +636,20 @@ static CATEGORIES: &[Category] = &[
     },
 ];
 
+/// A range value as its readout: `v` scaled down by `divisor` (to its decimals) plus `suffix`.
+fn range_text(v: i32, divisor: i32, suffix: &str) -> String {
+    if divisor <= 1 {
+        format!("{v}{suffix}")
+    } else {
+        format!(
+            "{:.*}{}",
+            decimals_for(divisor),
+            f64::from(v) / f64::from(divisor),
+            suffix
+        )
+    }
+}
+
 /// Digits after the decimal point implied by a display `divisor` (10 -> 1, 100 -> 2).
 #[allow(
     clippy::cast_possible_truncation,
@@ -649,6 +669,70 @@ pub(crate) struct Paint {
     pub(crate) quads: Vec<ChromeQuad>,
     /// The positioned proportional text labels.
     pub(crate) labels: Vec<ProseLabel>,
+    /// Every clickable rect drawn this frame (physical px), in draw order: a widget's own
+    /// target follows its row's, so [`target_at`] (which searches last-first) prefers it.
+    pub(crate) targets: Vec<(PxRect, Target)>,
+}
+
+/// What a click on the settings view lands on. Indices address the active category's
+/// controls (or the nav's categories).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(crate) enum Target {
+    /// The `esc to close` hint: close the view.
+    Close,
+    /// A nav row: switch to this category.
+    Category(usize),
+    /// A control row outside its widget: focus the control.
+    Row(usize),
+    /// A toggle switch: flip it.
+    Toggle(usize),
+    /// One segment of a segmented control: choose that option.
+    Segment {
+        /// The control's index.
+        index: usize,
+        /// The option's index.
+        option: usize,
+    },
+    /// One half of a `‹ value ›` cycler: step back (`-1`) or forward (`1`), wrapping.
+    Cycle {
+        /// The control's index.
+        index: usize,
+        /// The step direction.
+        delta: i32,
+    },
+    /// A slider: set the value from the pointer's x along the track `[x, x + w)`.
+    Slider {
+        /// The control's index.
+        index: usize,
+        /// The track's left edge, physical px.
+        x: f32,
+        /// The track's width, physical px.
+        w: f32,
+    },
+    /// A text value: start editing it.
+    Text(usize),
+}
+
+impl Target {
+    /// The control this target belongs to, if it is part of a control row.
+    fn control(self) -> Option<usize> {
+        match self {
+            Target::Row(i) | Target::Toggle(i) | Target::Text(i) => Some(i),
+            Target::Segment { index, .. }
+            | Target::Cycle { index, .. }
+            | Target::Slider { index, .. } => Some(index),
+            Target::Close | Target::Category(_) => None,
+        }
+    }
+}
+
+/// The topmost target under physical `(px, py)`: the last one recorded whose rect contains it.
+pub(crate) fn target_at(targets: &[(PxRect, Target)], px: f32, py: f32) -> Option<Target> {
+    targets
+        .iter()
+        .rev()
+        .find(|(r, _)| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h)
+        .map(|(_, t)| *t)
 }
 
 /// Settings-view state: whether it is open, the active category, and the focused
@@ -660,6 +744,10 @@ pub(crate) struct Settings {
     selected: usize,
     pub(crate) editing: Option<String>,
     select_all: bool,
+    /// The target under the pointer, for the hover fill on nav and control rows.
+    pub(crate) hover: Option<Target>,
+    /// The slider being dragged (its control index + track), between press and release.
+    pub(crate) drag: Option<Target>,
 }
 
 impl Settings {
@@ -671,6 +759,8 @@ impl Settings {
             selected: 0,
             editing: None,
             select_all: false,
+            hover: None,
+            drag: None,
         }
     }
 
@@ -695,6 +785,8 @@ impl Settings {
     pub(crate) fn close(&mut self) {
         self.open = false;
         self.editing = None;
+        self.hover = None;
+        self.drag = None;
     }
 
     /// Enter starts a text edit without changing the live configuration.
@@ -770,6 +862,103 @@ impl Settings {
         CATEGORIES[self.category.min(CATEGORIES.len() - 1)].controls
     }
 
+    /// Switch to the category at nav index `index` (a click), resetting the control selection.
+    pub(crate) fn select_category(&mut self, index: usize) {
+        if index < CATEGORIES.len() && index != self.category {
+            self.category = index;
+            self.selected = 0;
+        }
+    }
+
+    /// Focus the control at `index` in the active category (a click), clamped.
+    pub(crate) fn select(&mut self, index: usize) {
+        self.selected = index.min(self.controls().len().saturating_sub(1));
+    }
+
+    /// The index of the text control being edited, if an edit is open.
+    pub(crate) fn editing_index(&self) -> Option<usize> {
+        self.editing.as_ref().map(|_| self.selected)
+    }
+
+    /// Choose option `option` of the choice control at `index` (a segment click), returning
+    /// the config key it wrote.
+    pub(crate) fn choose(
+        &mut self,
+        config: &mut Config,
+        index: usize,
+        option: usize,
+    ) -> Option<&'static str> {
+        self.select(index);
+        let control = self.controls().get(index)?;
+        let Kind::Choice { options, set, .. } = &control.kind else {
+            return None;
+        };
+        set(config, option.min(options.len().saturating_sub(1)));
+        Some(control.key)
+    }
+
+    /// Step the choice control at `index` by `delta`, wrapping (a cycler click), returning the
+    /// config key it wrote.
+    pub(crate) fn step(
+        &mut self,
+        config: &mut Config,
+        index: usize,
+        delta: i32,
+    ) -> Option<&'static str> {
+        self.select(index);
+        let control = self.controls().get(index)?;
+        let Kind::Choice {
+            options, get, set, ..
+        } = &control.kind
+        else {
+            return None;
+        };
+        let n = i32::try_from(options.len().max(1)).unwrap_or(1);
+        let cur = i32::try_from(get(config)).unwrap_or(0);
+        set(
+            config,
+            usize::try_from((cur + delta).rem_euclid(n)).unwrap_or(0),
+        );
+        Some(control.key)
+    }
+
+    /// Set the range control at `index` to the value at `fraction` (0..=1) along its track,
+    /// snapped to its step (a slider click or drag), returning the config key it wrote - or
+    /// `None` when the value did not move, so a drag only applies and saves real steps.
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_precision_loss,
+        reason = "range bounds are small config values; the rounded step count fits an i32"
+    )]
+    pub(crate) fn slide(
+        &mut self,
+        config: &mut Config,
+        index: usize,
+        fraction: f32,
+    ) -> Option<&'static str> {
+        self.select(index);
+        let control = self.controls().get(index)?;
+        let Kind::Range {
+            min,
+            max,
+            step,
+            get,
+            set,
+            ..
+        } = &control.kind
+        else {
+            return None;
+        };
+        let span = (max - min) as f32;
+        let steps = (fraction.clamp(0.0, 1.0) * span / *step as f32).round() as i32;
+        let value = (min + steps * step).clamp(*min, *max);
+        if value == get(config) {
+            return None;
+        }
+        set(config, value);
+        Some(control.key)
+    }
+
     /// Switch category by `delta` (wrapping), resetting the control selection.
     pub(crate) fn cycle_category(&mut self, forward: bool) {
         let n = CATEGORIES.len();
@@ -827,6 +1016,7 @@ impl Settings {
         let content_right = panel.x + panel.w - PAD * scale;
         let mut quads = Vec::new();
         let mut labels = Vec::new();
+        let mut targets = Vec::new();
 
         // Header: the active category name (heading) + an esc hint.
         let hy = panel.y + PAD * scale;
@@ -841,14 +1031,16 @@ impl Settings {
             HEADER_H,
             scale,
         );
+        let editing = self.editing.is_some();
+        let hint = if editing {
+            "enter save · esc cancel"
+        } else {
+            "esc to close"
+        };
         push_right(
             &mut labels,
             measure,
-            if self.editing.is_some() {
-                "enter save · esc cancel"
-            } else {
-                "esc to close"
-            },
+            hint,
             FontRole::Caption,
             theme.fg_muted,
             content_right,
@@ -856,11 +1048,24 @@ impl Settings {
             HEADER_H,
             scale,
         );
+        if !editing {
+            let w = measure.width(hint, FontRole::Caption, None);
+            targets.push((
+                PxRect {
+                    x: content_right - w,
+                    y: hy,
+                    w,
+                    h: HEADER_H * scale,
+                },
+                Target::Close,
+            ));
+        }
 
         let body_top = hy + HEADER_H * scale;
         self.push_nav(
             &mut quads,
             &mut labels,
+            &mut targets,
             measure,
             panel,
             nav_divider_x,
@@ -871,6 +1076,7 @@ impl Settings {
         self.push_controls(
             &mut quads,
             &mut labels,
+            &mut targets,
             measure,
             config,
             (content_x, content_right, nav_divider_x),
@@ -897,16 +1103,18 @@ impl Settings {
             nav_divider_x,
             quads,
             labels,
+            targets,
         }
     }
 
     /// Draw the left category nav: each category's icon + label, the active one behind an
-    /// `accent.subtle` fill + `accent` bar.
+    /// `accent.subtle` fill + `accent` bar, a hovered one behind a lighter wash.
     #[allow(clippy::too_many_arguments, reason = "one focused nav builder")]
     fn push_nav(
         &self,
         quads: &mut Vec<ChromeQuad>,
         labels: &mut Vec<ProseLabel>,
+        targets: &mut Vec<(PxRect, Target)>,
         measure: &mut TextMeasure,
         panel: PxRect,
         nav_divider_x: f32,
@@ -917,6 +1125,19 @@ impl Settings {
         let mut y = body_top;
         for (index, category) in CATEGORIES.iter().enumerate() {
             let active = index == self.category;
+            let row = PxRect {
+                x: panel.x,
+                y,
+                w: nav_divider_x - panel.x,
+                h: NAV_ROW_H * scale,
+            };
+            targets.push((row, Target::Category(index)));
+            if !active && self.hover == Some(Target::Category(index)) {
+                quads.push(ChromeQuad::fill(
+                    row,
+                    hover_fill(theme, theme.bg_base.to_srgb()),
+                ));
+            }
             if active {
                 let h = NAV_ROW_H * scale;
                 // accent.subtle active-row fill, composited in sRGB over the nav column
@@ -971,6 +1192,7 @@ impl Settings {
         &self,
         quads: &mut Vec<ChromeQuad>,
         labels: &mut Vec<ProseLabel>,
+        targets: &mut Vec<(PxRect, Target)>,
         measure: &mut TextMeasure,
         config: &Config,
         x: (f32, f32, f32),
@@ -980,31 +1202,44 @@ impl Settings {
     ) {
         let (content_x, content_right, nav_divider_x) = x;
         let mut y = body_top;
+        let hovered = self.hover.and_then(Target::control);
+        // One readout column for every slider in the category, sized to the widest value any
+        // of them can show, so the tracks line up and never shift while a value changes.
+        let readout_w = self
+            .controls()
+            .iter()
+            .filter_map(|c| c.kind.readout_width(measure))
+            .fold(0.0, f32::max);
         for (index, control) in self.controls().iter().enumerate() {
             let focused = index == self.selected;
+            let row = PxRect {
+                x: nav_divider_x,
+                y,
+                w: content_right + PAD * scale - nav_divider_x,
+                h: CTRL_ROW_H * scale,
+            };
+            targets.push((row, Target::Row(index)));
             if focused {
                 // accent.subtle selected-row band, composited in sRGB over the content surface
                 // (bg.elevated) to match the guide's weight.
                 quads.push(ChromeQuad::fill(
-                    PxRect {
-                        x: nav_divider_x,
-                        y,
-                        w: content_right + PAD * scale - nav_divider_x,
-                        h: CTRL_ROW_H * scale,
-                    },
+                    row,
                     theme.accent_subtle_on(theme.bg_elevated),
                 ));
+            } else if hovered == Some(index) {
+                quads.push(ChromeQuad::fill(row, hover_fill(theme, theme.bg_elevated)));
             }
             push_control(
                 quads,
                 labels,
+                targets,
+                index,
                 measure,
                 control,
                 config,
                 focused,
                 self.editing.as_deref().filter(|_| focused),
-                content_x,
-                content_right,
+                (content_x, content_right, readout_w),
                 y,
                 scale,
                 theme,
@@ -1020,29 +1255,37 @@ impl Default for Settings {
     }
 }
 
+/// A lighter wash than the focused row's `accent.subtle` band, for the row under the pointer.
+fn hover_fill(theme: &Theme, base: Srgb) -> Srgb {
+    theme.accent.over(base, theme.accent_subtle_alpha * 0.45)
+}
+
 /// Push one control row: its `label` at the content inset and its value rendered as the §09
 /// widget for its [`Kind`] - a toggle switch, a segmented control, or a slider - right-aligned
-/// to `content_right`. The keyboard model still drives edits (`←/→`); the focused row's fill
-/// (drawn by the caller) is the focus cue. Mouse hit-testing on the widgets is a follow-up.
+/// to `content_right`, recording the widget's click [`Target`]s. The focused row's fill (drawn
+/// by the caller) is the focus cue.
 #[allow(
     clippy::too_many_arguments,
+    clippy::too_many_lines,
     clippy::cast_precision_loss,
     reason = "one focused control-row builder; range bounds are small config values (u8/u16)"
 )]
 fn push_control(
     quads: &mut Vec<ChromeQuad>,
     labels: &mut Vec<ProseLabel>,
+    targets: &mut Vec<(PxRect, Target)>,
+    index: usize,
     measure: &mut TextMeasure,
     control: &Control,
     config: &Config,
     focused: bool,
     editing: Option<&str>,
-    content_x: f32,
-    content_right: f32,
+    x: (f32, f32, f32),
     top: f32,
     scale: f32,
     theme: &Theme,
 ) {
+    let (content_x, content_right, readout_w) = x;
     push_row(
         labels,
         measure,
@@ -1069,6 +1312,15 @@ fn push_control(
                 };
             let display = text_value(value, editing.is_some());
             let left = content_x + (content_right - content_x) * 0.52;
+            targets.push((
+                PxRect {
+                    x: left,
+                    y: top,
+                    w: content_right - left,
+                    h: CTRL_ROW_H * scale,
+                },
+                Target::Text(index),
+            ));
             push_row(
                 labels,
                 measure,
@@ -1089,7 +1341,8 @@ fn push_control(
             }
         }
         Kind::Toggle { get, .. } => {
-            push_toggle(quads, get(config), content_right, top, scale, theme);
+            let rect = push_toggle(quads, get(config), content_right, top, scale, theme);
+            targets.push((rect, Target::Toggle(index)));
         }
         Kind::Choice {
             options,
@@ -1099,8 +1352,7 @@ fn push_control(
         } => {
             let selected = get(config).min(options.len().saturating_sub(1));
             if *cycle {
-                push_cycle(
-                    quads,
+                let rect = push_cycle(
                     labels,
                     measure,
                     options.get(selected).copied().unwrap_or(""),
@@ -1110,8 +1362,20 @@ fn push_control(
                     theme,
                     focused,
                 );
+                let half = rect.w * 0.5;
+                for (x, delta) in [(rect.x, -1), (rect.x + half, 1)] {
+                    targets.push((
+                        PxRect {
+                            x,
+                            y: top,
+                            w: half,
+                            h: CTRL_ROW_H * scale,
+                        },
+                        Target::Cycle { index, delta },
+                    ));
+                }
             } else {
-                push_segmented(
+                let segments = push_segmented(
                     quads,
                     labels,
                     measure,
@@ -1122,6 +1386,12 @@ fn push_control(
                     scale,
                     theme,
                 );
+                targets.extend(
+                    segments
+                        .into_iter()
+                        .enumerate()
+                        .map(|(option, rect)| (rect, Target::Segment { index, option })),
+                );
             }
         }
         Kind::Range { min, max, get, .. } => {
@@ -1130,17 +1400,34 @@ fn push_control(
             } else {
                 0.0
             };
-            push_slider(
+            let track = push_slider(
                 quads,
                 labels,
                 measure,
                 &control.kind.value(config),
                 fraction.clamp(0.0, 1.0),
                 content_right,
+                readout_w,
                 top,
                 scale,
                 theme,
             );
+            // The grab area spans the row's height and half a knob past each end, so the
+            // extremes are as easy to hit as the middle.
+            let slop = SLIDER_KNOB * scale * 0.5;
+            targets.push((
+                PxRect {
+                    x: track.x - slop,
+                    y: top,
+                    w: track.w + 2.0 * slop,
+                    h: CTRL_ROW_H * scale,
+                },
+                Target::Slider {
+                    index,
+                    x: track.x,
+                    w: track.w,
+                },
+            ));
         }
     }
 }
@@ -1164,7 +1451,7 @@ fn text_value(value: &str, editing: bool) -> String {
 }
 
 /// A §09 toggle switch, right-anchored: a 38x22 pill (`accent` on / `border` off) with an
-/// 18px knob sprung to the right (on) or left (off).
+/// 18px knob sprung to the right (on) or left (off). Returns the pill's rect.
 fn push_toggle(
     quads: &mut Vec<ChromeQuad>,
     on: bool,
@@ -1172,7 +1459,7 @@ fn push_toggle(
     top: f32,
     scale: f32,
     theme: &Theme,
-) {
+) -> PxRect {
     let w = TOGGLE_W * scale;
     let h = TOGGLE_H * scale;
     let x = content_right - w;
@@ -1194,13 +1481,14 @@ fn push_toggle(
         knob_color,
         knob * 0.5,
     ));
+    PxRect { x, y, w, h }
 }
 
 /// A compact cycler, right-anchored: the current option in `‹ value ›` guillemets - for choices
 /// with many / long options that would overflow a segmented control. `←/→` cycles the value.
+/// Returns the label's rect (its left half steps back, its right half forward).
 #[allow(clippy::too_many_arguments, reason = "one focused cycler builder")]
 fn push_cycle(
-    quads: &mut Vec<ChromeQuad>,
     labels: &mut Vec<ProseLabel>,
     measure: &mut TextMeasure,
     value: &str,
@@ -1209,8 +1497,7 @@ fn push_cycle(
     scale: f32,
     theme: &Theme,
     focused: bool,
-) {
-    let _ = quads;
+) -> PxRect {
     let color = if focused {
         theme.accent
     } else {
@@ -1228,10 +1515,17 @@ fn push_cycle(
         weight: None,
         max_w: f32::MAX,
     });
+    PxRect {
+        x: content_right - w,
+        y: top,
+        w,
+        h: CTRL_ROW_H * scale,
+    }
 }
 
 /// A §09 segmented control, right-anchored: a `bg.inset` container (with a `border.subtle`
 /// ring) holding one padded segment per option; the selected one gets a `bg.elevated` fill.
+/// Returns each segment's rect, in option order.
 #[allow(
     clippy::too_many_arguments,
     reason = "one focused segmented-control builder"
@@ -1246,7 +1540,7 @@ fn push_segmented(
     top: f32,
     scale: f32,
     theme: &Theme,
-) {
+) -> Vec<PxRect> {
     let pad = SEG_PAD * scale;
     let item_pad = SEG_ITEM_PAD_X * scale;
     let seg_h = SEG_H * scale;
@@ -1271,9 +1565,16 @@ fn push_segmented(
         SEG_RADIUS * scale,
     ));
     let mut x = cx + pad;
+    let mut rects = Vec::with_capacity(options.len());
     for (i, option) in options.iter().enumerate() {
         let w = widths[i];
         let active = i == selected;
+        rects.push(PxRect {
+            x,
+            y: cy,
+            w,
+            h: seg_h + 2.0 * pad,
+        });
         if active {
             quads.push(ChromeQuad::rounded(
                 PxRect {
@@ -1301,10 +1602,12 @@ fn push_segmented(
         });
         x += w;
     }
+    rects
 }
 
-/// A §09 slider, right-anchored: a mono `accent` value readout, then a 6px `border.subtle`
-/// track with an `accent` fill up to `fraction` and a 14px `fg.primary` knob at that point.
+/// A §09 slider, right-anchored: a mono `accent` value readout right-aligned in a
+/// `readout_w` column, then a 6px `border.subtle` track with an `accent` fill up to `fraction`
+/// and a 14px `fg.primary` knob at that point. Returns the track's rect.
 #[allow(clippy::too_many_arguments, reason = "one focused slider builder")]
 fn push_slider(
     quads: &mut Vec<ChromeQuad>,
@@ -1313,12 +1616,14 @@ fn push_slider(
     value: &str,
     fraction: f32,
     content_right: f32,
+    readout_w: f32,
     top: f32,
     scale: f32,
     theme: &Theme,
-) {
+) -> PxRect {
     // The value readout (mono accent), right-aligned.
     let value_w = measure.width(value, FontRole::Mono, None);
+    let column_w = readout_w.max(value_w);
     let vline = measure.line_height(FontRole::Mono);
     labels.push(ProseLabel {
         text: value.to_owned(),
@@ -1332,7 +1637,7 @@ fn push_slider(
     // The track, to the left of the value.
     let track_w = SLIDER_W * scale;
     let track_h = SLIDER_TRACK_H * scale;
-    let track_x = content_right - value_w - SLIDER_VALUE_GAP * scale - track_w;
+    let track_x = content_right - column_w - SLIDER_VALUE_GAP * scale - track_w;
     let track_y = top + (CTRL_ROW_H * scale - track_h) * 0.5;
     quads.push(ChromeQuad::rounded(
         PxRect {
@@ -1365,6 +1670,12 @@ fn push_slider(
         theme.fg_primary,
         knob * 0.5,
     ));
+    PxRect {
+        x: track_x,
+        y: track_y,
+        w: track_w,
+        h: track_h,
+    }
 }
 
 /// Push one label vertically centered in a row of `row_h` logical px whose top is physical
@@ -1412,7 +1723,7 @@ fn push_right(
 
 #[cfg(test)]
 mod tests {
-    use super::{Kind, Settings, CATEGORIES};
+    use super::{target_at, Kind, Settings, Target, CATEGORIES};
     use skelly_config::Config;
     use skelly_render::{PxRect, TextMeasure, Theme};
 
@@ -1501,6 +1812,155 @@ mod tests {
         // >= 3 quads: the active-category subtle fill + accent bar + the focused-control fill.
         assert!(paint.quads.len() >= 3);
         assert!(paint.nav_divider_x > panel.x);
+    }
+
+    fn panel() -> PxRect {
+        PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: 1200.0,
+            h: 800.0,
+        }
+    }
+
+    /// The center of the first recorded rect whose target matches `want`.
+    fn center_of(targets: &[(PxRect, Target)], want: impl Fn(&Target) -> bool) -> (f32, f32) {
+        let (r, _) = targets
+            .iter()
+            .find(|(_, t)| want(t))
+            .expect("target recorded");
+        (r.x + r.w * 0.5, r.y + r.h * 0.5)
+    }
+
+    #[test]
+    fn clicks_land_on_the_nav_row_and_widget_that_is_drawn() {
+        let config = Config::default();
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
+        let settings = Settings::new();
+        let paint = settings.build(panel(), 2.0, &config, &theme, &mut m);
+        let t = &paint.targets;
+        for i in 0..CATEGORIES.len() {
+            let (x, y) = center_of(t, |t| *t == Target::Category(i));
+            assert_eq!(target_at(t, x, y), Some(Target::Category(i)));
+        }
+        // A widget wins over its row; the row's label side still focuses the row.
+        let (x, y) = center_of(t, |t| matches!(t, Target::Toggle(_)));
+        assert!(matches!(target_at(t, x, y), Some(Target::Toggle(_))));
+        let (_, y) = center_of(t, |t| *t == Target::Row(0));
+        assert_eq!(target_at(t, 300.0 * 2.0, y), Some(Target::Row(0)));
+        // The theme cycler splits into a back half and a forward half.
+        let (x, y) = center_of(t, |t| matches!(t, Target::Cycle { delta: 1, .. }));
+        assert_eq!(
+            target_at(t, x, y),
+            Some(Target::Cycle { index: 0, delta: 1 })
+        );
+        assert_eq!(target_at(t, -10.0, -10.0), None);
+        assert!(t.iter().any(|(_, t)| *t == Target::Close));
+    }
+
+    #[test]
+    fn segment_cycle_and_slider_clicks_write_their_one_key() {
+        let mut config = Config::default();
+        let mut settings = Settings::new();
+        // Cursor style is a segmented choice (control 3 of Appearance).
+        assert_eq!(
+            settings.choose(&mut config, 3, 2),
+            Some("appearance.cursor")
+        );
+        assert_eq!(
+            config.appearance.cursor,
+            skelly_config::CursorStyle::Underline
+        );
+        assert_eq!(settings.selected_index(), 3);
+        // The theme cycler wraps backwards from the first option.
+        assert_eq!(settings.step(&mut config, 0, -1), Some("appearance.theme"));
+        assert_eq!(config.appearance.theme, "kanagawa");
+        assert_eq!(settings.step(&mut config, 0, 1), Some("appearance.theme"));
+        assert_eq!(config.appearance.theme, "ossein-dark");
+        // Font size slides 8..=32 along the track, snapping to whole steps.
+        assert_eq!(
+            settings.slide(&mut config, 1, 1.0),
+            Some("appearance.font_size")
+        );
+        assert_eq!(config.appearance.font_size, 32);
+        assert_eq!(
+            settings.slide(&mut config, 1, 0.5),
+            Some("appearance.font_size")
+        );
+        assert_eq!(config.appearance.font_size, 20);
+        // A drag that stays on the same step writes nothing.
+        assert_eq!(settings.slide(&mut config, 1, 0.51), None);
+        assert_eq!(
+            settings.slide(&mut config, 1, -3.0),
+            Some("appearance.font_size")
+        );
+        assert_eq!(config.appearance.font_size, 8);
+        // A slide on a non-range control writes nothing.
+        assert_eq!(settings.slide(&mut config, 0, 0.5), None);
+    }
+
+    #[test]
+    fn slider_tracks_share_one_column_whatever_their_values() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(1.0);
+        let settings = Settings::new();
+        let track_xs = |config: &Config, m: &mut TextMeasure| -> Vec<f32> {
+            let paint = settings.build(panel(), 1.0, config, &theme, m);
+            paint
+                .targets
+                .iter()
+                .filter_map(|(_, t)| match t {
+                    Target::Slider { x, .. } => Some(*x),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut config = Config::default();
+        let before = track_xs(&config, &mut m);
+        assert!(before.len() >= 2);
+        assert!(before.iter().all(|x| (x - before[0]).abs() < 0.01));
+        // A wider readout (8px -> 32px) must not move its track mid-drag.
+        config.appearance.font_size = 8;
+        let narrow = track_xs(&config, &mut m);
+        config.appearance.font_size = 32;
+        assert_eq!(narrow, track_xs(&config, &mut m));
+    }
+
+    #[test]
+    fn hovering_a_row_draws_a_wash_but_not_over_the_focused_row() {
+        let config = Config::default();
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(1.0);
+        let mut settings = Settings::new();
+        let plain = settings
+            .build(panel(), 1.0, &config, &theme, &mut m)
+            .quads
+            .len();
+        settings.hover = Some(Target::Row(0)); // already focused: no extra wash
+        assert_eq!(
+            settings
+                .build(panel(), 1.0, &config, &theme, &mut m)
+                .quads
+                .len(),
+            plain
+        );
+        settings.hover = Some(Target::Toggle(4));
+        assert_eq!(
+            settings
+                .build(panel(), 1.0, &config, &theme, &mut m)
+                .quads
+                .len(),
+            plain + 1
+        );
+        settings.hover = Some(Target::Category(2));
+        assert_eq!(
+            settings
+                .build(panel(), 1.0, &config, &theme, &mut m)
+                .quads
+                .len(),
+            plain + 1
+        );
     }
 
     #[test]

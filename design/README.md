@@ -82,6 +82,20 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-10-30 - **The settings view takes the mouse.** User request: the settings page must
+  be clickable, not only keyboard-driven. A click on a nav row switches category; a click on
+  a control row focuses it; a toggle flips; a segment chooses its option; the left or right
+  half of a `‹ value ›` cycler steps back or forward (wrapping); a slider sets the value at
+  the pointer and follows a drag, snapped to its step; a text value opens its edit, and a
+  click elsewhere commits it as a blur would (an invalid draft stays open with its error
+  toast). `esc to close` closes. Rows and nav entries show a lighter `accent` hover wash; the
+  wheel never scrolls the panes behind the view. Paint and hit-test share one list of rects
+  that `build` records, so a click lands on what is drawn. Each slider readout sits in a
+  fixed column (the widest min or max in the category), so the tracks line up and never
+  move under a drag. Every click writes the one key its control owns (Hard rule 1). The
+  per-edit file write stays undebounced: a drag writes once per step, as a held arrow does.
+  _(was: keyboard only, mouse hit-testing a deferred follow-up)_
+
 - 2026-10-29 - **Pane zoom is an animated camera over the spiral, from the keyboard, a pinch
   or a two-finger double-tap.** User request: zoom into any pane with animation, in the
   style of TrellisWM, and back out to the panes exactly as they were. The spiral never
