@@ -140,9 +140,9 @@ follow-ups, finished opportunistically.
       verified rendering by the `pane_capture` headless PNG (overlay over two panes).
     - [x] Fuzzy subsequence matching (ranked: earliest first-match + fewest gaps win),
       with the matched characters drawn in `accent`.
-    - [ ] Merge user `[keys]` overrides + the configurable `panes.leader` (tmux-style
-      `ctrl+a`); surface tabs / themes / files and the `/` `?` mode prefixes; `⌘↵`
-      run-in-new-pane.
+    - [ ] Merge user `[keys]` overrides; surface tabs / themes / files and the `/` `?`
+      mode prefixes. (The pane leader and `⌘↵` run-in-new-pane were retired by
+      ADR-0010.)
   - [~] Settings view.
     - [x] A full in-window view over `config.toml` (Hard rule 4), opened with `⌘,` /
       closed with `Esc`, drawn on top of the live terminal. A left category nav
@@ -283,6 +283,15 @@ follow-ups, finished opportunistically.
     the rendered rows and the click hit-test so a click lands on exactly the tab drawn there,
     scroll offset included. Pure `sidebar` module (unit-tested: windowing, scroll-into-view,
     hit-through-offset); verified by the `pane_capture` `overflow` arg PNG in both themes.
+  - [x] **Fibonacci spiral panes** (ADR-0010, amends ADR-0005). `⌘K` is the only way to
+    open a pane; panes tile as a clockwise Fibonacci spiral (pane `i` of `n` takes
+    `F(n-i)/F(n-i+1)` of the space left, cutting left, top, right, bottom in turn) with no
+    pane cap. The command palette moved to `⌘P`. Splits, resize, swap, even-out, layout
+    presets, the pane leader, and `[panes] max` / `leader` are gone (old keys still load).
+    Pane chrome never paints past its rect: a pane shorter than the status strip shows
+    none, the exit message needs room for all of it, and cell backgrounds + the cursor are
+    clipped like the glyphs. `skelly-pane` unit + `proptest` tested; verified by the
+    `pane_capture` PNG (`spiral 6` / `spiral 12`) in both themes.
   - [ ] Remaining edge/empty states: detached/rewound "warns before forking",
     theme-with-no-light-variant fallback.
   - [x] **Panic hook + file logging** (playbook §7). Logs now also stream (non-blocking) to

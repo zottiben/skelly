@@ -1,6 +1,6 @@
 [package]
 name = "skelly-pane"
-description = "The pane tree: a tab's tiling layout of terminal panes (split / focus / resize / zoom, <=8). Pure logic, no UI/GPU/PTY deps."
+description = "A tab's terminal panes tiled as a clockwise Fibonacci spiral (open / close / focus / zoom, uncapped). Pure logic, no UI/GPU/PTY deps."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,10 +13,10 @@ publish = false
 workspace = true
 
 [dependencies]
-# Serialize the tiling structure for launch-time session restore (layout only).
+# Serialize the focus/zoom snapshot for launch-time session restore (layout only).
 serde.workspace = true
 
 [dev-dependencies]
 # Property-based testing of the tiling invariants: random op sequences must keep the
-# tree well-formed and the layout a gap-free, overlap-free tiling (playbook §4).
+# panes well-formed and the layout a gap-free, overlap-free tiling (playbook §4).
 proptest = "1"

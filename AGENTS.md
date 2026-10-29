@@ -24,9 +24,9 @@ the direct `wgpu` dep aligned to `glyphon`'s pin.
 - `crates/skelly/` - the binary: window, sidebar, pane widget/wiring, command palette
 - `crates/skelly-render/` - GPU cell-grid renderer, fonts, theme token resolution
 - `crates/skelly-term/` - PTY, shell I/O, ANSI parsing, scrollback
-- `crates/skelly-pane/` - pane-tree model (tiling splits/focus/resize/zoom, <=8); pure
-  logic, no UI/GPU/PTY deps - a leaf like `skelly-config` (ADR-0005). The binary owns
-  the wiring (pane -> terminal, rendering, keys).
+- `crates/skelly-pane/` - pane model (clockwise Fibonacci-spiral tiling, focus, zoom; no
+  pane cap); pure logic, no UI/GPU/PTY deps - a leaf like `skelly-config` (ADR-0005,
+  ADR-0010). The binary owns the wiring (pane -> terminal, rendering, keys).
 - `crates/skelly-session/` - session timeline, non-destructive rewind (shadow worktree), git diff
 - `crates/skelly-voice/` - local voice integration and the private per-pane Pi bridge;
   `integrations/pi/` holds the companion extension (no terminal scraping or second agent)
@@ -81,7 +81,8 @@ The terminal pane tree is the always-present base layer and never unmounts. Git 
 and the timeline open as a right dock (only one at a time); the command palette is a
 centered overlay; settings is a full in-window view - all over a live terminal, all
 dismissed with Esc. Opening any must not tear down the terminal, and focus returns to
-the exact pane on close. Max 8 panes per tab.
+the exact pane on close. `⌘K` is the only way to open a pane; panes tile as a clockwise
+Fibonacci spiral with no cap per tab (ADR-0010) - don't reintroduce splits or a cap.
 *Enforced:* review + interaction tests.
 
 ### 5. Build in Rust from the spec - never ship the mockup

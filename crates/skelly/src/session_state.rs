@@ -1,6 +1,6 @@
 //! Launch-time session persistence: the workspace / tab / group / pane layout is saved
 //! on quit and restored on the next launch (design/README.md "Persist scope" - resolved
-//! **layout only**: tabs + pinned + splits are restored, the prior shell processes are
+//! **layout only**: tabs + pinned + panes are restored, the prior shell processes are
 //! never re-run). This is *state*, not config, so it lives in the state dir, separate from
 //! `config.toml` (Hard rule 1 keeps the config file to 1:1 settings).
 
@@ -37,12 +37,13 @@ pub(crate) struct GroupState {
     pub(crate) collapsed: bool,
 }
 
-/// One tab's persisted layout: its pane tiling, each pane's last-known cwd (in `panes()`
-/// leaf order), and the sidebar metadata (pinned, custom name, group membership).
+/// One tab's persisted layout: its focused / zoomed pane, each pane's last-known cwd (in
+/// `panes()` order, so its length is the pane count), and the sidebar metadata (pinned, custom
+/// name, group membership).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TabState {
     pub(crate) layout: PaneLayout,
-    /// Each leaf pane's saved cwd, in `panes()` order. An entry is `None` for a pane whose
+    /// Each pane's saved cwd, in `panes()` order. An entry is `None` for a pane whose
     /// cwd was never polled; a saved path that no longer exists falls back to the default.
     pub(crate) cwds: Vec<Option<String>>,
     pub(crate) pinned: bool,
@@ -114,13 +115,14 @@ impl SessionState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use skelly_pane::{Dir, PaneTree};
+    use skelly_pane::PaneTree;
 
     #[test]
     fn session_state_round_trips_through_json() {
         let mut tree = PaneTree::new();
-        tree.split(Dir::Right);
-        tree.split(Dir::Down);
+        tree.open();
+        tree.open();
+        tree.set_focus(tree.panes()[1]);
         let state = SessionState {
             active_workspace: 1,
             workspaces: vec![
@@ -166,7 +168,6 @@ mod tests {
         assert_eq!(ws.groups[0].name, "skelly");
         assert!(ws.groups[0].collapsed);
         let tab = &ws.tabs[0];
-        assert_eq!(tab.layout.pane_count(), 3);
         assert_eq!(
             tab.cwds,
             vec![Some("~/src/skelly".into()), None, Some("~".into())]
@@ -176,7 +177,24 @@ mod tests {
         assert_eq!(tab.group, Some(0));
         assert!(tab.activated);
 
-        // The restored tree rebuilds to the same pane count.
-        assert_eq!(PaneTree::from_layout(&tab.layout).count(), 3);
+        // The restored tree rebuilds to the same pane count and focus.
+        let restored = PaneTree::from_layout(tab.cwds.len(), &tab.layout);
+        assert_eq!(restored.count(), 3);
+        assert_eq!(restored.focused(), restored.panes()[1]);
+    }
+
+    #[test]
+    fn a_session_saved_with_the_legacy_split_tree_still_restores() {
+        let json = r#"{"active_workspace":0,"workspaces":[{"name":"Personal","active":0,
+            "groups":[],"tabs":[{"layout":{"root":{"Split":{"row":true,"ratio":0.5,
+            "first":"Leaf","second":{"Split":{"row":false,"ratio":0.5,"first":"Leaf",
+            "second":"Leaf"}}}},"focused":2,"zoomed":false},
+            "cwds":["~/a","~/b","~/c"],"pinned":false,"custom_title":null,"group":null,
+            "activated":true}]}]}"#;
+        let state: SessionState = serde_json::from_str(json).expect("legacy session parses");
+        let tab = &state.workspaces[0].tabs[0];
+        let restored = PaneTree::from_layout(tab.cwds.len(), &tab.layout);
+        assert_eq!(restored.count(), 3);
+        assert_eq!(restored.focused(), restored.panes()[2]);
     }
 }

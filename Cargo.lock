@@ -2059,9 +2059,9 @@ dependencies = [
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.4"
+version = "0.13.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
+checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
 dependencies = [
  "bitflags 2.13.0",
  "memchr",
@@ -2527,7 +2527,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "skelly"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2553,7 +2553,7 @@ dependencies = [
 
 [[package]]
 name = "skelly-config"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2562,7 +2562,7 @@ dependencies = [
 
 [[package]]
 name = "skelly-pane"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "proptest",
  "serde",
@@ -2570,7 +2570,7 @@ dependencies = [
 
 [[package]]
 name = "skelly-render"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -2586,7 +2586,7 @@ dependencies = [
 
 [[package]]
 name = "skelly-session"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "tempfile",
  "thiserror 2.0.18",
@@ -2594,7 +2594,7 @@ dependencies = [
 
 [[package]]
 name = "skelly-term"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "alacritty_terminal",
  "bitflags 2.13.0",
@@ -2605,7 +2605,7 @@ dependencies = [
 
 [[package]]
 name = "skelly-voice"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
  "cpal",
  "getrandom 0.3.4",

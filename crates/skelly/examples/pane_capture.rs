@@ -1,9 +1,10 @@
-//! Headless proof of the M3 pane workspace: build a real two-pane split with the
-//! `skelly-pane` tree, spawn a live shell in each pane, and render the tiled result
+//! Headless proof of the M3 pane workspace: open two panes with the `skelly-pane`
+//! spiral, spawn a live shell in each pane, and render the tiled result
 //! (the left sidebar / tab list, pane dividers, the focused-pane ring, and a cursor
 //! only in the focused pane, with a command palette on top) to a PNG, with no window
 //! or screen-recording needed.
-//! Run: `cargo run -p skelly --example pane_capture -- panes.png`.
+//! Run: `cargo run -p skelly --example pane_capture -- panes.png`, or
+//! `-- spiral.png ossein-dark spiral 9` for nine panes in the Fibonacci spiral.
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -19,7 +20,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use skelly_config::Appearance;
-use skelly_pane::{Dir, PaneTree, Rect};
+use skelly_pane::{PaneTree, Rect};
 use skelly_render::{
     measure_cell, AnsiPalette, CaptureOverlay, CapturePane, CaptureSidebar, ChromeQuad, FontRole,
     GridCell, PaneOverlay, ProseLabel, PxRect, Srgb, TextMeasure, Theme,
@@ -46,7 +47,19 @@ fn main() {
     let path = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "skelly-panes.png".to_owned());
-    let (width, height, scale) = (1360_u32, 680_u32, 2.0_f64);
+    // `spiral N` opens N panes (default 6) on a laptop-sized window with no overlay - the
+    // clockwise Fibonacci spiral the binary tiles on `⌘K`.
+    let spiral = (std::env::args().nth(3).as_deref() == Some("spiral")).then(|| {
+        std::env::args()
+            .nth(4)
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(6_usize)
+    });
+    let (width, height, scale) = if spiral.is_some() {
+        (2880_u32, 1800_u32, 2.0_f64)
+    } else {
+        (1360_u32, 680_u32, 2.0_f64)
+    };
 
     // Use an installed Nerd Font so the configured-font path is exercised. An optional
     // second arg picks the theme (e.g. `ossein-light`), exercising live-theming tokens.
@@ -87,11 +100,12 @@ fn main() {
     );
 
     // Two panes, side by side; focus lands on the new (right) pane, matching the binary's
-    // split behavior. `solo` keeps a single full-width pane instead.
+    // `⌘K` behavior. `solo` keeps a single full-width pane instead.
     let mut tree = PaneTree::new();
     let left = tree.focused();
-    if !solo {
-        tree.split(Dir::Right).expect("under the pane cap");
+    let count = spiral.unwrap_or(if solo { 1 } else { 2 });
+    for _ in 1..count {
+        tree.open();
     }
     let focused = tree.focused();
     let layout = tree.layout(viewport);
@@ -112,7 +126,14 @@ fn main() {
         sleep(Duration::from_millis(300));
 
         // Distinct, colored content per pane so the split reads clearly.
-        let cmd = if *id == left {
+        let order = tree.panes().iter().position(|p| p == id).unwrap_or(0) + 1;
+        let spiral_cmd = format!(
+            "clear; printf '\\033[36m\\033[0m pane {order} of {count}\\n'; \
+             printf 'PANE_READY\\n'\n"
+        );
+        let cmd = if spiral.is_some() {
+            spiral_cmd.as_str()
+        } else if *id == left {
             "clear; \
              printf '\\033[35m\\033[0m left pane \\342\\200\\224 editor\\n\\n'; \
              printf '\\033[36m  1\\033[0m fn main() {\\n'; \
@@ -184,7 +205,7 @@ fn main() {
     let sidebar = sidebar_panel(height, sidebar_w, strip, sc, rail, overflow, &theme);
     // `solo` shows the bare pane + status line (no overlay); otherwise the palette (or the
     // confirm modal) composites on top.
-    let overlay = if solo {
+    let overlay = if solo || spiral.is_some() {
         None
     } else if std::env::args().nth(3).as_deref() == Some("confirm") {
         Some(confirm_overlay(width, height, sc, &theme))
@@ -229,6 +250,9 @@ fn status_line(
     m: &mut TextMeasure,
 ) -> (Vec<ChromeQuad>, Vec<ProseLabel>) {
     let h = STATUS_H * scale;
+    if rect.h < h {
+        return (Vec::new(), Vec::new());
+    }
     let top = rect.y + rect.h - h;
     let quads = vec![
         ChromeQuad::fill(

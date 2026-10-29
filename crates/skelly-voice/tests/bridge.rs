@@ -10,16 +10,20 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use skelly_voice::bridge::{Action, Bridge, Delivery, Target, MAX_FRAME};
 
-fn wait<T>(mut f: impl FnMut() -> Option<T>) -> T {
+const IN_PROCESS: Duration = Duration::from_secs(3);
+const CHILD_PROCESS: Duration = Duration::from_secs(10);
+
+fn wait<T>(f: impl FnMut() -> Option<T>) -> T {
+    wait_for(IN_PROCESS, f)
+}
+
+fn wait_for<T>(budget: Duration, mut f: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
     loop {
         if let Some(value) = f() {
             return value;
         }
-        assert!(
-            start.elapsed() < Duration::from_secs(3),
-            "bridge condition timed out"
-        );
+        assert!(start.elapsed() < budget, "bridge condition timed out");
         thread::sleep(Duration::from_millis(5));
     }
 }
@@ -109,7 +113,7 @@ fn local_dictation_reaches_the_real_pi_extension_without_a_model() {
             }
         }
     });
-    let target = wait(|| bridge.snapshot().unwrap().target);
+    let target = wait_for(CHILD_PROCESS, || bridge.snapshot().unwrap().target);
     assert_eq!(target.session(), "fixture-session");
     assert!(target.is_foreground(Some(child.0.id())));
     bridge
@@ -196,7 +200,7 @@ printf '你好\nsecond line' > "$output.txt"
         "en",
     );
     let job = Job::start(Input, engine, Duration::from_secs(5), || {}).unwrap();
-    wait(|| match job.poll() {
+    wait_for(CHILD_PROCESS, || match job.poll() {
         Some(Event::Finished(result)) => Some(result.unwrap()),
         _ => None,
     })

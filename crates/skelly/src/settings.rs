@@ -416,29 +416,14 @@ static CATEGORIES: &[Category] = &[
     Category {
         icon: '|',
         label: "Panes",
-        controls: &[
-            Control {
-                label: "Max panes",
-                key: "panes.max",
-                kind: Kind::Range {
-                    min: 1,
-                    max: 8,
-                    step: 1,
-                    divisor: 1,
-                    suffix: "",
-                    get: |c| i32::from(c.panes.max),
-                    set: |c, v| c.panes.max = v.clamp(1, 8) as u8,
-                },
+        controls: &[Control {
+            label: "New panes inherit cwd",
+            key: "panes.split_inherits_cwd",
+            kind: Kind::Toggle {
+                get: |c| c.panes.split_inherits_cwd,
+                set: |c, v| c.panes.split_inherits_cwd = v,
             },
-            Control {
-                label: "Splits inherit cwd",
-                key: "panes.split_inherits_cwd",
-                kind: Kind::Toggle {
-                    get: |c| c.panes.split_inherits_cwd,
-                    set: |c, v| c.panes.split_inherits_cwd = v,
-                },
-            },
-        ],
+        }],
     },
     Category {
         icon: '\u{276f}',

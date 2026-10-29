@@ -1,4 +1,4 @@
-//! Headless proof of the "shell exits / crashes" edge state (M5): a two-pane split
+//! Headless proof of the "shell exits / crashes" edge state (M5): two panes side by side
 //! where the right pane's shell has exited, so it draws the dim scrim over its preserved
 //! scrollback plus the centered exit message ("shell exited" / exit code / restart hint).
 //! Renders to a PNG with no window needed.
@@ -14,7 +14,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use skelly_config::Appearance;
-use skelly_pane::{Dir, PaneTree, Rect};
+use skelly_pane::{PaneTree, Rect};
 use skelly_render::{
     measure_cell, AnsiPalette, CapturePane, FontRole, GridCell, PaneOverlay, ProseLabel, PxRect,
     Srgb, TextMeasure, Theme,
@@ -58,8 +58,7 @@ fn main() {
     // Two panes side by side; the right one is the "exited" pane.
     let mut tree = PaneTree::new();
     let left = tree.focused();
-    tree.split(Dir::Right).expect("under the pane cap");
-    let right = tree.focused();
+    let right = tree.open();
     let layout = tree.layout(viewport);
 
     let palette = AnsiPalette::resolve(&appearance.theme);

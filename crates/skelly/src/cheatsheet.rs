@@ -38,7 +38,7 @@ const GLOBAL: Group = Group {
     title: "Global",
     note: "",
     binds: &[
-        b("Command palette", "\u{2318}K"),
+        b("Command palette", "\u{2318}P"),
         b("Settings", "\u{2318},"),
         b("Show / hide sidebar", "\u{2318}B"),
         b("Cycle sidebar / rail", "\u{21e7}\u{2318}B"),
@@ -49,16 +49,13 @@ const GLOBAL: Group = Group {
 };
 const PANES: Group = Group {
     title: "Panes",
-    note: "Default leader = \u{2303}\u{2325}A (tmux-style).",
+    note: "Fibonacci spiral, clockwise.",
     binds: &[
-        b("Split right / down", "\u{2325}| \u{2325}-"),
+        b("New pane", "\u{2318}K"),
         b("Move focus", "\u{2325}H J K L"),
-        b("Resize pane", "\u{2303}\u{2325} arrows"),
-        b("Swap pane", "\u{2325}\u{21e7} arrows"),
+        b("Focus pane 1-9", "\u{2325}1\u{2026}9"),
         b("Zoom / unzoom", "\u{2325}Z"),
         b("Close pane", "\u{2325}W"),
-        b("Cycle layout preset", "\u{2325}Space"),
-        b("Even out splits", "\u{2325}="),
     ],
 };
 const TERMINAL: Group = Group {
@@ -336,8 +333,8 @@ mod tests {
         let joined: String = labels.iter().map(|l| l.text.clone()).collect();
         assert!(joined.contains("Keybindings"));
         assert!(joined.contains("Command palette"));
-        assert!(joined.contains("Cycle layout preset"));
-        assert!(joined.contains("Default leader = \u{2303}\u{2325}A"));
+        assert!(joined.contains("New pane"));
+        assert!(joined.contains("Fibonacci spiral, clockwise."));
         assert!(joined.contains("Reopen closed"));
 
         // Layout sanity: every label starts inside the card, and the bottom-most row stays within

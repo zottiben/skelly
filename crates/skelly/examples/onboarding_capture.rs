@@ -47,9 +47,9 @@ const THEMES: [(&str, &str); 2] = [
     ("ossein-light", "Ossein Light"),
 ];
 const HINTS: [(&str, &str); 3] = [
-    ("\u{2318}K", "palette"),
+    ("\u{2318}P", "palette"),
     ("\u{2318}T", "new tab"),
-    ("\u{2325}|", "split"),
+    ("\u{2318}K", "new pane"),
 ];
 
 fn main() {
