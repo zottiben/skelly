@@ -11,6 +11,9 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::{App, ToastKind, Wakeup};
 
+/// The pane environment variable naming the running Skelly binary.
+const BIN_ENV: &str = "SKELLY_BIN";
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Phase {
     Opening,
@@ -86,7 +89,8 @@ impl Dictation {
     }
 }
 
-/// Spawn a shell and an optional private bridge as one pane incarnation.
+/// Spawn a shell and an optional private bridge as one pane incarnation. The shell's
+/// environment names the bridge and, as `SKELLY_BIN`, this binary.
 pub(crate) fn spawn_shell(
     cols: u16,
     rows: u16,
@@ -111,7 +115,7 @@ pub(crate) fn spawn_shell(
     };
     // Mask inherited endpoints even when disabled: a nested Skelly must never
     // register its Pi sessions in the parent app's pane.
-    let env = [
+    let mut env = vec![
         (
             SOCKET_ENV,
             bridge
@@ -125,6 +129,12 @@ pub(crate) fn spawn_shell(
                 .map_or(OsStr::new(""), |b| OsStr::new(b.token())),
         ),
     ];
+    // The agent in the pane answers review comments through this binary's `skelly review`,
+    // which need not be on PATH (a macOS app bundle, a dev build).
+    let exe = std::env::current_exe().ok();
+    if let Some(exe) = &exe {
+        env.push((BIN_ENV, exe.as_os_str()));
+    }
     let term =
         Terminal::spawn_shell_in_with_env(cols, rows, Some(program), cwd, &env, move || {
             let _ = proxy.send_event(Wakeup::Shell);

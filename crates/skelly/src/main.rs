@@ -22,6 +22,7 @@ mod menu;
 mod motion;
 mod onboarding;
 mod palette;
+mod review;
 mod session_state;
 mod settings;
 mod sidebar;
@@ -164,6 +165,9 @@ fn main() -> anyhow::Result<()> {
         }
         Ok(cli::Cli::Update(args)) => {
             std::process::exit(cli::update(&args)?);
+        }
+        Ok(cli::Cli::Review(args)) => {
+            std::process::exit(review::cli(&args)?);
         }
         Err(arg) => {
             eprintln!("skelly: unrecognized argument '{arg}'\n\n{}", cli::help());

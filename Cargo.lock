@@ -2588,6 +2588,8 @@ dependencies = [
 name = "skelly-session"
 version = "0.1.17"
 dependencies = [
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
 ]

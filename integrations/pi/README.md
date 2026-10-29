@@ -1,8 +1,9 @@
 # Skelly's Pi bridge
 
-Connects the **existing interactive Pi session** to Skelly's local voice controls.
+Connects the **existing interactive Pi session** to Skelly's local voice controls, and
+gives Pi the tools to read and resolve your [review comments](#review-comments).
 It does not create an agent, read provider credentials, call a speech API or capture audio.
-Tested against Pi 0.99.2 (`@earendil-works/pi-coding-agent`).
+Tested against Pi 0.99.2 (`@earendil-works/pi-coding-agent`); the review tools against Pi 1.4.0.
 
 ## Try the bridge
 
@@ -65,6 +66,33 @@ pi install /absolute/path/to/skelly/integrations/pi
 
 The bridge is inert outside Skelly or in non-interactive Pi modes. Nothing is
 installed into your Pi configuration automatically.
+
+## Review comments
+
+Comment on lines of the agent's changes in Skelly, then ask Pi to read your comments.
+The extension registers two tools:
+
+- `skelly_review_comments` returns the open comments (or every comment, with `all`) as
+  numbered instructions. Each one gives the place first, then the quoted line, the comment,
+  and any replies.
+- `skelly_review_resolve` resolves one by its number, with a note saying what changed.
+  The note shows under your comment.
+
+Both run `skelly review` in Pi's working directory, using the pane's own Skelly
+(`SKELLY_BIN`, set in every new pane) or else `skelly` on PATH. The comments belong to
+the repository, not to the pane, so unlike the voice bridge these tools work in every Pi
+mode and outside Skelly. The same commands work from any shell:
+
+```sh
+skelly review                                   # the open comments
+skelly review add src/lib.rs:42 rename this     # comment on a line (--old: a removed line)
+skelly review reply 3 "it is used by the parser"
+skelly review resolve 3 --note "renamed it to total"
+skelly review --all --json                      # every comment, with where each one is now
+```
+
+The comments are kept in `$XDG_STATE_HOME/skelly/reviews/` (else
+`~/.local/state/skelly/reviews/`), one file per repository, and never in the repository.
 
 ## Contract
 

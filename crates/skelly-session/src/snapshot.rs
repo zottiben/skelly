@@ -162,10 +162,15 @@ impl SnapshotStore {
     }
 }
 
-/// A store directory name for `work_tree`: its readable basename plus a hash of the full
-/// path, so two checkouts of the same project never collide and the directory is still
-/// recognizable when debugging.
+/// A store directory name for `work_tree`.
 fn store_name(work_tree: &Path) -> String {
+    format!("{}.git", repo_key(work_tree))
+}
+
+/// A file-name key for `work_tree`: its readable basename plus a hash of the full path, so
+/// two checkouts of the same project never collide and the name is still recognizable when
+/// debugging.
+pub(crate) fn repo_key(work_tree: &Path) -> String {
     let base: String = work_tree
         .file_name()
         .map_or_else(|| "repo".to_owned(), |n| n.to_string_lossy().into_owned())
@@ -173,7 +178,7 @@ fn store_name(work_tree: &Path) -> String {
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .take(32)
         .collect();
-    format!("{base}-{:016x}.git", path_hash(work_tree))
+    format!("{base}-{:016x}", path_hash(work_tree))
 }
 
 /// FNV-1a over the path's bytes - a stable, dependency-free name for a store directory.

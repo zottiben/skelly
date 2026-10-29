@@ -64,6 +64,7 @@ async function harness(t, mode = "tui", welcome = true) {
     abort: () => { aborts++; },
   };
   const pi = {
+    registerTool: () => {},
     on: (event, handler) => handlers.set(event, handler),
     sendUserMessage: (text, options) => sent.push({ text, options }),
   };

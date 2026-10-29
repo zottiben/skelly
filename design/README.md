@@ -82,6 +82,24 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-10-30 - **Review comments are a per-repository thread store that the agent reads
+  through `skelly review`.** User request: rebuild the diff review the way AI Team does it.
+  The agent changes the code, the human comments on specific lines of the diff and asks the
+  agent to read the comments, and the agent addresses them. The review is of the working tree
+  against `HEAD`, staged and unstaged together, which is the change an agent leaves behind.
+  Comments live in `$XDG_STATE_HOME/skelly/reviews/` (else `~/.local/state/skelly/reviews/`),
+  one JSON file per repository, never in the repository or its `.git` (Hard rule 3). The window
+  and the CLI change that file under a file lock, with an atomic rename. A thread is anchored
+  to a side (the file at `HEAD`, or the file on disk), a line range, and the text of its first
+  line. When the agent's edits move that text, the comment follows it if the text now appears
+  exactly once; otherwise the comment shows as outdated. `skelly review` prints the open
+  threads as instructions: the number, `path:line`, the quoted line, the comment, then any
+  replies. `reply` answers a thread, and `resolve <id> --note` closes it with what was done. A
+  human reply to a resolved thread reopens it. The Pi companion wraps these as
+  `skelly_review_comments` and `skelly_review_resolve`. They run the pane's own binary
+  (`SKELLY_BIN`, now set in every pane), else `skelly` on PATH.
+  _(was: the git dock had no comments; feedback to an agent was typed into its prompt)_
+
 - 2026-10-30 - **Workspaces and groups are managed from a Settings > Workspaces page and
   from right-click menus.** User request: rename groups and remove them, and manage
   workspaces - add, remove, rename, and pick an icon. The page is the last settings nav entry.

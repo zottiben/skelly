@@ -19,6 +19,7 @@ const context = {
   abort() { busy = false; },
 };
 skellyBridge({
+  registerTool() {},
   on(event, handler) { handlers.set(event, handler); },
   sendUserMessage(text, options) {
     process.stdout.write(JSON.stringify({ type: "prompt", text, options }) + "\n");

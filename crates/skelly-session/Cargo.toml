@@ -14,6 +14,9 @@ workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# Review comments persist as one JSON file per repository in Skelly's state directory.
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 # Integration tests drive a real `git` against a throwaway repo in a temp dir.

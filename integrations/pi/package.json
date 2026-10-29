@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Connect an existing interactive Pi session to Skelly's local voice controls.",
+  "description": "Connect an existing interactive Pi session to Skelly's local voice controls and diff review comments.",
   "keywords": ["pi-package"],
   "engines": { "node": ">=22.19.0" },
   "pi": { "extensions": ["./index.ts"] },

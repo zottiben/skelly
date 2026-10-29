@@ -53,8 +53,68 @@ function privateEndpoint(path: string): boolean {
     && (dir.mode & 0o077) === 0 && (socket.mode & 0o077) === 0;
 }
 
+const REVIEW_TIMEOUT = 15_000;
+
+/** Run `skelly review` in the session's directory and return its output as the tool result. */
+async function skellyReview(pi: ExtensionAPI, args: string[], cwd: string, signal: AbortSignal | undefined) {
+  // The pane's own Skelly when Pi runs inside one; otherwise whichever `skelly` is on PATH.
+  const bin = process.env.SKELLY_BIN || "skelly";
+  const result = await pi.exec(bin, ["review", ...args], { cwd, signal, timeout: REVIEW_TIMEOUT });
+  if (result.killed) throw new Error("skelly review did not finish");
+  if (result.code !== 0) {
+    throw new Error(result.stderr.trim() || `could not run ${bin} review; is Skelly installed?`);
+  }
+  return { content: [{ type: "text" as const, text: result.stdout }], details: undefined };
+}
+
+/** The agent's side of Skelly's diff review: read the user's line comments, resolve them. */
+function registerReviewTools(pi: ExtensionAPI) {
+  pi.registerTool({
+    name: "skelly_review_comments",
+    label: "Skelly review",
+    description: "Read the comments the user left on specific lines of your changes in Skelly's "
+      + "diff review, for the git repository in the working directory. Each open comment has "
+      + "its number, the file and line (an old-side comment is on the file at HEAD), the quoted "
+      + "line, what the user asked, and any replies. An outdated comment is on a line that has "
+      + "changed since; use the quoted line to find the place.",
+    promptSnippet: "Read the user's line comments on your changes from Skelly's diff review",
+    promptGuidelines: [
+      "When the user asks you to read or address their review comments, call "
+        + "skelly_review_comments, address every open comment, then call skelly_review_resolve "
+        + "for each one with a short note saying what you changed.",
+    ],
+    parameters: {
+      type: "object",
+      properties: { all: { type: "boolean", description: "Include resolved comments too." } },
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+    execute: (_id, params: { all?: boolean }, signal, _update, ctx) =>
+      skellyReview(pi, params.all ? ["--all"] : [], ctx.cwd, signal),
+  });
+  pi.registerTool({
+    name: "skelly_review_resolve",
+    label: "Skelly review: resolve",
+    description: "Resolve one of the user's Skelly review comments once you have addressed it. "
+      + "The note is shown to the user under their comment, so say what you changed.",
+    parameters: {
+      type: "object",
+      properties: {
+        id: { type: "integer", minimum: 1, description: "The comment's number, from skelly_review_comments." },
+        note: { type: "string", minLength: 1, description: "What you changed to address it." },
+      },
+      required: ["id", "note"],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    execute: (_id, params: { id: number; note: string }, signal, _update, ctx) =>
+      skellyReview(pi, ["resolve", String(params.id), "--note", params.note], ctx.cwd, signal),
+  });
+}
+
 /** No resources start at factory time: Pi can load extensions without a session. */
 export default function skellyBridge(pi: ExtensionAPI) {
+  registerReviewTools(pi);
   let context: ExtensionContext | undefined;
   let socket: Socket | undefined;
   let retry: ReturnType<typeof setTimeout> | undefined;

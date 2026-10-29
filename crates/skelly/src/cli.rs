@@ -1,6 +1,7 @@
 //! The command line in front of the window: bare `skelly` opens the terminal, while
 //! `skelly update` installs the latest release in place, so nobody has to remember the
-//! `curl … | sh` one-liner to upgrade.
+//! `curl … | sh` one-liner to upgrade. `skelly review` is the agent's side of a diff review
+//! (see [`crate::review`]).
 //!
 //! `update` deliberately owns no install logic of its own - it fetches the published
 //! `install.sh` and runs it. That script already knows every platform detail (the macOS
@@ -28,6 +29,8 @@ pub(crate) enum Cli {
     Run,
     /// `skelly update [args…]` - the args are forwarded verbatim to the install script.
     Update(Vec<String>),
+    /// `skelly review [args…]` - the review comments on the current repository.
+    Review(Vec<String>),
     /// `skelly --version`.
     Version,
     /// `skelly --help`.
@@ -51,6 +54,7 @@ where
     };
     match first.as_str() {
         "update" => Ok(Cli::Update(args.collect())),
+        "review" => Ok(Cli::Review(args.collect())),
         "-V" | "--version" => Ok(Cli::Version),
         "-h" | "--help" => Ok(Cli::Help),
         other => Err(other.to_string()),
@@ -66,6 +70,7 @@ pub(crate) fn help() -> String {
            skelly                 open the terminal\n  \
            skelly update          install the latest release\n  \
            skelly update --check  report whether an update is available\n  \
+           skelly review          the open review comments on this repository's changes\n  \
            skelly --version       print the version\n  \
            skelly --help          print this help\n\
          \n\
@@ -168,6 +173,15 @@ mod tests {
         assert_eq!(
             parse(args(&["update", "--check", "--version", "v0.1.8"])),
             Ok(Cli::Update(args(&["--check", "--version", "v0.1.8"])))
+        );
+    }
+
+    #[test]
+    fn review_forwards_its_arguments() {
+        assert_eq!(parse(args(&["review"])), Ok(Cli::Review(vec![])));
+        assert_eq!(
+            parse(args(&["review", "resolve", "3", "--note", "done"])),
+            Ok(Cli::Review(args(&["resolve", "3", "--note", "done"])))
         );
     }
 

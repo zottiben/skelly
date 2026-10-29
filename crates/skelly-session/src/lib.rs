@@ -4,7 +4,8 @@
 //! restores the codebase to any past moment. Rewind is **non-destructive**: it works
 //! entirely through a Skelly-owned object store and never rewrites history, moves HEAD,
 //! or touches a ref (Hard rule 3) - the whole trust contract of the feature. Also owns
-//! the per-repo git diff model (changed files, hunk staging, commit).
+//! the per-repo git diff model (changed files, hunk staging, commit) and the [`review`]
+//! comments left on its changes for the agent that made them.
 //!
 //! Independent of rendering; depends only on the `git` CLI (ADR-0006) and, later, the
 //! config. Never on the binary. Git access is split into a thin invocation layer (the
@@ -24,6 +25,7 @@
 #![doc(test(attr(deny(warnings))))]
 
 mod diff;
+pub mod review;
 mod snapshot;
 mod timeline;
 

@@ -57,25 +57,31 @@ pub(crate) struct TabState {
     pub(crate) activated: bool,
 }
 
+/// Skelly's state directory: `$XDG_STATE_HOME/skelly`, falling back to
+/// `$HOME/.local/state/skelly`. `None` if neither var is set.
+#[must_use]
+pub(crate) fn state_dir() -> Option<PathBuf> {
+    if let Some(xdg) = std::env::var_os("XDG_STATE_HOME") {
+        if !xdg.is_empty() {
+            return Some(PathBuf::from(xdg).join("skelly"));
+        }
+    }
+    let home = std::env::var_os("HOME")?;
+    Some(
+        PathBuf::from(home)
+            .join(".local")
+            .join("state")
+            .join("skelly"),
+    )
+}
+
 impl SessionState {
     /// The state-file path: `$XDG_STATE_HOME/skelly/session.json`, falling back to
     /// `$HOME/.local/state/skelly/session.json`. `None` if neither var is set (no place to
     /// persist, so restore is simply skipped, mirroring [`skelly_config::Config::default_path`]).
     #[must_use]
     pub(crate) fn default_path() -> Option<PathBuf> {
-        if let Some(xdg) = std::env::var_os("XDG_STATE_HOME") {
-            if !xdg.is_empty() {
-                return Some(PathBuf::from(xdg).join("skelly").join("session.json"));
-            }
-        }
-        let home = std::env::var_os("HOME")?;
-        Some(
-            PathBuf::from(home)
-                .join(".local")
-                .join("state")
-                .join("skelly")
-                .join("session.json"),
-        )
+        Some(state_dir()?.join("session.json"))
     }
 
     /// Load the saved session from the default path, or `None` if there is no path, no file,
