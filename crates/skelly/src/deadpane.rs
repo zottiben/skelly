@@ -19,7 +19,8 @@ const LINE_GAP: f32 = 8.0;
 /// Build the centered "shell exited" message for a pane whose shell ended, as proportional
 /// labels centered within `rect` (physical px). Reads only theme tokens (Hard rule 2): the
 /// title in `fg.primary`, the exit detail in `diff.add` when clean or `diff.del` when it
-/// failed / was signalled, and the restart/close hint in `accent`.
+/// failed / was signalled, and the restart/close hint in `accent`. A pane too small to hold
+/// the whole message gets none, so it never paints over a neighbor; the scrim still marks it.
 pub(crate) fn message_labels(
     status: &ExitStatus,
     rect: PxRect,
@@ -47,10 +48,13 @@ pub(crate) fn message_labels(
         .map(|(_, role, _)| measure.line_height(*role))
         .sum::<f32>()
         + gap * 2.0;
+    let widths = lines.map(|(text, role, _)| measure.width(text, role, None));
+    if total > rect.h || widths.iter().any(|&w| w > rect.w) {
+        return Vec::new();
+    }
     let mut y = rect.y + (rect.h - total) * 0.5;
     let mut labels = Vec::new();
-    for (text, role, color) in lines {
-        let w = measure.width(text, role, None);
+    for ((text, role, color), w) in lines.into_iter().zip(widths) {
         labels.push(ProseLabel {
             text: text.to_owned(),
             x: rect.x + (rect.w - w) * 0.5,
@@ -147,5 +151,33 @@ mod tests {
             &mut m,
         );
         assert_ne!(failed[1].color, theme.diff_add, "a failed exit isn't green");
+    }
+
+    #[test]
+    fn a_pane_too_small_for_the_message_shows_only_the_scrim() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
+        let status = ExitStatus {
+            code: 0,
+            signal: None,
+        };
+        let tiny = PxRect {
+            x: 50.0,
+            y: 50.0,
+            w: 120.0,
+            h: 60.0,
+        };
+        assert!(message_labels(&status, tiny, 2.0, &theme, &mut m).is_empty());
+        let labels = message_labels(&status, rect(), 2.0, &theme, &mut m);
+        assert_eq!(labels.len(), 3);
+        for l in &labels {
+            let w = m.width(&l.text, l.role, None);
+            assert!(
+                l.x >= 0.0 && l.x + w <= rect().w,
+                "{:?} fits across",
+                l.text
+            );
+            assert!(l.y >= 0.0 && l.y + m.line_height(l.role) <= rect().h);
+        }
     }
 }

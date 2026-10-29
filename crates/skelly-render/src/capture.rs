@@ -296,16 +296,20 @@ fn paint_panes(text: &mut TextLayer, panes: &[CapturePane], theme: &Theme) -> Ve
     let mut inputs = Vec::with_capacity(panes.len());
     for pane in panes {
         let cursor = pane.focused.then_some(pane.cursor);
-        quads.extend(grid_quads(
-            cell_w,
-            cell_h,
-            pane.origin,
-            &pane.rows,
-            cursor,
-            pane.cursor_shape,
-            theme.accent,
-            &[],
-        ));
+        quads.extend(
+            grid_quads(
+                cell_w,
+                cell_h,
+                pane.origin,
+                &pane.rows,
+                cursor,
+                pane.cursor_shape,
+                theme.accent,
+                &[],
+            )
+            .into_iter()
+            .filter_map(|q| q.clipped_to(pane.rect)),
+        );
         if let Some(bounds) = pane.logo {
             quads.extend(logo_quads(bounds, theme, LOGO_WATERMARK_OPACITY));
         }

@@ -45,10 +45,11 @@ pub(crate) struct Info<'a> {
 /// (`status.success`) · `⑂ branch` (`status.info`) · shell (muted) on the left, and `Ln, Col`
 /// (muted) right-anchored.
 ///
-/// A pane can be narrow (up to 8 splits), so the segments never overlap: the right-anchored
+/// A pane deep in the spiral can be narrow, so the segments never overlap: the right-anchored
 /// `Ln, Col` is placed first, then the left segments fill the space that remains, in priority
 /// order (cwd, then branch, then shell). The cwd is truncated with a leading `…` if it alone
-/// would collide; lower-priority segments are dropped whole when they no longer fit.
+/// would collide; lower-priority segments are dropped whole when they no longer fit. A pane
+/// shorter than the strip gets no status line, so it never paints over a neighbor.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -62,6 +63,9 @@ pub(crate) fn paint(
     measure: &mut skelly_render::TextMeasure,
 ) -> (Vec<ChromeQuad>, Vec<ProseLabel>) {
     let h = HEIGHT * scale;
+    if rect.h < h {
+        return (Vec::new(), Vec::new());
+    }
     let top = rect.y + rect.h - h;
     let pad = PAD_X * scale;
     let gap = GAP * scale;
@@ -181,7 +185,7 @@ fn fit_lead(s: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{fit_lead, paint, Info};
+    use super::{fit_lead, paint, Info, HEIGHT};
     use skelly_render::{FontRole, PxRect, TextMeasure, Theme};
 
     fn rect() -> PxRect {
@@ -316,6 +320,37 @@ mod tests {
                 cursor.x
             );
         }
+    }
+
+    #[test]
+    fn a_pane_shorter_than_the_strip_draws_no_status_line() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
+        let info = Info {
+            cwd: "~/skelly",
+            branch: Some("main"),
+            dirty: None,
+            mode: None,
+            filetype: None,
+            shell: "zsh",
+            cursor: (0, 0),
+        };
+        let short = PxRect {
+            x: 100.0,
+            y: 100.0,
+            w: 400.0,
+            h: HEIGHT * 2.0 - 1.0,
+        };
+        let (quads, labels) = paint(&info, short, 2.0, &theme, &mut m);
+        assert!(quads.is_empty() && labels.is_empty());
+        let exact = PxRect {
+            h: HEIGHT * 2.0,
+            ..short
+        };
+        let (quads, labels) = paint(&info, exact, 2.0, &theme, &mut m);
+        assert!(quads.iter().all(|q| q.rect.y >= exact.y));
+        assert!(labels.iter().all(|l| l.y >= exact.y));
+        assert_eq!(quads.len(), 2);
     }
 
     #[test]

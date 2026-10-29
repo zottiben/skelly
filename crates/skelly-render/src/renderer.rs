@@ -343,8 +343,8 @@ impl Renderer {
         self.settings.set_default_fg(self.theme.fg_primary);
     }
 
-    /// Set the panes to display next frame. Each pane's grid is filled at its
-    /// `origin` and clipped to its `rect`; with more than one pane a `border` divider
+    /// Set the panes to display next frame. Each pane's grid (glyphs, cell backgrounds and
+    /// cursor) is filled at its `origin` and clipped to its `rect`; with more than one pane a `border` divider
     /// is drawn around each and a `border.strong` ring around the focused one. Only
     /// the focused pane draws a cursor.
     pub fn set_panes(&mut self, panes: &[PaneView]) {
@@ -354,16 +354,20 @@ impl Renderer {
         let mut text_inputs = Vec::with_capacity(panes.len());
         for pane in panes {
             let cursor = pane.focused.then_some(pane.cursor);
-            quads.extend(grid_quads(
-                cell_w,
-                cell_h,
-                pane.origin,
-                pane.rows,
-                cursor,
-                pane.cursor_shape,
-                self.theme.accent,
-                pane.selection,
-            ));
+            quads.extend(
+                grid_quads(
+                    cell_w,
+                    cell_h,
+                    pane.origin,
+                    pane.rows,
+                    cursor,
+                    pane.cursor_shape,
+                    self.theme.accent,
+                    pane.selection,
+                )
+                .into_iter()
+                .filter_map(|q| q.clipped_to(pane.rect)),
+            );
             // The empty-state brand watermark (a pristine tab), beneath the glyphs.
             if let Some(bounds) = pane.logo {
                 quads.extend(logo_quads(bounds, &self.theme, LOGO_WATERMARK_OPACITY));

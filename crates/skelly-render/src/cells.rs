@@ -64,6 +64,20 @@ impl Quad {
         }
     }
 
+    /// This sharp-cornered quad cut to `clip` (physical px), or `None` when they do not
+    /// overlap - so a pane's cell backgrounds and cursor stop at its rect like its glyphs.
+    pub(crate) fn clipped_to(self, clip: crate::PxRect) -> Option<Self> {
+        let [x, y, w, h] = self.rect;
+        let left = x.max(clip.x);
+        let top = y.max(clip.y);
+        let right = (x + w).min(clip.x + clip.w);
+        let bottom = (y + h).min(clip.y + clip.h);
+        (right > left && bottom > top).then_some(Self {
+            rect: [left, top, right - left, bottom - top],
+            ..self
+        })
+    }
+
     /// A quad with anti-aliased rounded corners of `radius` physical px (clamped to
     /// half the shorter side so the corners never overlap). Used for floating panels
     /// and list-row pills.
@@ -883,6 +897,45 @@ mod tests {
             &[],
         );
         assert!(quads.is_empty(), "a None cursor emits no quad");
+    }
+
+    #[test]
+    fn clipped_quads_stay_inside_the_pane_rect() {
+        let rows = vec![vec![plain('a'), plain('b')], vec![plain('c'), plain('d')]];
+        let pane = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: 15.0,
+            h: 25.0,
+        };
+        let cursor = |at| {
+            grid_quads(
+                10.0,
+                20.0,
+                (0.0, 0.0),
+                &rows,
+                Some(at),
+                crate::CursorShape::Block,
+                ACCENT,
+                &[],
+            )
+            .into_iter()
+            .filter_map(|q| q.clipped_to(pane))
+            .collect::<Vec<Quad>>()
+        };
+        let partial = cursor((1, 1));
+        assert_eq!(partial.len(), 1);
+        assert!(rect_eq(partial[0].rect, [10.0, 20.0, 5.0, 5.0]));
+        assert!(
+            rect_eq(partial[0].color, ACCENT.to_linear()),
+            "keeps its color"
+        );
+        assert!(
+            cursor((1, 2)).is_empty(),
+            "a cursor past the pane is dropped"
+        );
+        let inside = cursor((0, 0));
+        assert!(rect_eq(inside[0].rect, [0.0, 0.0, 10.0, 20.0]));
     }
 
     #[test]
