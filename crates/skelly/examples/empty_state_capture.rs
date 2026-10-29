@@ -27,8 +27,8 @@ const PANE_INSET: f32 = 6.0;
 
 // Mirrors the binary's `emptystate` module (examples cannot import the binary crate).
 const CHIPS: [(&str, &str); 4] = [
-    ("\u{2318}K", "commands"),
-    ("\u{2325}|", "split right"),
+    ("\u{2318}P", "commands"),
+    ("\u{2318}K", "new pane"),
     ("\u{21E7}\u{2318}G", "git diff"),
     ("\u{2318},", "settings"),
 ];

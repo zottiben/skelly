@@ -11,12 +11,12 @@
 
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, TextMeasure, Theme};
 
-/// The hint chips (key chord + label), verbatim from the guide's §10.2 empty-state mockup:
-/// the palette, a split, the git diff dock, and settings - the four chords worth surfacing
-/// first. They wrap to a second row on a pane too narrow to hold them all.
+/// The hint chips (key chord + label), the guide's §10.2 empty-state set: the palette, a new
+/// pane, the git diff dock, and settings - the four chords worth surfacing first. They wrap to a
+/// second row on a pane too narrow to hold them all.
 const CHIPS: [(&str, &str); 4] = [
-    ("\u{2318}K", "commands"),         // ⌘K
-    ("\u{2325}|", "split right"),      // ⌥|
+    ("\u{2318}P", "commands"),         // ⌘P
+    ("\u{2318}K", "new pane"),         // ⌘K
     ("\u{21E7}\u{2318}G", "git diff"), // ⇧⌘G
     ("\u{2318},", "settings"),         // ⌘,
 ];
@@ -196,7 +196,7 @@ mod tests {
         assert_eq!(labels.len(), 8, "chord + label per chip");
         let joined: String = labels.iter().map(|l| l.text.clone()).collect();
         assert!(joined.contains("commands"));
-        assert!(joined.contains("split right"));
+        assert!(joined.contains("new pane"));
         assert!(joined.contains("git diff"));
         assert!(joined.contains("settings"));
         // The pills use the elevated surface and are capsules (radius = half the height).

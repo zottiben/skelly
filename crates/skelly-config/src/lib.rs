@@ -264,11 +264,7 @@ pub enum TabTitle {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Panes {
-    /// Maximum panes per tab. Hard cap 8 (Hard rule 4). Valid range 1..=8.
-    pub max: u8,
-    /// tmux-style leader chord for pane control (default Ctrl+Alt+A leaves Ctrl+A to the terminal).
-    pub leader: String,
-    /// New splits inherit the focused pane's working directory.
+    /// New panes inherit the focused pane's working directory.
     pub split_inherits_cwd: bool,
 }
 
@@ -359,8 +355,6 @@ impl Default for Tabs {
 impl Default for Panes {
     fn default() -> Self {
         Self {
-            max: 8,
-            leader: "ctrl+alt+a".to_owned(),
             split_inherits_cwd: true,
         }
     }
@@ -383,9 +377,6 @@ impl Default for Git {
         }
     }
 }
-
-/// The hard cap on panes per tab (Hard rule 4).
-pub const MAX_PANES: u8 = 8;
 
 impl Config {
     /// Parse a config from a TOML string and validate it.
@@ -588,12 +579,6 @@ impl Config {
         if !(5..=120).contains(&self.voice.max_recording_seconds) {
             return invalid("voice.max_recording_seconds must be 5..=120".into());
         }
-        if self.panes.max == 0 || self.panes.max > MAX_PANES {
-            return invalid(format!(
-                "panes.max = {} (must be 1..={MAX_PANES})",
-                self.panes.max
-            ));
-        }
         Ok(())
     }
 }
@@ -614,26 +599,20 @@ mod tests {
         assert_eq!(c.sidebar.width, 240);
         assert_eq!(c.sidebar.mode, SidebarMode::Fixed);
         assert_eq!(c.tabs.title, TabTitle::Cwd);
-        assert_eq!(c.panes.max, 8);
-        assert_eq!(c.panes.leader, "ctrl+alt+a");
+        assert!(c.panes.split_inherits_cwd);
         assert!(c.session.shadow_worktree);
         assert_eq!(c.git.diff_view, DiffView::Unified);
     }
 
     #[test]
-    fn pane_leader_default_applies_only_when_not_configured() {
-        for text in ["", "[panes]\nmax = 4\n"] {
-            let config = Config::from_toml_str(text).expect("parse partial config");
-            assert_eq!(config.panes.leader, "ctrl+alt+a");
-        }
-        // Existing users may deliberately use the old prefix, another key, or no leader.
-        for leader in ["ctrl+a", "ctrl+b", "ctrl+alt+a", ""] {
-            let text = format!("[panes]\nleader = {leader:?}\n");
-            let config = Config::from_toml_str(&text).expect("parse explicit leader");
-            assert_eq!(config.panes.leader, leader);
-            let saved = config.to_toml_string().expect("serialize config");
-            assert_eq!(Config::from_toml_str(&saved).unwrap().panes.leader, leader);
-        }
+    fn retired_pane_keys_still_load_and_are_dropped_on_save() {
+        let text = "[panes]\nmax = 12\nleader = \"ctrl+a\"\nsplit_inherits_cwd = false\n";
+        let config = Config::from_toml_str(text).expect("an upgraded config still loads");
+        assert!(!config.panes.split_inherits_cwd);
+        let saved: toml::Value =
+            toml::from_str(&config.to_toml_string().expect("serialize config")).unwrap();
+        let panes = saved["panes"].as_table().expect("a [panes] table");
+        assert_eq!(panes.keys().collect::<Vec<_>>(), ["split_inherits_cwd"]);
     }
 
     #[test]
@@ -800,7 +779,7 @@ mod tests {
         "#;
         let c = Config::from_toml_str(text).expect("design sample must parse");
         assert_eq!(c.appearance.cursor, CursorStyle::Block);
-        assert_eq!(c.panes.max, 8);
+        assert!(c.panes.split_inherits_cwd);
         assert_eq!(
             c.keys.get("cmd+k").map(String::as_str),
             Some("palette.open")
@@ -820,12 +799,6 @@ mod tests {
     fn rejects_font_size_out_of_range() {
         let err = Config::from_toml_str("[appearance]\nfont_size = 200\n").unwrap_err();
         assert!(matches!(err, ConfigError::Invalid(msg) if msg.contains("font_size")));
-    }
-
-    #[test]
-    fn rejects_too_many_panes() {
-        let err = Config::from_toml_str("[panes]\nmax = 12\n").unwrap_err();
-        assert!(matches!(err, ConfigError::Invalid(msg) if msg.contains("panes.max")));
     }
 
     #[test]

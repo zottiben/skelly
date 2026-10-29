@@ -5,7 +5,7 @@
 //! (`skelly-pane`) into the window: a live terminal (`skelly-term`) per pane, the
 //! renderer (`skelly-render`) drawing each pane at its computed rectangle with a
 //! divider and a focused-pane ring, input routed to the focused pane, and the
-//! split / focus / zoom / resize / close keybindings. The reader thread of each
+//! open (`⌘K`) / focus / zoom / close keybindings. The reader thread of each
 //! shell wakes the event loop via an `EventLoopProxy` so we repaint only on new
 //! output. Errors are contextualized here with `anyhow`; `wgpu`/`alacritty` types
 //! never leak up.
@@ -82,8 +82,6 @@ const TRAFFIC_LIGHT_WIDTH: f32 = 80.0;
 const WORKSPACE_ICONS: [char; 8] = [
     '\u{25C6}', '\u{25CF}', '\u{25B2}', '\u{25A0}', '\u{2605}', '\u{25C7}', '\u{25CB}', '\u{25A1}',
 ];
-/// One keyboard resize step, as a fraction of the enclosing split's extent.
-const RESIZE_STEP: f32 = 0.04;
 /// The dock's expand/collapse toggle: a square handle (logical px) that straddles the dock's
 /// left edge - half over the dock, half over the terminal - vertically centered, so it reads
 /// unmistakably as a "expand this panel" control and sits clear of the header content.
@@ -205,11 +203,11 @@ struct Selection {
     head: (usize, usize),
 }
 
-/// A pane operation bound to a keyboard chord (the `⌥`-leader pane bindings).
+/// A pane operation bound to a keyboard chord (`⌘K` opens a pane; `⌥` chords do the rest).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PaneAction {
-    /// Split the focused pane, placing the new pane in this direction.
-    Split(Dir),
+    /// Open a new pane at the end of the Fibonacci spiral.
+    Open,
     /// Move focus to the neighbor in this direction.
     Focus(Dir),
     /// Focus the pane at this 0-based index in layout order.
@@ -218,14 +216,6 @@ enum PaneAction {
     Close,
     /// Toggle zoom on the focused pane.
     Zoom,
-    /// Nudge the focused pane's enclosing divider in this direction.
-    Resize(Dir),
-    /// Swap the focused pane with its neighbor in this direction.
-    Swap(Dir),
-    /// Reset every split to an even 50/50.
-    EvenOut,
-    /// Cycle the panes through preset layouts (even columns / rows / main-vertical).
-    CycleLayout,
 }
 
 /// A clipboard operation bound to a keyboard chord (see [`clipboard_action`]).
@@ -270,7 +260,7 @@ struct Tab {
     selection: Option<(PaneId, Selection)>,
     /// Whether the user has started using this tab yet. A fresh tab is pristine
     /// (`false`) and shows the empty-state overlay (a faint mark + hint chips); the first
-    /// command run (or a split) activates it and the overlay clears (guide §10.2).
+    /// command run (or a new pane) activates it and the overlay clears (guide §10.2).
     activated: bool,
     /// The focused pane's foreground-job command name (design §10.3: tabs titled by their
     /// running command, e.g. `nvim`), cached with the pid it was read for so `ps` only runs
@@ -353,7 +343,7 @@ impl Tab {
     }
 
     /// Whether this tab should show the empty-state overlay: pristine (no command run yet)
-    /// and still a single pane (a split means the user is working, so it clears).
+    /// and still a single pane (a new pane means the user is working, so it clears).
     fn is_empty_state(&self) -> bool {
         !self.activated && self.tree.count() == 1
     }
@@ -594,7 +584,7 @@ fn edit_text(newly: &[(String, u32, u32)]) -> Option<(String, String)> {
 /// `None` until the platform signals `resumed`; the tab list exists from the start.
 #[allow(
     clippy::struct_excessive_bools,
-    reason = "independent UI-mode flags (selecting, leader-pending, cheatsheet, dock-focused)"
+    reason = "independent UI-mode flags (selecting, cheatsheet, dock-focused)"
 )]
 struct App {
     config: Config,
@@ -635,8 +625,8 @@ struct App {
     /// The active tab's focused-pane cwd the git dock last scoped to (absolute), so a tab switch
     /// or `cd` that changes the active repo re-points the open dock at it. `None` until first poll.
     active_cwd: Option<std::path::PathBuf>,
-    /// The cwd a split's new pane should start in (design §11, `[panes] split_inherits_cwd`): set
-    /// to the split source pane's absolute cwd just before `sync_layout` spawns the new pane, and
+    /// The cwd a new pane should start in (design §11, `[panes] split_inherits_cwd`): set to the
+    /// focused pane's absolute cwd just before `sync_layout` spawns the new pane, and
     /// consumed (taken) there so only that one spawn inherits it. `None` = spawn in the default
     /// start dir (a fresh tab / workspace / restored pane).
     inherit_cwd: Option<std::path::PathBuf>,
@@ -666,9 +656,6 @@ struct App {
     /// A stack of recently-closed tabs' titles, for `⇧⌘T` reopen (design §11) - a fresh tab is
     /// opened carrying the title back (the shell itself can't be resurrected).
     closed_titles: Vec<String>,
-    /// Whether the tmux-style pane leader (`[panes] leader`, default `ctrl+alt+a`) was just
-    /// pressed, so the next key is a leader pane chord (`hjkl`/`⇧hjkl`/`z`/`x`/`|`/`-`).
-    leader_pending: bool,
     /// Whether the keybinding cheatsheet overlay (`⌘/`, §11) is open. While up it captures input
     /// (`Esc` / `⌘/` closes).
     cheatsheet_open: bool,
@@ -830,7 +817,6 @@ impl App {
             onboarding: Config::is_first_run().then(onboarding::Onboarding::new),
             renaming: None,
             closed_titles: Vec::new(),
-            leader_pending: false,
             cheatsheet_open: false,
             find: None,
             rewind: None,
@@ -1237,7 +1223,7 @@ impl App {
         let proxy = self.proxy.clone();
         let shell = self.config.shell.program.clone();
         let cursor = config_cursor_shape(self.config.appearance.cursor);
-        // The cwd a newly-spawned pane inherits this cycle (a split from a pane in that dir);
+        // The cwd a newly-spawned pane inherits this cycle (opened from a pane in that dir);
         // taken so it applies once, then reverts to the default start dir.
         let inherit = std::mem::take(&mut self.inherit_cwd);
         let voice_enabled = self.config.voice.enabled;
@@ -1281,7 +1267,7 @@ impl App {
                     }
                     Err(err) => {
                         tracing::error!(%err, "failed to spawn shell for a new pane");
-                        // Roll the split back so every live pane still has a shell.
+                        // Roll the new pane back so every live pane still has a shell.
                         ws.tree.set_focus(id);
                         ws.tree.close();
                     }
@@ -1500,7 +1486,7 @@ impl App {
                 // only the mark + chips, no strip.
                 let (q, l) = statusline::paint(
                     &statusline::Info {
-                        // A pane with no polled cwd yet (just split) shows a neutral `~` rather
+                        // A pane with no polled cwd yet (just opened) shows a neutral `~` rather
                         // than borrowing the active pane's path (which would be wrong for it).
                         cwd: cwd.as_deref().unwrap_or("~"),
                         branch: self.status_branch.as_deref(),
@@ -3374,7 +3360,7 @@ impl App {
     }
 
     /// The focused pane's absolute cwd from the latest cwd poll, falling back to the app-level
-    /// active cwd, or `None` before the first poll. Seeds a split's inherited working directory.
+    /// active cwd, or `None` before the first poll. Seeds a new pane's inherited working directory.
     fn focused_pane_abs_cwd(&self) -> Option<std::path::PathBuf> {
         let ws = self.active_tab();
         let pid = ws.panes.get(&ws.tree.focused()).and_then(Terminal::cwd_pid);
@@ -3395,23 +3381,19 @@ impl App {
             self.close_tab();
             return;
         }
-        let cap = usize::from(self.config.panes.max).min(skelly_pane::MAX_PANES);
-        // A split at the pane cap no-ops; surface why with a toast (design §12 flow 1).
-        if matches!(action, PaneAction::Split(_)) && self.active_tab().tree.count() >= cap {
-            self.show_toast(format!("Pane limit reached ({cap} max)"), ToastKind::Info);
-            return;
-        }
-        // A split inherits the source (focused) pane's cwd, so the new pane opens in the same
-        // directory (design §11, `[panes] split_inherits_cwd`). Captured before the split moves
-        // focus to the new pane; armed only once the split applies, so it can never leak onto an
-        // unrelated later spawn. `sync_layout` consumes it when it spawns that pane's shell.
-        let inherit = (matches!(action, PaneAction::Split(_))
-            && self.config.panes.split_inherits_cwd)
+        // A new pane inherits the focused pane's cwd, so it opens in the same directory (design
+        // §11, `[panes] split_inherits_cwd`). Captured before opening moves focus to the new pane;
+        // armed only once the action applies, so it can never leak onto an unrelated later spawn.
+        // `sync_layout` consumes it when it spawns that pane's shell.
+        let inherit = (action == PaneAction::Open && self.config.panes.split_inherits_cwd)
             .then(|| self.focused_pane_abs_cwd())
             .flatten();
         let ws = self.active_tab_mut();
         let changed = match action {
-            PaneAction::Split(dir) => ws.tree.count() < cap && ws.tree.split(dir).is_some(),
+            PaneAction::Open => {
+                ws.tree.open();
+                true
+            }
             PaneAction::Focus(dir) => ws.tree.focus(dir),
             PaneAction::FocusIndex(index) => ws
                 .tree
@@ -3423,13 +3405,6 @@ impl App {
                 ws.tree.zoom_toggle();
                 true
             }
-            PaneAction::Resize(dir) => ws.tree.resize(dir, RESIZE_STEP),
-            PaneAction::Swap(dir) => ws.tree.swap(dir),
-            PaneAction::EvenOut => {
-                ws.tree.even_out();
-                true
-            }
-            PaneAction::CycleLayout => ws.tree.cycle_layout(),
         };
         if changed {
             self.inherit_cwd = inherit;
@@ -3596,7 +3571,7 @@ impl App {
 
     /// A key interrupting either overlay's fade-out (palette or confirm modal): settle whichever
     /// is fading and report whether the key should be *swallowed* rather than routed on to the
-    /// pane - `true` for a repeat dismiss gesture (Esc / ⌘K) that only spent the fade. The two
+    /// pane - `true` for a repeat dismiss gesture (Esc / ⌘P) that only spent the fade. The two
     /// never fade at once, so `||` settles whichever is live.
     fn key_settles_fading_overlay(&mut self, key_event: &KeyEvent) -> bool {
         (self.settle_confirm_close() || self.settle_palette_close())
@@ -3818,7 +3793,7 @@ impl App {
                 sidebar::UtilAction::Git => "Git diff  \u{21e7}\u{2318}G",
             }
             .to_owned(),
-            sidebar::Hit::CommandInput => "Search or run  \u{2318}K".to_owned(),
+            sidebar::Hit::CommandInput => "Search or run  \u{2318}P".to_owned(),
             sidebar::Hit::AddWorkspace => "New workspace".to_owned(),
             sidebar::Hit::Workspace(i) => self.workspaces.get(i).map(|w| w.name.clone())?,
             // Tabs only need a tooltip when their title isn't already shown: the slim rail (just a
@@ -4337,7 +4312,7 @@ impl App {
         let shell = self.config.shell.program.clone();
         let cursor = config_cursor_shape(self.config.appearance.cursor);
         let mut tab = Tab::new();
-        tab.tree = PaneTree::from_layout(&ts.layout);
+        tab.tree = PaneTree::from_layout(ts.cwds.len(), &ts.layout);
         tab.pinned = ts.pinned;
         tab.custom_title.clone_from(&ts.custom_title);
         tab.group = ts.group;
@@ -4508,12 +4483,12 @@ impl App {
     }
 
     /// Handle a key while the command palette is open: it captures all input (typing
-    /// filters, arrows navigate, Enter runs, Esc closes). `⌘K` toggles it shut and
+    /// filters, arrows navigate, Enter runs, Esc closes). `⌘P` toggles it shut and
     /// `⌘Q` still quits.
     fn on_palette_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
         if self.modifiers.super_key() {
             if let Key::Character(ch) = key_event.logical_key.as_ref() {
-                if ch.eq_ignore_ascii_case("k") {
+                if ch.eq_ignore_ascii_case("p") {
                     self.close_palette();
                     return;
                 }
@@ -4524,22 +4499,17 @@ impl App {
             }
         }
         match key_event.logical_key.as_ref() {
-            // Dismiss (Esc / ⌘K) eases the palette out; running a command closes it instantly
+            // Dismiss (Esc / ⌘P) eases the palette out; running a command closes it instantly
             // so the command's result (which may itself be an overlay) takes over at once.
             Key::Named(NamedKey::Escape) => self.close_palette(),
             Key::Named(NamedKey::Enter) => {
                 // A file entry (files mode) types its path into the focused pane; otherwise run
-                // the selected command / tab action. `⌘↵` "runs in a new pane" (design §11): it
-                // first splits a fresh pane (respecting the 8-pane cap) so the path lands there.
+                // the selected command / tab action.
                 let file = self.palette.selected_file();
                 let action = self.palette.selected_action();
-                let new_pane = self.modifiers.super_key();
                 self.palette.close();
                 self.palette_anim = None;
                 if let Some(path) = file {
-                    if new_pane {
-                        self.apply_pane_action(PaneAction::Split(Dir::Right));
-                    }
                     self.type_into_focused(&format!("{path} "));
                 } else if let Some(action) = action {
                     self.run_palette_action(event_loop, action);
@@ -4548,6 +4518,8 @@ impl App {
             Key::Named(NamedKey::ArrowDown) => self.palette.move_selection(1),
             Key::Named(NamedKey::ArrowUp) => self.palette.move_selection(-1),
             Key::Named(NamedKey::Backspace) => self.palette.backspace(),
+            // winit reports `⌘K` etc. with text `"k"`; a command chord never types into the query.
+            _ if self.modifiers.super_key() || self.modifiers.control_key() => {}
             _ => {
                 if let Some(text) = key_event.text.as_ref() {
                     for c in text.chars() {
@@ -4565,10 +4537,7 @@ impl App {
     fn run_palette_action(&mut self, event_loop: &ActiveEventLoop, action: palette::Action) {
         use palette::Action;
         match action {
-            Action::SplitRight => self.apply_pane_action(PaneAction::Split(Dir::Right)),
-            Action::SplitDown => self.apply_pane_action(PaneAction::Split(Dir::Down)),
             Action::Zoom => self.apply_pane_action(PaneAction::Zoom),
-            Action::EvenOut => self.apply_pane_action(PaneAction::EvenOut),
             Action::ClosePane => self.request_close_pane(),
             Action::FocusLeft => self.apply_pane_action(PaneAction::Focus(Dir::Left)),
             Action::FocusDown => self.apply_pane_action(PaneAction::Focus(Dir::Down)),
@@ -4980,44 +4949,6 @@ impl App {
         }
     }
 
-    /// Handle the tmux-style pane leader (`[panes] leader`, default `ctrl+alt+a`). Returns
-    /// whether the key was consumed. Pressing the leader arms it; the next key is a leader pane
-    /// chord (`hjkl`/`⇧hjkl`/`z`/`x`/`|`/`-`), or anything else cancels it.
-    fn on_leader(&mut self, key_event: &KeyEvent) -> bool {
-        let PhysicalKey::Code(code) = key_event.physical_key else {
-            // A pending leader is cancelled by a non-code key (e.g. a dead key).
-            if self.leader_pending {
-                self.leader_pending = false;
-                return true;
-            }
-            return false;
-        };
-        if self.leader_pending {
-            self.leader_pending = false;
-            if let Some(action) = leader_chord(code, self.modifiers) {
-                if action == PaneAction::Close {
-                    self.request_close_pane();
-                } else {
-                    self.apply_pane_action(action);
-                }
-            }
-            // Consume the key either way (a non-chord just cancels the leader).
-            return true;
-        }
-        // Arm the leader when its exact chord is pressed.
-        let mask = ModifiersState::CONTROL
-            | ModifiersState::ALT
-            | ModifiersState::SHIFT
-            | ModifiersState::SUPER;
-        if let Some((mods, key)) = parse_leader(&self.config.panes.leader) {
-            if code == key && (self.modifiers & mask) == mods {
-                self.leader_pending = true;
-                return true;
-            }
-        }
-        false
-    }
-
     /// The global Session shortcuts (design §11): `⌥⌘←` rewind one step, `⌥⌘→` fast-forward,
     /// `⌥⌘0` return to now. These work whether or not the timeline dock is open; a rewind /
     /// fast-forward opens it so the rewound state is visible. Returns whether a chord fired.
@@ -5069,11 +5000,9 @@ impl App {
         self.request_redraw();
     }
 
-    /// The Cmd/Super chords, matched on the logical character: `⌘K` palette, `⌘Q` quit,
-    /// `⌘B`/`⇧⌘B` sidebar toggle/mode, `⇧⌘G` git dock, `⇧⌘H` timeline, `⇧⌘P` pin,
-    /// `⌘,` settings. Returns `true` when a chord fired (the caller then stops routing the key).
-    /// Copy/paste is not here - its modifier differs per platform, so it routes through
-    /// [`clipboard_action`].
+    /// Run the Cmd/Super chord [`super_chord`] decodes from the logical character. Returns
+    /// `true` when a chord fired (the caller then stops routing the key). Copy/paste is not
+    /// here - its modifier differs per platform, so it routes through [`clipboard_action`].
     fn on_super_chord(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) -> bool {
         if !self.modifiers.super_key() {
             return false;
@@ -5081,44 +5010,34 @@ impl App {
         let Key::Character(ch) = key_event.logical_key.as_ref() else {
             return false;
         };
-        let shift = self.modifiers.shift_key();
-        if ch.eq_ignore_ascii_case("k") {
-            self.open_palette();
-        } else if ch.eq_ignore_ascii_case("q") {
-            event_loop.exit();
-        } else if ch.eq_ignore_ascii_case("b") {
-            if shift {
-                self.cycle_sidebar_mode();
-            } else {
-                self.toggle_sidebar();
-            }
-        } else if shift && ch.eq_ignore_ascii_case("g") {
-            self.toggle_git_dock();
-        } else if shift && ch.eq_ignore_ascii_case("h") {
-            self.toggle_timeline();
-        } else if shift && ch.eq_ignore_ascii_case("p") {
-            self.toggle_pin();
-        } else if shift && ch.eq_ignore_ascii_case("n") {
-            self.new_group();
-        } else if shift && ch.eq_ignore_ascii_case("t") {
-            self.reopen_closed_tab();
-        } else if ch == "," {
-            self.open_settings();
-        } else if ch == "/" {
-            self.cheatsheet_open = !self.cheatsheet_open;
-            self.request_redraw();
-        } else if ch.eq_ignore_ascii_case("f") {
-            self.open_find();
-        } else if ch.eq_ignore_ascii_case("l") {
-            self.clear_focused_scrollback();
-        } else if ch == "=" || ch == "+" {
-            self.adjust_font_size(self.config.appearance.font_size.saturating_add(1));
-        } else if ch == "-" || ch == "_" {
-            self.adjust_font_size(self.config.appearance.font_size.saturating_sub(1));
-        } else if ch == "0" {
-            self.adjust_font_size(DEFAULT_FONT_SIZE);
-        } else {
+        let Some(chord) = super_chord(ch, self.modifiers.shift_key()) else {
             return false;
+        };
+        match chord {
+            SuperChord::OpenPane => self.apply_pane_action(PaneAction::Open),
+            SuperChord::Palette => self.open_palette(),
+            SuperChord::Quit => event_loop.exit(),
+            SuperChord::ToggleSidebar => self.toggle_sidebar(),
+            SuperChord::CycleSidebar => self.cycle_sidebar_mode(),
+            SuperChord::GitDock => self.toggle_git_dock(),
+            SuperChord::Timeline => self.toggle_timeline(),
+            SuperChord::Pin => self.toggle_pin(),
+            SuperChord::NewGroup => self.new_group(),
+            SuperChord::ReopenTab => self.reopen_closed_tab(),
+            SuperChord::Settings => self.open_settings(),
+            SuperChord::Cheatsheet => {
+                self.cheatsheet_open = !self.cheatsheet_open;
+                self.request_redraw();
+            }
+            SuperChord::Find => self.open_find(),
+            SuperChord::ClearScrollback => self.clear_focused_scrollback(),
+            SuperChord::FontLarger => {
+                self.adjust_font_size(self.config.appearance.font_size.saturating_add(1));
+            }
+            SuperChord::FontSmaller => {
+                self.adjust_font_size(self.config.appearance.font_size.saturating_sub(1));
+            }
+            SuperChord::FontReset => self.adjust_font_size(DEFAULT_FONT_SIZE),
         }
         true
     }
@@ -5262,11 +5181,6 @@ impl App {
         if self.on_dictation_shortcut(key_event) {
             return;
         }
-        // The tmux-style pane leader (`[panes] leader`): arm it, or apply the pending chord.
-        // Checked before terminal input so the leader key doesn't reach the shell.
-        if self.on_leader(key_event) {
-            return;
-        }
         // Tab management (⌘T new, ⌘W close, ⌘1..9 go-to, ⌥⇧[ ] cycle). Matched on the
         // physical key so macOS Option-glyph remapping doesn't interfere.
         if let PhysicalKey::Code(code) = key_event.physical_key {
@@ -5286,13 +5200,13 @@ impl App {
         if self.on_clipboard_chord(&key_event.logical_key) {
             return;
         }
-        // Platform combos (Cmd/Super + K/Q/B/L, font size, and the ⇧-modified dock/pin
+        // Platform combos (Cmd/Super + K/P/Q/B/L, font size, and the ⇧-modified dock/pin
         // chords). The terminal owns every other key - Ctrl+C etc. still reach the shell.
         if self.on_super_chord(event_loop, key_event) {
             return;
         }
-        // Pane control (the `⌥` leader chords). Matched on the physical key so macOS
-        // Option-key glyph remapping does not get in the way.
+        // Pane control (the `⌥` chords). Matched on the physical key so macOS Option-key glyph
+        // remapping does not get in the way.
         if let PhysicalKey::Code(code) = key_event.physical_key {
             if let Some(action) = pane_action(code, self.modifiers) {
                 // A pane close routes through the confirm gate (design §12); other pane
@@ -6401,14 +6315,9 @@ impl App {
     }
 }
 
-/// Decode a physical key + modifiers into a pane action. Pane control uses `Alt`
-/// (`⌥`) as its leader-less modifier, matching the design guide's shown chords
-/// (`⌥|` split right, `⌥-` split down, `⌥Z` zoom, `⌥1..⌥8` focus by number), plus
-/// `⌥h/j/k/l` directional focus, `⌥⇧h/j/k/l` resize, `⌥w` close, and `⌥=` even out.
-/// Returns `None` for anything else (which then reaches the shell).
-/// Parse a `[panes] leader` spec like `ctrl+a` into `(modifiers, key)`, or `None` when it names
-/// no key. Modifiers: `ctrl`/`control`, `alt`/`opt`/`option`, `shift`, `cmd`/`super`/`meta`.
-fn parse_leader(spec: &str) -> Option<(ModifiersState, KeyCode)> {
+/// Parse a chord spec like `ctrl+shift+d` into `(modifiers, key)`, or `None` when it names no
+/// key. Modifiers: `ctrl`/`control`, `alt`/`opt`/`option`, `shift`, `cmd`/`super`/`meta`.
+fn parse_chord(spec: &str) -> Option<(ModifiersState, KeyCode)> {
     let mut mods = ModifiersState::empty();
     let mut key = None;
     for part in spec.split('+') {
@@ -6460,58 +6369,69 @@ fn letter_key_code(s: &str) -> Option<KeyCode> {
     })
 }
 
-/// The pane action for a leader chord (after the leader prefix, §11): `hjkl` focus, `⇧hjkl`
-/// resize, `z` zoom, `x` close, `|` (Backslash) / `-` split, else `None`.
-fn leader_chord(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
-    let shift = mods.shift_key();
-    Some(match code {
-        KeyCode::KeyH if shift => PaneAction::Resize(Dir::Left),
-        KeyCode::KeyJ if shift => PaneAction::Resize(Dir::Down),
-        KeyCode::KeyK if shift => PaneAction::Resize(Dir::Up),
-        KeyCode::KeyL if shift => PaneAction::Resize(Dir::Right),
-        KeyCode::KeyH => PaneAction::Focus(Dir::Left),
-        KeyCode::KeyJ => PaneAction::Focus(Dir::Down),
-        KeyCode::KeyK => PaneAction::Focus(Dir::Up),
-        KeyCode::KeyL => PaneAction::Focus(Dir::Right),
-        KeyCode::KeyZ => PaneAction::Zoom,
-        KeyCode::KeyX => PaneAction::Close,
-        KeyCode::Backslash => PaneAction::Split(Dir::Right),
-        KeyCode::Minus => PaneAction::Split(Dir::Down),
+/// What a Cmd/Super chord does (design §11).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SuperChord {
+    OpenPane,
+    Palette,
+    Quit,
+    ToggleSidebar,
+    CycleSidebar,
+    GitDock,
+    Timeline,
+    Pin,
+    NewGroup,
+    ReopenTab,
+    Settings,
+    Cheatsheet,
+    Find,
+    ClearScrollback,
+    FontLarger,
+    FontSmaller,
+    FontReset,
+}
+
+/// Decode a `⌘` chord from its logical character and whether `⇧` is held: `⌘K` new pane,
+/// `⌘P` palette, `⌘Q` quit, `⌘B`/`⇧⌘B` sidebar toggle/mode, `⇧⌘G` git dock, `⇧⌘H` timeline,
+/// `⇧⌘P` pin, `⇧⌘N` new group, `⇧⌘T` reopen tab, `⌘,` settings, `⌘/` cheatsheet, `⌘F` find,
+/// `⌘L` clear scrollback, and `⌘=`/`⌘-`/`⌘0` font size. `None` for anything else.
+fn super_chord(ch: &str, shift: bool) -> Option<SuperChord> {
+    let is = |key: &str| ch.eq_ignore_ascii_case(key);
+    Some(match ch {
+        _ if !shift && is("k") => SuperChord::OpenPane,
+        _ if !shift && is("p") => SuperChord::Palette,
+        _ if is("q") => SuperChord::Quit,
+        _ if is("b") && shift => SuperChord::CycleSidebar,
+        _ if is("b") => SuperChord::ToggleSidebar,
+        _ if shift && is("g") => SuperChord::GitDock,
+        _ if shift && is("h") => SuperChord::Timeline,
+        _ if shift && is("p") => SuperChord::Pin,
+        _ if shift && is("n") => SuperChord::NewGroup,
+        _ if shift && is("t") => SuperChord::ReopenTab,
+        "," => SuperChord::Settings,
+        "/" => SuperChord::Cheatsheet,
+        _ if is("f") => SuperChord::Find,
+        _ if is("l") => SuperChord::ClearScrollback,
+        "=" | "+" => SuperChord::FontLarger,
+        "-" | "_" => SuperChord::FontSmaller,
+        "0" => SuperChord::FontReset,
         _ => return None,
     })
 }
 
+/// Decode a physical key + modifiers into a pane action: plain `⌥` (no `⇧`/`⌃`/`⌘`) with
+/// `h/j/k/l` (or `↑/↓`) directional focus, `1..9` focus by number, `Z` zoom, and `W` close.
+/// Opening a pane is `⌘K` alone (see `on_super_chord`). Returns `None` for anything else
+/// (which then reaches the shell).
 fn pane_action(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
-    // `⌥` chords only; `⌥⌘arrows` are the global session (timeline) shortcuts, handled first.
-    // Plain ⌥←/→ are intentionally left to the terminal for word-wise cursor movement.
-    if !mods.alt_key() || mods.super_key() {
+    // `⌥⌘arrows` are the global session (timeline) shortcuts, handled first. Plain ⌥←/→ are
+    // intentionally left to the terminal for word-wise cursor movement.
+    if mods != ModifiersState::ALT {
         return None;
     }
-    let shift = mods.shift_key();
-    let ctrl = mods.control_key();
     Some(match code {
-        KeyCode::Backslash => PaneAction::Split(Dir::Right),
-        KeyCode::Minus => PaneAction::Split(Dir::Down),
-        KeyCode::Equal => PaneAction::EvenOut,
         KeyCode::KeyZ => PaneAction::Zoom,
         KeyCode::KeyW => PaneAction::Close,
-        KeyCode::Space => PaneAction::CycleLayout,
-        // Modified arrows retain pane resize/swap. Plain horizontal Option-arrows belong to the
-        // terminal's standard word-wise cursor shortcuts; HJKL (or the leader) moves pane focus.
-        KeyCode::ArrowLeft if ctrl => PaneAction::Resize(Dir::Left),
-        KeyCode::ArrowDown if ctrl => PaneAction::Resize(Dir::Down),
-        KeyCode::ArrowUp if ctrl => PaneAction::Resize(Dir::Up),
-        KeyCode::ArrowRight if ctrl => PaneAction::Resize(Dir::Right),
-        KeyCode::ArrowLeft if shift => PaneAction::Swap(Dir::Left),
-        KeyCode::ArrowDown if shift => PaneAction::Swap(Dir::Down),
-        KeyCode::ArrowUp if shift => PaneAction::Swap(Dir::Up),
-        KeyCode::ArrowRight if shift => PaneAction::Swap(Dir::Right),
-        // `⇧hjkl` resize (the vim aliases, also the leader chords); plain `hjkl` moves focus.
-        // Vertical Option-arrows remain focus aliases since word-wise movement is horizontal.
-        KeyCode::KeyH if shift => PaneAction::Resize(Dir::Left),
-        KeyCode::KeyJ if shift => PaneAction::Resize(Dir::Down),
-        KeyCode::KeyK if shift => PaneAction::Resize(Dir::Up),
-        KeyCode::KeyL if shift => PaneAction::Resize(Dir::Right),
         KeyCode::KeyH => PaneAction::Focus(Dir::Left),
         KeyCode::ArrowDown | KeyCode::KeyJ => PaneAction::Focus(Dir::Down),
         KeyCode::ArrowUp | KeyCode::KeyK => PaneAction::Focus(Dir::Up),
@@ -6524,6 +6444,7 @@ fn pane_action(code: KeyCode, mods: ModifiersState) -> Option<PaneAction> {
         KeyCode::Digit6 => PaneAction::FocusIndex(5),
         KeyCode::Digit7 => PaneAction::FocusIndex(6),
         KeyCode::Digit8 => PaneAction::FocusIndex(7),
+        KeyCode::Digit9 => PaneAction::FocusIndex(8),
         _ => return None,
     })
 }
@@ -6687,12 +6608,12 @@ fn overlay_panel_top(rest_y: f32, offset: f32, max_y: f32) -> f32 {
     (rest_y + offset).min(max_y)
 }
 
-/// Whether `key_event` (with `mods`) is a palette-dismiss gesture - `Esc` or `⌘K`. A repeat
+/// Whether `key_event` (with `mods`) is a palette-dismiss gesture - `Esc` or `⌘P`. A repeat
 /// of one that only settled the fading palette is swallowed rather than routed to the shell.
 fn is_palette_dismiss(key_event: &KeyEvent, mods: ModifiersState) -> bool {
     match key_event.logical_key.as_ref() {
         Key::Named(NamedKey::Escape) => true,
-        Key::Character(c) => mods.super_key() && c.eq_ignore_ascii_case("k"),
+        Key::Character(c) => mods.super_key() && c.eq_ignore_ascii_case("p"),
         _ => false,
     }
 }
@@ -7122,11 +7043,11 @@ mod tests {
     use super::{
         changed_since, clipboard_action, csi_edit, cursor_key, cursor_navigation_shortcut,
         cycle_index, dim, dirty_stats, edit_text, editor_filetype, editor_mode, enter_bytes,
-        index_after_close, interval_ms, kitty_csi, kitty_modifier_code, leader_chord, order,
-        overlay_panel_top, overlay_rise_offset, pane_action, pane_dims, panic_message,
-        parse_leader, pointer_cell_in, poll_wait, process_name, resolve_cell, selection_cells,
-        selection_text, shell_escape_path, tab_action, xterm_modifier_code, ClipboardAction,
-        Duration, Instant, PaneAction, Selection, TabAction,
+        index_after_close, interval_ms, kitty_csi, kitty_modifier_code, order, overlay_panel_top,
+        overlay_rise_offset, pane_action, pane_dims, panic_message, parse_chord, pointer_cell_in,
+        poll_wait, process_name, resolve_cell, selection_cells, selection_text, shell_escape_path,
+        super_chord, tab_action, xterm_modifier_code, ClipboardAction, Duration, Instant,
+        PaneAction, Selection, SuperChord, TabAction,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -7685,17 +7606,20 @@ mod tests {
     }
 
     #[test]
+    fn cmd_k_opens_a_pane_and_cmd_p_opens_the_palette() {
+        assert_eq!(super_chord("k", false), Some(SuperChord::OpenPane));
+        assert_eq!(super_chord("K", false), Some(SuperChord::OpenPane));
+        assert_eq!(super_chord("p", false), Some(SuperChord::Palette));
+        assert_eq!(super_chord("P", true), Some(SuperChord::Pin));
+        assert_eq!(super_chord("K", true), None);
+        assert_eq!(super_chord("B", true), Some(SuperChord::CycleSidebar));
+        assert_eq!(super_chord("b", false), Some(SuperChord::ToggleSidebar));
+        assert_eq!(super_chord("x", false), None);
+    }
+
+    #[test]
     fn alt_chords_decode_to_pane_actions() {
         let alt = ModifiersState::ALT;
-        let alt_shift = ModifiersState::ALT | ModifiersState::SHIFT;
-        assert_eq!(
-            pane_action(KeyCode::Backslash, alt),
-            Some(PaneAction::Split(Dir::Right))
-        );
-        assert_eq!(
-            pane_action(KeyCode::Minus, alt),
-            Some(PaneAction::Split(Dir::Down))
-        );
         assert_eq!(pane_action(KeyCode::KeyZ, alt), Some(PaneAction::Zoom));
         assert_eq!(pane_action(KeyCode::KeyW, alt), Some(PaneAction::Close));
         assert_eq!(
@@ -7703,80 +7627,59 @@ mod tests {
             Some(PaneAction::Focus(Dir::Right))
         );
         assert_eq!(
-            pane_action(KeyCode::KeyL, alt_shift),
-            Some(PaneAction::Resize(Dir::Right))
-        );
-        assert_eq!(
             pane_action(KeyCode::Digit3, alt),
             Some(PaneAction::FocusIndex(2))
+        );
+        assert_eq!(
+            pane_action(KeyCode::Digit9, alt),
+            Some(PaneAction::FocusIndex(8))
         );
     }
 
     #[test]
-    fn default_pane_leader_leaves_terminal_ctrl_keys_alone() {
-        let leader = parse_leader(&skelly_config::Config::default().panes.leader);
-        // Ctrl+A must reach LazyVim/readline; Ctrl+D must remain unchanged too.
-        for key in [KeyCode::KeyA, KeyCode::KeyD] {
-            assert_ne!(leader, Some((ModifiersState::CONTROL, key)));
-            assert_eq!(pane_action(key, ModifiersState::CONTROL), None);
+    fn retired_split_resize_and_swap_chords_reach_the_shell() {
+        let alt = ModifiersState::ALT;
+        let alt_shift = alt | ModifiersState::SHIFT;
+        let ctrl_alt = alt | ModifiersState::CONTROL;
+        for (code, mods) in [
+            (KeyCode::Backslash, alt),
+            (KeyCode::Minus, alt),
+            (KeyCode::Equal, alt),
+            (KeyCode::Space, alt),
+            (KeyCode::KeyL, alt_shift),
+            (KeyCode::ArrowRight, ctrl_alt),
+            (KeyCode::ArrowUp, alt_shift),
+        ] {
+            assert_eq!(pane_action(code, mods), None, "{code:?} {mods:?}");
         }
     }
 
     #[test]
-    fn leader_parses_and_decodes_pane_chords() {
+    fn chord_specs_parse_modifiers_and_a_letter() {
         assert_eq!(
-            parse_leader(&skelly_config::Config::default().panes.leader),
-            Some((ModifiersState::CONTROL | ModifiersState::ALT, KeyCode::KeyA))
-        );
-        // Explicit legacy prefixes are still supported.
-        assert_eq!(
-            parse_leader("ctrl+a"),
+            parse_chord("ctrl+a"),
             Some((ModifiersState::CONTROL, KeyCode::KeyA))
         );
         assert_eq!(
-            parse_leader("Ctrl + B"),
-            Some((ModifiersState::CONTROL, KeyCode::KeyB))
+            parse_chord("Ctrl + Shift + D"),
+            Some((
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+                KeyCode::KeyD
+            ))
         );
-        assert_eq!(parse_leader("ctrl+"), None, "no key named");
-        // Leader chords: hjkl focus, ⇧hjkl resize, z/x/|/- (Backslash/Minus).
-        let none = ModifiersState::empty();
-        let shift = ModifiersState::SHIFT;
-        assert_eq!(
-            leader_chord(KeyCode::KeyL, none),
-            Some(PaneAction::Focus(Dir::Right))
-        );
-        assert_eq!(
-            leader_chord(KeyCode::KeyK, shift),
-            Some(PaneAction::Resize(Dir::Up))
-        );
-        assert_eq!(leader_chord(KeyCode::KeyX, none), Some(PaneAction::Close));
-        assert_eq!(
-            leader_chord(KeyCode::Backslash, none),
-            Some(PaneAction::Split(Dir::Right))
-        );
-        assert_eq!(leader_chord(KeyCode::KeyQ, none), None);
+        assert_eq!(parse_chord("ctrl+"), None, "no key named");
     }
 
     #[test]
     fn option_cursor_shortcuts_do_not_conflict_with_pane_nav() {
-        // Plain horizontal Option-arrows belong to terminal word navigation. Modified arrows still
-        // resize/swap panes, and vertical arrows remain convenient focus aliases.
+        // Plain horizontal Option-arrows belong to terminal word navigation; vertical arrows
+        // remain convenient focus aliases.
         let alt = ModifiersState::ALT;
-        let ctrl_alt = ModifiersState::ALT | ModifiersState::CONTROL;
-        let alt_shift = ModifiersState::ALT | ModifiersState::SHIFT;
         assert_eq!(pane_action(KeyCode::ArrowLeft, alt), None);
         assert_eq!(pane_action(KeyCode::ArrowRight, alt), None);
         assert_eq!(
             pane_action(KeyCode::ArrowDown, alt),
             Some(PaneAction::Focus(Dir::Down))
-        );
-        assert_eq!(
-            pane_action(KeyCode::ArrowRight, ctrl_alt),
-            Some(PaneAction::Resize(Dir::Right))
-        );
-        assert_eq!(
-            pane_action(KeyCode::ArrowUp, alt_shift),
-            Some(PaneAction::Swap(Dir::Up))
         );
         // Arrows without Alt are the shell's own (escape sequences), not a pane action.
         assert_eq!(
@@ -7787,9 +7690,12 @@ mod tests {
 
     #[test]
     fn keys_without_alt_are_not_pane_actions() {
-        // Without the Alt leader the key belongs to the shell.
+        // Without Alt the key belongs to the shell - Ctrl+A/Ctrl+D reach readline and LazyVim.
         assert_eq!(pane_action(KeyCode::KeyL, ModifiersState::empty()), None);
         assert_eq!(pane_action(KeyCode::KeyA, ModifiersState::ALT), None);
+        for key in [KeyCode::KeyA, KeyCode::KeyD] {
+            assert_eq!(pane_action(key, ModifiersState::CONTROL), None);
+        }
     }
 
     // ----- clipboard ----------------------------------------------------------

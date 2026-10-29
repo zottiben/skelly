@@ -1,6 +1,11 @@
 # 0005. Pane-tree model as a leaf crate (`skelly-pane`)
 
-- Status: Accepted
+> **Amended in part by [ADR-0010](0010-fibonacci-spiral-panes.md) (2026-10-29).** The leaf
+> crate boundary stands. What 0010 replaces: the binary split tree, resize, and the
+> 8-pane cap - panes now tile as a clockwise Fibonacci spiral, opened with `⌘K`, with no
+> cap.
+
+- Status: Accepted (layout model amended by ADR-0010)
 - Date: 2026-07-11
 - Deciders: maintainers
 - Related: AGENTS.md Hard rule 4 (docks/overlays are layers; <=8 panes); the

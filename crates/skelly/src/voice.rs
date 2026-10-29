@@ -326,7 +326,7 @@ impl App {
 
     pub(crate) fn on_dictation_shortcut(&mut self, event: &winit::event::KeyEvent) -> bool {
         let matches = |chord: &str| {
-            crate::parse_leader(chord).is_some_and(|(mods, code)| {
+            crate::parse_chord(chord).is_some_and(|(mods, code)| {
                 mods == self.modifiers
                     && event.physical_key == winit::keyboard::PhysicalKey::Code(code)
             })

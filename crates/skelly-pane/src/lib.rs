@@ -1,26 +1,22 @@
-//! `skelly-pane` - the pane tree: a tab's tiling layout of terminal panes.
+//! `skelly-pane` - a tab's panes and their Fibonacci-spiral tiling.
 //!
 //! This is pure geometry + state logic with no UI, GPU, or terminal dependency -
 //! a leaf crate the `skelly` binary drives, mirroring `skelly-config`. The binary
 //! owns the *wiring* (mapping a [`PaneId`] to a live terminal, rendering each pane at
 //! its computed rectangle, and binding keys to these operations); this crate owns the
-//! *model*: how splits nest, how focus moves, and how the viewport tiles.
+//! *model*: which panes exist, which one is focused, and how they tile the viewport.
 //!
-//! A tab holds at most [`MAX_PANES`] panes (AGENTS Hard rule 4). Panes tile by
-//! nesting binary splits, so splits need not be even; each split carries a `ratio` a
-//! divider drag adjusts. Exactly one pane is always focused, and the focused pane can
-//! be zoomed to fill the viewport.
+//! Panes form an ordered spiral with no cap on their number. [`PaneTree::open`] appends
+//! a pane to the end of the spiral, and the layout follows from the order alone: each pane
+//! cuts its share off the space the earlier panes left, turning clockwise (left, top,
+//! right, bottom, left, ...), and with `k` panes still to place the next one takes
+//! `F(k) / F(k+1)` of that space (`F` being the Fibonacci sequence). On a viewport sized
+//! `F(n+1) x F(n)` the `n` panes are exactly the squares of the Fibonacci spiral. Exactly
+//! one pane is always focused, and the focused pane can be zoomed to fill the viewport.
 
 #![doc(test(attr(deny(warnings))))]
 
 use serde::{Deserialize, Serialize};
-
-/// The most panes a single tab may hold (AGENTS Hard rule 4).
-pub const MAX_PANES: usize = 8;
-
-/// The smallest fraction a split's first child may shrink to, so resizing can never
-/// collapse a pane to nothing.
-const MIN_RATIO: f32 = 0.05;
 
 /// A stable pane identifier. Allocated monotonically and never reused within a tree's
 /// lifetime, so an id the binary maps to a live terminal stays valid until that pane
@@ -28,8 +24,7 @@ const MIN_RATIO: f32 = 0.05;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct PaneId(u32);
 
-/// A direction - the argument to [`PaneTree::split`], [`PaneTree::focus`], and
-/// [`PaneTree::resize`].
+/// A direction - the argument to [`PaneTree::focus`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Dir {
     /// Left / west.
@@ -42,28 +37,9 @@ pub enum Dir {
     Down,
 }
 
-impl Dir {
-    /// The split axis this direction implies.
-    fn axis(self) -> Axis {
-        match self {
-            Dir::Left | Dir::Right => Axis::Row,
-            Dir::Up | Dir::Down => Axis::Col,
-        }
-    }
-
-    /// Whether a split in this direction places the new pane after (to the right of /
-    /// below) the pane being split.
-    fn new_pane_is_second(self) -> bool {
-        matches!(self, Dir::Right | Dir::Down)
-    }
-}
-
-/// How a split arranges its two children.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Axis {
-    /// Side by side, left then right (a vertical divider) - a `Left`/`Right` split.
     Row,
-    /// Stacked, top then bottom (a horizontal divider) - an `Up`/`Down` split.
     Col,
 }
 
@@ -120,267 +96,25 @@ impl Rect {
     }
 }
 
-/// A node in the pane tree: either a single pane (leaf) or a split of two subtrees.
-#[derive(Debug)]
-enum Node {
-    Leaf(PaneId),
-    Split {
-        axis: Axis,
-        ratio: f32,
-        first: Box<Node>,
-        second: Box<Node>,
-    },
-}
-
-impl Node {
-    /// The left-/top-most leaf of this subtree.
-    fn first_leaf(&self) -> PaneId {
-        match self {
-            Node::Leaf(p) => *p,
-            Node::Split { first, .. } => first.first_leaf(),
-        }
-    }
-
-    fn collect_leaves(&self, out: &mut Vec<PaneId>) {
-        match self {
-            Node::Leaf(p) => out.push(*p),
-            Node::Split { first, second, .. } => {
-                first.collect_leaves(out);
-                second.collect_leaves(out);
-            }
-        }
-    }
-
-    fn contains(&self, id: PaneId) -> bool {
-        match self {
-            Node::Leaf(p) => *p == id,
-            Node::Split { first, second, .. } => first.contains(id) || second.contains(id),
-        }
-    }
-
-    /// Exchange the leaves holding `a` and `b` (swapping their positions in the tiling). Each
-    /// id occupies exactly one leaf, so a single traversal suffices.
-    fn swap_leaves(&mut self, a: PaneId, b: PaneId) {
-        match self {
-            Node::Leaf(p) => {
-                if *p == a {
-                    *p = b;
-                } else if *p == b {
-                    *p = a;
-                }
-            }
-            Node::Split { first, second, .. } => {
-                first.swap_leaves(a, b);
-                second.swap_leaves(a, b);
-            }
-        }
-    }
-
-    /// Replace the leaf `target` with `replacement` (taken on the first match).
-    /// Returns whether the target was found.
-    fn replace_leaf(&mut self, target: PaneId, replacement: &mut Option<Node>) -> bool {
-        match self {
-            Node::Leaf(p) => {
-                if *p == target {
-                    *self = replacement.take().expect("replacement taken exactly once");
-                    true
-                } else {
-                    false
-                }
-            }
-            Node::Split { first, second, .. } => {
-                first.replace_leaf(target, replacement) || second.replace_leaf(target, replacement)
-            }
-        }
-    }
-
-    /// Remove the leaf `target`, collapsing its parent split into `target`'s sibling.
-    /// Returns a leaf of the promoted sibling (a sensible new focus), or `None` if
-    /// `target` isn't directly under a split in this subtree.
-    fn remove_leaf(&mut self, target: PaneId) -> Option<PaneId> {
-        let Node::Split { first, second, .. } = self else {
-            return None;
-        };
-        if matches!(&**first, Node::Leaf(p) if *p == target) {
-            let sibling = std::mem::replace(&mut **second, Node::Leaf(target));
-            let focus = sibling.first_leaf();
-            *self = sibling;
-            return Some(focus);
-        }
-        if matches!(&**second, Node::Leaf(p) if *p == target) {
-            let sibling = std::mem::replace(&mut **first, Node::Leaf(target));
-            let focus = sibling.first_leaf();
-            *self = sibling;
-            return Some(focus);
-        }
-        first
-            .remove_leaf(target)
-            .or_else(|| second.remove_leaf(target))
-    }
-
-    /// Nudge the ratio of the deepest split of `axis` on the path to `target` by
-    /// `delta` (clamped). Returns whether such an ancestor existed.
-    fn resize_ancestor(&mut self, target: PaneId, axis: Axis, delta: f32) -> bool {
-        let Node::Split {
-            axis: a,
-            ratio,
-            first,
-            second,
-        } = self
-        else {
-            return false;
-        };
-        let a = *a;
-        let child = if first.contains(target) {
-            first.as_mut()
-        } else if second.contains(target) {
-            second.as_mut()
-        } else {
-            return false;
-        };
-        // Recurse first so the *deepest* (nearest) matching divider wins.
-        if child.resize_ancestor(target, axis, delta) {
-            return true;
-        }
-        if a == axis {
-            *ratio = (*ratio + delta).clamp(MIN_RATIO, 1.0 - MIN_RATIO);
-            return true;
-        }
-        false
-    }
-
-    fn even_out(&mut self) {
-        if let Node::Split {
-            ratio,
-            first,
-            second,
-            ..
-        } = self
-        {
-            *ratio = 0.5;
-            first.even_out();
-            second.even_out();
-        }
-    }
-
-    fn layout_into(&self, rect: Rect, out: &mut Vec<(PaneId, Rect)>) {
-        match self {
-            Node::Leaf(p) => out.push((*p, rect)),
-            Node::Split {
-                axis,
-                ratio,
-                first,
-                second,
-            } => {
-                let (r1, r2) = rect.split(*axis, *ratio);
-                first.layout_into(r1, out);
-                second.layout_into(r2, out);
-            }
-        }
-    }
-
-    /// Capture the structure as a serializable [`LayoutNode`], dropping the concrete
-    /// [`PaneId`]s (rebuilt fresh on restore). Leaves are emitted in `panes()` order.
-    fn to_layout(&self) -> LayoutNode {
-        match self {
-            Node::Leaf(_) => LayoutNode::Leaf,
-            Node::Split {
-                axis,
-                ratio,
-                first,
-                second,
-            } => LayoutNode::Split {
-                row: matches!(axis, Axis::Row),
-                ratio: *ratio,
-                first: Box::new(first.to_layout()),
-                second: Box::new(second.to_layout()),
-            },
-        }
-    }
-}
-
-/// A serializable node in a [`PaneLayout`]: the tiling structure without pane ids.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum LayoutNode {
-    Leaf,
-    Split {
-        /// Side-by-side ([`Axis::Row`]) when true, stacked ([`Axis::Col`]) when false.
-        row: bool,
-        ratio: f32,
-        first: Box<LayoutNode>,
-        second: Box<LayoutNode>,
-    },
-}
-
-impl LayoutNode {
-    fn leaf_count(&self) -> usize {
-        match self {
-            LayoutNode::Leaf => 1,
-            LayoutNode::Split { first, second, .. } => first.leaf_count() + second.leaf_count(),
-        }
-    }
-
-    /// Rebuild a [`Node`], assigning fresh sequential ids from `next` in `panes()`
-    /// (first-then-second) order, so a leaf's index matches the caller's per-leaf payload.
-    fn build(&self, next: &mut u32) -> Node {
-        match self {
-            LayoutNode::Leaf => {
-                let id = PaneId(*next);
-                *next += 1;
-                Node::Leaf(id)
-            }
-            LayoutNode::Split {
-                row,
-                ratio,
-                first,
-                second,
-            } => {
-                let first = Box::new(first.build(next));
-                let second = Box::new(second.build(next));
-                Node::Split {
-                    axis: if *row { Axis::Row } else { Axis::Col },
-                    ratio: ratio.clamp(MIN_RATIO, 1.0 - MIN_RATIO),
-                    first,
-                    second,
-                }
-            }
-        }
-    }
-}
-
-/// A serializable snapshot of a pane tree's tiling, for launch-time session restore
-/// (layout only - shells are never re-run). Captures the split structure, which leaf
-/// is focused, and the zoom state. The per-leaf payload (each pane's cwd) is the
-/// caller's concern: leaves serialize in `panes()` order, so the caller pairs them by
-/// index. Round-trips via [`PaneTree::to_layout`] / [`PaneTree::from_layout`].
+/// A serializable snapshot of a tab's panes for launch-time session restore (layout only -
+/// shells are never re-run): which pane is focused and whether it is zoomed. The spiral
+/// itself follows from the pane count, which the caller already records as its per-pane
+/// payload (one cwd per pane, in `panes()` order). Round-trips via [`PaneTree::to_layout`] /
+/// [`PaneTree::from_layout`].
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaneLayout {
-    root: LayoutNode,
-    /// The focused leaf's position in `panes()` order.
     focused: usize,
     zoomed: bool,
 }
 
-impl PaneLayout {
-    /// The number of panes (leaves) this layout describes, so the caller can pair per-leaf
-    /// payload (cwds) even before rebuilding the tree.
-    #[must_use]
-    pub fn pane_count(&self) -> usize {
-        self.root.leaf_count()
-    }
-}
-
-/// A tab's tiling tree of panes. Always holds at least one pane and exactly one
-/// focused pane.
+/// A tab's panes in spiral order. Always holds at least one pane and exactly one focused
+/// pane.
 #[derive(Debug)]
 pub struct PaneTree {
-    root: Node,
+    panes: Vec<PaneId>,
     focused: PaneId,
     zoomed: bool,
     next_id: u32,
-    /// Which preset [`cycle_layout`](Self::cycle_layout) last applied, so repeated presses walk
-    /// through the arrangements.
-    layout_preset: u8,
 }
 
 impl PaneTree {
@@ -389,26 +123,23 @@ impl PaneTree {
     pub fn new() -> Self {
         let root = PaneId(0);
         Self {
-            root: Node::Leaf(root),
+            panes: vec![root],
             focused: root,
             zoomed: false,
             next_id: 1,
-            layout_preset: 0,
         }
     }
 
-    /// The number of panes (leaves) - always `1..=MAX_PANES`.
+    /// The number of panes - always at least 1.
     #[must_use]
     pub fn count(&self) -> usize {
-        self.panes().len()
+        self.panes.len()
     }
 
-    /// Every pane id, in left-to-right, top-to-bottom tree order.
+    /// Every pane id, in spiral order (largest first, newest last).
     #[must_use]
     pub fn panes(&self) -> Vec<PaneId> {
-        let mut v = Vec::new();
-        self.root.collect_leaves(&mut v);
-        v
+        self.panes.clone()
     }
 
     /// The focused pane's id.
@@ -426,13 +157,13 @@ impl PaneTree {
     /// Whether `id` is a live pane in this tree.
     #[must_use]
     pub fn contains(&self, id: PaneId) -> bool {
-        self.root.contains(id)
+        self.panes.contains(&id)
     }
 
     /// Focus pane `id` directly (e.g. on a mouse click). Returns `false` without
     /// changing anything if `id` isn't a live pane. Cancels zoom.
     pub fn set_focus(&mut self, id: PaneId) -> bool {
-        if self.root.contains(id) {
+        if self.contains(id) {
             self.focused = id;
             self.zoomed = false;
             true
@@ -441,87 +172,53 @@ impl PaneTree {
         }
     }
 
-    /// Split the focused pane in `dir`, giving the new pane focus. Returns the new
-    /// pane's id, or `None` if the tab is already at [`MAX_PANES`]. Cancels zoom.
-    pub fn split(&mut self, dir: Dir) -> Option<PaneId> {
-        if self.count() >= MAX_PANES {
-            return None;
-        }
+    /// Open a new pane at the end of the spiral and focus it; the existing panes re-flow
+    /// to their Fibonacci shares. Returns the new pane's id. Cancels zoom.
+    pub fn open(&mut self) -> PaneId {
         let new = PaneId(self.next_id);
-        let old = Node::Leaf(self.focused);
-        let created = Node::Leaf(new);
-        let (first, second) = if dir.new_pane_is_second() {
-            (old, created)
-        } else {
-            (created, old)
-        };
-        let mut replacement = Some(Node::Split {
-            axis: dir.axis(),
-            ratio: 0.5,
-            first: Box::new(first),
-            second: Box::new(second),
-        });
-        let found = self.root.replace_leaf(self.focused, &mut replacement);
-        debug_assert!(found, "the focused pane must exist in the tree");
         self.next_id += 1;
+        self.panes.push(new);
         self.focused = new;
         self.zoomed = false;
-        Some(new)
+        new
     }
 
-    /// Close the focused pane, collapsing its split so the sibling takes the space and
-    /// receives focus. Returns `false` without changing anything if this is the last
-    /// pane - the caller decides what closing the final pane means (e.g. close the
-    /// tab). Cancels zoom.
+    /// Close the focused pane; the later panes move up the spiral to fill its place, and
+    /// focus goes to the pane that takes its slot (or the previous one when it was last).
+    /// Returns `false` without changing anything if this is the last pane - the caller
+    /// decides what closing the final pane means (e.g. close the tab). Cancels zoom.
     pub fn close(&mut self) -> bool {
-        if self.count() <= 1 {
+        if self.panes.len() <= 1 {
             return false;
         }
-        match self.root.remove_leaf(self.focused) {
-            Some(new_focus) => {
-                self.focused = new_focus;
-                self.zoomed = false;
-                true
-            }
-            None => false,
-        }
+        let Some(index) = self.panes.iter().position(|&p| p == self.focused) else {
+            return false;
+        };
+        self.panes.remove(index);
+        self.focused = self.panes[index.min(self.panes.len() - 1)];
+        self.zoomed = false;
+        true
     }
 
-    /// The nearest pane to the focused one in `dir` (by the tiled layout), or `None` at the
-    /// edge of the layout. Shared by [`focus`](Self::focus) and [`swap`](Self::swap).
-    fn neighbor(&self, dir: Dir) -> Option<PaneId> {
-        // Adjacency is defined by the tiled layout, even when zoomed.
+    /// Move focus to the nearest pane in `dir` (by the tiled layout). Returns whether focus
+    /// moved (it will not at the edge of the layout). Cancels zoom.
+    pub fn focus(&mut self, dir: Dir) -> bool {
         let layout = self.tiled_layout(Rect::new(0.0, 0.0, 1.0, 1.0));
-        let cur = layout
+        let Some(cur) = layout
             .iter()
             .find(|(id, _)| *id == self.focused)
-            .map(|&(_, r)| r)?;
-        layout
+            .map(|&(_, r)| r)
+        else {
+            return false;
+        };
+        let target = layout
             .iter()
             .filter(|(id, _)| *id != self.focused)
             .filter_map(|&(id, r)| candidate_score(cur, r, dir).map(|score| (score, id)))
             .min_by(|(a, _), (b, _)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(_, id)| id)
-    }
-
-    /// Move focus to the nearest pane in `dir`. Returns whether focus moved (it will
-    /// not at the edge of the layout). Cancels zoom.
-    pub fn focus(&mut self, dir: Dir) -> bool {
-        if let Some(id) = self.neighbor(dir) {
+            .map(|(_, id)| id);
+        if let Some(id) = target {
             self.focused = id;
-            self.zoomed = false;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Swap the focused pane with its nearest neighbor in `dir` (exchanging their positions in
-    /// the tiling); focus follows the moved pane. Returns whether a neighbor existed to swap
-    /// with (the guide's §11 "Swap pane", `⌥⇧arrows`). Cancels zoom.
-    pub fn swap(&mut self, dir: Dir) -> bool {
-        if let Some(neighbor) = self.neighbor(dir) {
-            self.root.swap_leaves(self.focused, neighbor);
             self.zoomed = false;
             true
         } else {
@@ -536,50 +233,9 @@ impl PaneTree {
         self.zoomed
     }
 
-    /// Nudge the divider immediately enclosing the focused pane along `dir` by `delta`
-    /// (a fraction of that split's extent, e.g. `0.05`) - the keyboard equivalent of
-    /// dragging that divider. Widens the pane on the `dir`-near side and narrows the
-    /// other. Returns whether a divider along `dir` existed to move. Cancels zoom.
-    pub fn resize(&mut self, dir: Dir, delta: f32) -> bool {
-        self.zoomed = false;
-        let signed = if dir.new_pane_is_second() {
-            delta
-        } else {
-            -delta
-        };
-        self.root.resize_ancestor(self.focused, dir.axis(), signed)
-    }
-
-    /// Reset every split to an even 50/50, undoing manual resizes. Cancels zoom.
-    pub fn even_out(&mut self) {
-        self.zoomed = false;
-        self.root.even_out();
-    }
-
-    /// Cycle the panes through preset layouts (the guide's §11 `⌥Space` "Cycle layout preset"):
-    /// even columns -> even rows -> main-vertical (one large pane left, the rest stacked right),
-    /// keeping the same panes (and the focused one). A no-op with fewer than two panes. Cancels
-    /// zoom. Returns whether the layout changed.
-    pub fn cycle_layout(&mut self) -> bool {
-        let mut ids = Vec::new();
-        self.root.collect_leaves(&mut ids);
-        if ids.len() < 2 {
-            return false;
-        }
-        // Apply the current preset, then advance - so the first press gives even columns.
-        self.root = match self.layout_preset {
-            0 => build_chain(Axis::Row, &ids),
-            1 => build_chain(Axis::Col, &ids),
-            _ => build_main_vertical(&ids),
-        };
-        self.layout_preset = (self.layout_preset + 1) % 3;
-        self.zoomed = false;
-        true
-    }
-
     /// Each visible pane's rectangle within `viewport`. When a pane is zoomed, only
     /// that pane is returned, filling the whole viewport; otherwise the panes tile
-    /// `viewport` exactly, with no gaps or overlaps.
+    /// `viewport` exactly as the Fibonacci spiral, with no gaps or overlaps.
     #[must_use]
     pub fn layout(&self, viewport: Rect) -> Vec<(PaneId, Rect)> {
         if self.zoomed {
@@ -589,51 +245,42 @@ impl PaneTree {
         }
     }
 
-    /// The full tiling, ignoring zoom - the geometry focus/adjacency is defined over.
     fn tiled_layout(&self, viewport: Rect) -> Vec<(PaneId, Rect)> {
-        let mut out = Vec::new();
-        self.root.layout_into(viewport, &mut out);
-        out
+        self.panes
+            .iter()
+            .copied()
+            .zip(spiral(viewport, self.panes.len()))
+            .collect()
     }
 
-    /// A serializable snapshot of this tree's tiling for session persistence (layout only).
-    /// Leaves are captured in `panes()` order; the caller records its per-leaf payload
-    /// (each pane's cwd) in that same order to pair them back on restore.
+    /// A serializable snapshot of the focus and zoom state for session persistence. The
+    /// caller records one payload entry per pane in `panes()` order alongside it, and passes
+    /// that count back to [`from_layout`](Self::from_layout).
     #[must_use]
     pub fn to_layout(&self) -> PaneLayout {
-        let leaves = self.panes();
-        let focused = leaves.iter().position(|&p| p == self.focused).unwrap_or(0);
         PaneLayout {
-            root: self.root.to_layout(),
-            focused,
+            focused: self
+                .panes
+                .iter()
+                .position(|&p| p == self.focused)
+                .unwrap_or(0),
             zoomed: self.zoomed,
         }
     }
 
-    /// Rebuild a tree from a persisted [`PaneLayout`], allocating fresh pane ids in
-    /// `panes()` order (so the nth leaf pairs with the nth saved payload). A layout with no
-    /// leaves or more than [`MAX_PANES`] (corrupt / out-of-contract state) falls back to a
-    /// fresh single-pane tree.
+    /// Rebuild a tree of `count` panes (at least one) from a persisted [`PaneLayout`],
+    /// allocating fresh ids in `panes()` order so the nth pane pairs with the nth saved
+    /// payload. An out-of-range focus falls back to the first pane.
     #[must_use]
-    pub fn from_layout(layout: &PaneLayout) -> Self {
-        let n = layout.root.leaf_count();
-        if n == 0 || n > MAX_PANES {
-            return Self::new();
-        }
-        let mut next = 0;
-        let root = layout.root.build(&mut next);
-        let mut leaves = Vec::new();
-        root.collect_leaves(&mut leaves);
-        let focused = leaves
-            .get(layout.focused)
-            .copied()
-            .unwrap_or_else(|| root.first_leaf());
+    pub fn from_layout(count: usize, layout: &PaneLayout) -> Self {
+        let panes: Vec<PaneId> = (0..).map(PaneId).take(count.max(1)).collect();
+        let focused = panes.get(layout.focused).copied().unwrap_or(panes[0]);
+        let next_id = panes.last().map_or(0, |p| p.0 + 1);
         Self {
-            root,
+            panes,
             focused,
             zoomed: layout.zoomed,
-            next_id: next,
-            layout_preset: 0,
+            next_id,
         }
     }
 }
@@ -644,39 +291,45 @@ impl Default for PaneTree {
     }
 }
 
-/// Build an evenly-split chain of `ids` along `axis` (each pane an equal share) - a left-deep
-/// tree of splits. `ids` must be non-empty.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "pane counts are tiny (<=8, the hard cap)"
-)]
-fn build_chain(axis: Axis, ids: &[PaneId]) -> Node {
-    match ids {
-        [] => unreachable!("build_chain needs at least one id"),
-        [id] => Node::Leaf(*id),
-        [id, rest @ ..] => Node::Split {
-            axis,
-            // The first pane takes `1/n`; the recursive remainder splits the rest evenly.
-            ratio: 1.0 / ids.len() as f32,
-            first: Box::new(Node::Leaf(*id)),
-            second: Box::new(build_chain(axis, rest)),
-        },
+/// Tile `viewport` with `n` panes as a clockwise Fibonacci spiral, in spiral order.
+fn spiral(viewport: Rect, n: usize) -> Vec<Rect> {
+    let mut out = Vec::with_capacity(n);
+    if n == 0 {
+        return out;
     }
+    let mut rest = viewport;
+    for (i, ratio) in fibonacci_shares(n).into_iter().enumerate() {
+        let (pane, remainder) = match i % 4 {
+            0 => rest.split(Axis::Row, ratio),
+            1 => rest.split(Axis::Col, ratio),
+            2 => {
+                let (remainder, pane) = rest.split(Axis::Row, 1.0 - ratio);
+                (pane, remainder)
+            }
+            _ => {
+                let (remainder, pane) = rest.split(Axis::Col, 1.0 - ratio);
+                (pane, remainder)
+            }
+        };
+        out.push(pane);
+        rest = remainder;
+    }
+    out.push(rest);
+    out
 }
 
-/// Build a "main-vertical" layout: the first pane fills the left half, the rest stack evenly in
-/// the right half. `ids` must be non-empty.
-fn build_main_vertical(ids: &[PaneId]) -> Node {
-    match ids {
-        [] => unreachable!("build_main_vertical needs at least one id"),
-        [id] => Node::Leaf(*id),
-        [id, rest @ ..] => Node::Split {
-            axis: Axis::Row,
-            ratio: 0.5,
-            first: Box::new(Node::Leaf(*id)),
-            second: Box::new(build_chain(Axis::Col, rest)),
-        },
+/// The share each of the first `n - 1` panes takes of the space left to it: with `k` panes
+/// still to place, `F(k) / F(k+1)`. Built from the innermost split (`k = 2`, an even half)
+/// outward via `F(k+1) / F(k+2) = 1 / (1 + F(k) / F(k+1))`, so no Fibonacci number overflows.
+fn fibonacci_shares(n: usize) -> Vec<f32> {
+    let mut shares = Vec::with_capacity(n.saturating_sub(1));
+    let mut share = 0.5_f32;
+    for _ in 1..n {
+        shares.push(share);
+        share = 1.0 / (1.0 + share);
     }
+    shares.reverse();
+    shares
 }
 
 /// Score `cand` as a focus target from `cur` moving `dir`: `Some((primary,
@@ -717,12 +370,14 @@ mod tests {
         w: 800.0,
         h: 600.0,
     };
-    /// A generous pixel tolerance: real gaps/overlaps are tens of pixels, while float
-    /// rounding over <=8 nested splits stays well under one.
     const EPS: f32 = 0.5;
 
     fn approx(a: f32, b: f32) -> bool {
         (a - b).abs() <= EPS
+    }
+
+    fn approx_rect(a: Rect, b: Rect) -> bool {
+        approx(a.x, b.x) && approx(a.y, b.y) && approx(a.w, b.w) && approx(a.h, b.h)
     }
 
     fn rect_of(tree: &PaneTree, id: PaneId) -> Rect {
@@ -731,6 +386,14 @@ mod tests {
             .find(|(p, _)| *p == id)
             .map(|(_, r)| r)
             .expect("pane should be in the layout")
+    }
+
+    fn tree_with(count: usize) -> PaneTree {
+        let mut t = PaneTree::new();
+        for _ in 1..count {
+            t.open();
+        }
+        t
     }
 
     #[test]
@@ -745,109 +408,117 @@ mod tests {
     }
 
     #[test]
-    fn layout_snapshot_round_trips_geometry_focus_and_zoom() {
-        // A non-trivial tree: split right, then split the new pane down, resize a divider.
-        let mut t = PaneTree::new();
-        t.split(Dir::Right);
-        t.split(Dir::Down);
-        t.resize(Dir::Right, 0.1);
-        let focused_rect = rect_of(&t, t.focused());
-        let before: Vec<Rect> = t.layout(VIEWPORT).into_iter().map(|(_, r)| r).collect();
-
-        let restored = PaneTree::from_layout(&t.to_layout());
-        let after: Vec<Rect> = restored
-            .layout(VIEWPORT)
-            .into_iter()
-            .map(|(_, r)| r)
-            .collect();
-
-        assert_eq!(restored.count(), t.count());
-        assert_eq!(before.len(), after.len());
-        for (b, a) in before.iter().zip(&after) {
-            assert!(approx(b.x, a.x) && approx(b.y, a.y) && approx(b.w, a.w) && approx(b.h, a.h));
+    fn fibonacci_shares_are_consecutive_fibonacci_ratios() {
+        let expected = [5.0 / 8.0, 3.0 / 5.0, 2.0 / 3.0, 1.0 / 2.0];
+        let shares = fibonacci_shares(5);
+        assert_eq!(shares.len(), expected.len());
+        for (share, want) in shares.iter().zip(expected) {
+            assert!((share - want).abs() < 1e-6, "{shares:?}");
         }
-        // The same pane keeps focus (identified by its rectangle, since ids are reallocated).
-        assert!(approx(
-            rect_of(&restored, restored.focused()).x,
-            focused_rect.x
-        ));
-        assert!(approx(
-            rect_of(&restored, restored.focused()).y,
-            focused_rect.y
-        ));
-
-        // Zoom is preserved too.
-        let mut z = PaneTree::new();
-        z.split(Dir::Right);
-        z.zoom_toggle();
-        assert!(PaneTree::from_layout(&z.to_layout()).is_zoomed());
+        assert!(fibonacci_shares(1).is_empty());
+        let golden = fibonacci_shares(60)[0];
+        assert!((golden - 0.618_034).abs() < 1e-5, "converges to 1/phi");
     }
 
     #[test]
-    fn from_layout_rejects_a_degenerate_leaf_count() {
-        // A single-leaf layout round-trips; an over-cap one falls back to a fresh tree.
-        let single = PaneTree::new().to_layout();
-        assert_eq!(PaneTree::from_layout(&single).count(), 1);
+    fn opening_panes_spirals_clockwise_left_top_right_bottom() {
+        let viewport = Rect::new(0.0, 0.0, 800.0, 500.0);
+        let t = tree_with(5);
+        let rects: Vec<Rect> = t.layout(viewport).into_iter().map(|(_, r)| r).collect();
+        let expected = [
+            Rect::new(0.0, 0.0, 500.0, 500.0),
+            Rect::new(500.0, 0.0, 300.0, 300.0),
+            Rect::new(600.0, 300.0, 200.0, 200.0),
+            Rect::new(500.0, 400.0, 100.0, 100.0),
+            Rect::new(500.0, 300.0, 100.0, 100.0),
+        ];
+        assert_eq!(rects.len(), expected.len());
+        for (got, want) in rects.iter().zip(expected) {
+            assert!(approx_rect(*got, want), "{got:?} != {want:?}");
+        }
     }
 
     #[test]
-    fn split_right_tiles_into_two_side_by_side_halves() {
+    fn a_fibonacci_shaped_viewport_tiles_into_the_fibonacci_squares() {
+        // fib[k] = F(k + 1): 1, 1, 2, 3, 5, 8, ...
+        let fib: Vec<f32> =
+            std::iter::successors(Some((1.0_f32, 1.0_f32)), |&(a, b)| Some((b, a + b)))
+                .map(|(a, _)| a)
+                .take(16)
+                .collect();
+        for n in 2..=14 {
+            let viewport = Rect::new(0.0, 0.0, fib[n] * 10.0, fib[n - 1] * 10.0);
+            let rects: Vec<Rect> = tree_with(n)
+                .layout(viewport)
+                .into_iter()
+                .map(|(_, r)| r)
+                .collect();
+            for (i, r) in rects.iter().enumerate() {
+                let side = fib[n - 1 - i] * 10.0;
+                assert!(
+                    (r.w - side).abs() < 1e-3 * side && (r.h - side).abs() < 1e-3 * side,
+                    "n={n} pane {i}: {r:?}, expected a {side} square"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn two_panes_split_evenly_side_by_side() {
         let mut t = PaneTree::new();
-        let left = t.focused();
-        let right = t.split(Dir::Right).expect("under the cap");
+        let first = t.focused();
+        let second = t.open();
         assert_eq!(t.count(), 2);
-        assert_eq!(t.focused(), right, "the new pane takes focus");
-
-        let lr = rect_of(&t, left);
-        let rr = rect_of(&t, right);
-        assert!(
-            approx(lr.w, 400.0) && approx(rr.w, 400.0),
-            "even 50/50 split"
-        );
-        assert!(approx(lr.x, 10.0) && approx(rr.x, 410.0), "left then right");
-        assert!(
-            approx(lr.h, 600.0) && approx(rr.h, 600.0),
-            "full height each"
-        );
+        assert_eq!(t.focused(), second, "the new pane takes focus");
+        assert!(approx_rect(
+            rect_of(&t, first),
+            Rect::new(10.0, 20.0, 400.0, 600.0)
+        ));
+        assert!(approx_rect(
+            rect_of(&t, second),
+            Rect::new(410.0, 20.0, 400.0, 600.0)
+        ));
     }
 
     #[test]
-    fn split_down_stacks_top_over_bottom() {
+    fn opening_has_no_pane_cap() {
+        let t = tree_with(200);
+        assert_eq!(t.count(), 200);
+        assert_invariants(&t);
+    }
+
+    #[test]
+    fn open_cancels_zoom() {
+        let mut t = tree_with(2);
+        t.zoom_toggle();
+        t.open();
+        assert!(!t.is_zoomed());
+        assert_eq!(t.layout(VIEWPORT).len(), 3);
+    }
+
+    #[test]
+    fn close_reflows_the_spiral_and_focuses_the_pane_taking_its_slot() {
         let mut t = PaneTree::new();
-        let top = t.focused();
-        let bottom = t.split(Dir::Down).expect("under the cap");
-        let tr = rect_of(&t, top);
-        let br = rect_of(&t, bottom);
-        assert!(approx(tr.h, 300.0) && approx(br.h, 300.0));
-        assert!(approx(tr.y, 20.0) && approx(br.y, 320.0), "top then bottom");
-        assert!(
-            approx(tr.w, 800.0) && approx(br.w, 800.0),
-            "full width each"
+        let a = t.focused();
+        let b = t.open();
+        let c = t.open();
+        assert!(t.set_focus(b));
+
+        assert!(t.close());
+        assert_eq!(t.panes(), vec![a, c]);
+        assert_eq!(t.focused(), c, "the next pane moves into the closed slot");
+        assert!(approx_rect(
+            rect_of(&t, c),
+            Rect::new(410.0, 20.0, 400.0, 600.0)
+        ));
+
+        assert!(t.close());
+        assert_eq!(
+            t.focused(),
+            a,
+            "closing the last pane focuses the previous one"
         );
-    }
-
-    #[test]
-    fn split_is_capped_at_max_panes() {
-        let mut t = PaneTree::new();
-        for _ in 1..MAX_PANES {
-            assert!(t.split(Dir::Right).is_some());
-        }
-        assert_eq!(t.count(), MAX_PANES);
-        assert!(t.split(Dir::Right).is_none(), "the 9th pane is refused");
-        assert_eq!(t.count(), MAX_PANES);
-    }
-
-    #[test]
-    fn close_collapses_the_split_and_refocuses_the_sibling() {
-        let mut t = PaneTree::new();
-        let left = t.focused();
-        let right = t.split(Dir::Right).unwrap();
-        assert_eq!(t.focused(), right);
-
-        assert!(t.close(), "closed the focused (right) pane");
-        assert_eq!(t.count(), 1);
-        assert_eq!(t.focused(), left, "focus falls back to the sibling");
-        assert_eq!(rect_of(&t, left), VIEWPORT, "sibling reclaims the space");
+        assert_eq!(rect_of(&t, a), VIEWPORT, "the survivor reclaims the space");
     }
 
     #[test]
@@ -860,170 +531,108 @@ mod tests {
     #[test]
     fn pane_ids_are_never_reused() {
         let mut t = PaneTree::new();
-        let a = t.split(Dir::Right).unwrap();
-        assert!(t.close()); // closes `a`, focus back to pane 0
-        let b = t.split(Dir::Right).unwrap();
-        assert_ne!(a, b, "a fresh split gets a brand-new id");
+        let a = t.open();
+        assert!(t.close());
+        let b = t.open();
+        assert_ne!(a, b, "a fresh pane gets a brand-new id");
     }
 
     #[test]
     fn zoom_fills_the_viewport_and_restores() {
-        let mut t = PaneTree::new();
-        let _left = t.focused();
-        let right = t.split(Dir::Right).unwrap();
+        let mut t = tree_with(2);
+        let focused = t.focused();
 
         assert!(t.zoom_toggle(), "now zoomed");
-        let layout = t.layout(VIEWPORT);
-        assert_eq!(layout.len(), 1);
-        assert_eq!(layout[0], (right, VIEWPORT));
+        assert_eq!(t.layout(VIEWPORT), vec![(focused, VIEWPORT)]);
 
         assert!(!t.zoom_toggle(), "unzoomed");
         assert_eq!(t.layout(VIEWPORT).len(), 2, "tiling restored");
     }
 
     #[test]
-    fn directional_focus_moves_between_neighbors_and_stops_at_edges() {
-        let mut t = PaneTree::new();
-        let left = t.focused();
-        let right = t.split(Dir::Right).unwrap(); // focus is on `right`
-
-        assert!(!t.focus(Dir::Right), "already at the right edge");
-        assert!(t.focus(Dir::Left), "moves to the left pane");
-        assert_eq!(t.focused(), left);
-        assert!(!t.focus(Dir::Left), "already at the left edge");
-        assert!(t.focus(Dir::Right));
-        assert_eq!(t.focused(), right);
-    }
-
-    #[test]
-    #[allow(
-        clippy::many_single_char_names,
-        reason = "test: a/b/c/t name the panes and the tree tersely"
-    )]
-    fn cycle_layout_rearranges_panes_through_presets_keeping_them_all() {
-        let mut t = PaneTree::new();
-        let a = t.focused();
-        let b = t.split(Dir::Right).unwrap();
-        let c = t.split(Dir::Down).unwrap(); // 3 panes, some arrangement
-        let all = |t: &PaneTree| {
-            let mut v = t.panes();
-            v.sort();
-            v
-        };
-        let mut sorted = vec![a, b, c];
-        sorted.sort();
-
-        // Preset 0: even columns (all side by side) - three equal-width panes at y=0.
-        assert!(t.cycle_layout());
-        assert_eq!(all(&t), sorted, "no pane lost");
-        let cols = t.layout(Rect::new(0.0, 0.0, 900.0, 300.0));
-        assert!(
-            cols.iter().all(|(_, r)| approx(r.h, 300.0)),
-            "even columns share the full height"
-        );
-        assert!(cols.iter().all(|(_, r)| approx(r.w, 300.0)), "equal widths");
-
-        // Preset 1: even rows (stacked).
-        assert!(t.cycle_layout());
-        let rows = t.layout(Rect::new(0.0, 0.0, 300.0, 900.0));
-        assert!(rows.iter().all(|(_, r)| approx(r.w, 300.0)), "full width");
-        assert!(
-            rows.iter().all(|(_, r)| approx(r.h, 300.0)),
-            "equal heights"
-        );
-
-        // Preset 2: main-vertical (first pane fills the left half).
-        assert!(t.cycle_layout());
-        let main = t.layout(Rect::new(0.0, 0.0, 800.0, 600.0));
-        let first = main.iter().find(|(id, _)| *id == a).unwrap().1;
-        assert!(approx(first.w, 400.0), "main pane takes the left half");
-    }
-
-    #[test]
-    fn swap_exchanges_the_focused_pane_with_its_neighbor() {
+    fn directional_focus_follows_the_spiral_and_stops_at_edges() {
         let mut t = PaneTree::new();
         let first = t.focused();
-        let second = t.split(Dir::Right).unwrap(); // focus on `second` (the right half)
-        assert!(
-            rect_of(&t, second).x > rect_of(&t, first).x,
-            "second starts on the right"
-        );
+        let second = t.open();
+        let third = t.open();
 
-        // Swapping the focused (right) pane left exchanges the two panes' positions; focus
-        // follows the moved pane, which now sits on the left.
-        assert!(t.swap(Dir::Left));
-        assert_eq!(t.focused(), second, "focus follows the moved pane");
-        assert!(
-            rect_of(&t, second).x < rect_of(&t, first).x,
-            "second is now on the left"
-        );
-        // At the edge there is no neighbor to swap with.
-        assert!(!t.swap(Dir::Left), "no neighbor further left");
+        assert!(!t.focus(Dir::Right), "already at the right edge");
+        assert!(t.focus(Dir::Up));
+        assert_eq!(t.focused(), second);
+        assert!(t.focus(Dir::Left));
+        assert_eq!(t.focused(), first);
+        assert!(!t.focus(Dir::Left), "already at the left edge");
+        assert!(t.focus(Dir::Right));
+        assert!([second, third].contains(&t.focused()));
     }
 
     #[test]
-    fn resize_moves_the_divider_and_even_out_restores_it() {
-        let mut t = PaneTree::new();
-        let left = t.focused();
-        let right = t.split(Dir::Right).unwrap();
+    fn layout_snapshot_round_trips_count_focus_and_zoom() {
+        let mut t = tree_with(4);
+        let second = t.panes()[1];
+        t.set_focus(second);
+        t.zoom_toggle();
 
-        // Focused is `right`; nudging the divider right widens the left pane.
-        assert!(t.resize(Dir::Right, 0.1));
-        assert!(approx(rect_of(&t, left).w, 480.0), "left grew to 60%");
-        assert!(approx(rect_of(&t, right).w, 320.0), "right shrank to 40%");
+        let restored = PaneTree::from_layout(t.count(), &t.to_layout());
+        assert_eq!(restored.count(), 4);
+        assert!(restored.is_zoomed());
+        assert_eq!(restored.panes()[1], restored.focused());
 
-        t.even_out();
-        assert!(approx(rect_of(&t, left).w, 400.0), "back to 50/50");
+        let mut grown = PaneTree::from_layout(4, &t.to_layout());
+        let new = grown.open();
+        assert!(
+            !restored.contains(new),
+            "ids continue after the restored ones"
+        );
     }
 
     #[test]
-    fn resize_without_a_matching_divider_is_a_no_op() {
-        let mut t = PaneTree::new();
-        assert!(!t.resize(Dir::Right, 0.1), "a single pane has no divider");
+    fn from_layout_tolerates_a_degenerate_count_or_focus() {
+        let layout = PaneLayout {
+            focused: 9,
+            zoomed: false,
+        };
+        let t = PaneTree::from_layout(0, &layout);
+        assert_eq!(t.count(), 1);
+        assert_eq!(t.focused(), t.panes()[0]);
     }
 
     // ----- property-based tiling invariants -----------------------------------
 
     #[derive(Clone, Copy, Debug)]
     enum Op {
-        Split(Dir),
+        Open,
         Close,
         Focus(Dir),
-        Resize(Dir),
         Zoom,
-        Even,
         SetFocus(u8),
     }
 
     fn overlaps(a: Rect, b: Rect) -> bool {
-        let eps = EPS;
-        a.x < b.x + b.w - eps
-            && b.x < a.x + a.w - eps
-            && a.y < b.y + b.h - eps
-            && b.y < a.y + a.h - eps
+        a.x < b.x + b.w - EPS
+            && b.x < a.x + a.w - EPS
+            && a.y < b.y + b.h - EPS
+            && b.y < a.y + a.h - EPS
     }
 
     fn assert_invariants(t: &PaneTree) {
         let n = t.count();
-        assert!((1..=MAX_PANES).contains(&n), "pane count {n} out of range");
+        assert!(n >= 1, "a tree always holds a pane");
 
         let panes = t.panes();
-        assert_eq!(panes.len(), n);
         let unique: std::collections::HashSet<_> = panes.iter().collect();
         assert_eq!(unique.len(), n, "duplicate pane ids: {panes:?}");
         assert!(t.contains(t.focused()), "focus points at a missing pane");
 
         let layout = t.layout(VIEWPORT);
         if t.is_zoomed() {
-            assert_eq!(layout.len(), 1);
-            assert_eq!(layout[0].0, t.focused());
-            assert_eq!(layout[0].1, VIEWPORT);
+            assert_eq!(layout, vec![(t.focused(), VIEWPORT)]);
             return;
         }
 
         assert_eq!(layout.len(), n, "every pane must get exactly one rectangle");
         for (_, r) in &layout {
-            assert!(r.w > EPS && r.h > EPS, "degenerate pane rect {r:?}");
+            assert!(r.w >= 0.0 && r.h >= 0.0, "negative pane rect {r:?}");
             assert!(
                 r.x >= VIEWPORT.x - EPS
                     && r.y >= VIEWPORT.y - EPS
@@ -1042,8 +651,6 @@ mod tests {
                 );
             }
         }
-        // Non-overlapping rects inside the viewport whose areas sum to the viewport's
-        // area prove an exact, gap-free tiling.
         let area: f32 = layout.iter().map(|(_, r)| r.w * r.h).sum();
         let vp_area = VIEWPORT.w * VIEWPORT.h;
         assert!(
@@ -1065,12 +672,10 @@ mod tests {
             assert_invariants(&t);
             for op in ops {
                 match op {
-                    Op::Split(d) => { t.split(d); }
+                    Op::Open => { t.open(); }
                     Op::Close => { t.close(); }
                     Op::Focus(d) => { t.focus(d); }
-                    Op::Resize(d) => { t.resize(d, 0.1); }
                     Op::Zoom => { t.zoom_toggle(); }
-                    Op::Even => { t.even_out(); }
                     Op::SetFocus(i) => {
                         let panes = t.panes();
                         let id = panes[usize::from(i) % panes.len()];
@@ -1094,12 +699,10 @@ mod tests {
     fn op_strategy() -> impl proptest::strategy::Strategy<Value = Op> {
         use proptest::strategy::{Just, Strategy};
         proptest::prop_oneof![
-            dir_strategy().prop_map(Op::Split),
+            Just(Op::Open),
             Just(Op::Close),
             dir_strategy().prop_map(Op::Focus),
-            dir_strategy().prop_map(Op::Resize),
             Just(Op::Zoom),
-            Just(Op::Even),
             proptest::prelude::any::<u8>().prop_map(Op::SetFocus),
         ]
     }

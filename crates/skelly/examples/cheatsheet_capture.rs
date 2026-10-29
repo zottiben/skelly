@@ -26,7 +26,7 @@ const GLOBAL: Group = Group(
     "Global",
     "",
     &[
-        Bind("Command palette", "\u{2318}K"),
+        Bind("Command palette", "\u{2318}P"),
         Bind("Settings", "\u{2318},"),
         Bind("Show / hide sidebar", "\u{2318}B"),
         Bind("Cycle sidebar / rail", "\u{21e7}\u{2318}B"),
@@ -37,16 +37,13 @@ const GLOBAL: Group = Group(
 );
 const PANES: Group = Group(
     "Panes",
-    "Default leader = \u{2303}\u{2325}A (tmux-style).",
+    "Fibonacci spiral, clockwise.",
     &[
-        Bind("Split right / down", "\u{2325}| \u{2325}-"),
+        Bind("New pane", "\u{2318}K"),
         Bind("Move focus", "\u{2325}H J K L"),
-        Bind("Resize pane", "\u{2303}\u{2325} arrows"),
-        Bind("Swap pane", "\u{2325}\u{21e7} arrows"),
+        Bind("Focus pane 1-9", "\u{2325}1\u{2026}9"),
         Bind("Zoom / unzoom", "\u{2325}Z"),
         Bind("Close pane", "\u{2325}W"),
-        Bind("Cycle layout preset", "\u{2325}Space"),
-        Bind("Even out splits", "\u{2325}="),
     ],
 );
 const TERMINAL: Group = Group(

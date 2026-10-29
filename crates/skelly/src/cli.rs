@@ -69,7 +69,7 @@ pub(crate) fn help() -> String {
            skelly --version       print the version\n  \
            skelly --help          print this help\n\
          \n\
-         Settings live in ~/.config/skelly/config.toml; press ⌘K in the app for commands.",
+         Settings live in ~/.config/skelly/config.toml; press ⌘P in the app for commands.",
         env!("CARGO_PKG_VERSION")
     )
 }

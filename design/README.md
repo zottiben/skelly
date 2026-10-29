@@ -82,6 +82,25 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-10-29 - **Panes open only with `⌘K` and tile as a clockwise Fibonacci spiral with no
+  cap; the command palette moves to `⌘P`.** User request: one chord opens a pane, panes
+  size themselves along the Fibonacci sequence in a clockwise spiral, no pane limit, and no
+  legacy pane behavior kept. Pane `i` of `n` takes `F(k)/F(k+1)` (`k = n - i`) of the space
+  left, cutting left, top, right, bottom in turn (ADR-0010). Kept: `⌥h/j/k/l` and `⌥↑/↓`
+  focus, `⌥1..9`, `⌥Z` zoom, `⌥W` close, click to focus. Removed: `⌥|` / `⌥-` splits,
+  resize, swap, `⌥=` even-out, `⌥Space` layout presets, the pane leader, the palette's split
+  and even-out commands and files-mode `⌘↵` new pane, the "Max panes" setting, and the
+  `[panes] max` / `[panes] leader` keys (still parsed, ignored, dropped on save). The
+  settings toggle for `[panes] split_inherits_cwd` is relabelled "New panes inherit cwd"; the
+  key keeps its name so existing files stay valid. `⌘K` was the guide's §11 palette chord;
+  the palette now opens and dismisses with `⌘P`, and `⇧⌘P` stays pin. The cheatsheet,
+  empty-state chips (`⌘P commands`, `⌘K new pane`), onboarding hints, sidebar tooltip and
+  CLI help use the new chords. A pane too small for its chrome hides its status line and
+  exit message, and its cells are clipped to its rect. Supersedes the 8-pane cap (AGENTS.md
+  Hard rule 4), the 2026-10-12 leader decision below, and the guide's §11 split, leader and
+  palette chords until the guide is regenerated. _(was: the guide's binary split tree with a
+  tmux-style leader, capped at 8 panes, and `⌘K` for the palette)_
+
 - 2026-10-12 - **Pane leader defaults to Ctrl+Alt+A, leaving Ctrl+A to the terminal.**
   User reported LazyVim's start-of-line mapping no longer worked; Skelly consumed
   Ctrl+A before forwarding terminal input. Change `[panes] leader` from `ctrl+a`

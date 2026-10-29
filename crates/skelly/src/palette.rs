@@ -58,14 +58,8 @@ pub(crate) struct Command {
 /// What a command does when run. The binary maps each to its existing handlers.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum Action {
-    /// Split the focused pane to the right.
-    SplitRight,
-    /// Split the focused pane downward.
-    SplitDown,
     /// Toggle zoom on the focused pane.
     Zoom,
-    /// Reset every split to 50/50.
-    EvenOut,
     /// Close the focused pane.
     ClosePane,
     /// Move focus left / down / up / right.
@@ -121,31 +115,10 @@ pub(crate) enum Action {
 pub(crate) const COMMANDS: &[Command] = &[
     Command {
         category: "Panes",
-        icon: "\u{25AF}", // ▯ split vertical
-        label: "Split pane right",
-        hint: "opt |",
-        action: Action::SplitRight,
-    },
-    Command {
-        category: "Panes",
-        icon: "\u{25AD}", // ▭ split horizontal
-        label: "Split pane down",
-        hint: "opt -",
-        action: Action::SplitDown,
-    },
-    Command {
-        category: "Panes",
         icon: "\u{2922}", // ⤢ zoom
         label: "Zoom / unzoom pane",
         hint: "opt Z",
         action: Action::Zoom,
-    },
-    Command {
-        category: "Panes",
-        icon: "\u{229E}", // ⊞ even out
-        label: "Even out splits",
-        hint: "opt =",
-        action: Action::EvenOut,
     },
     Command {
         category: "Panes",
@@ -541,16 +514,6 @@ impl Palette {
         }
     }
 
-    /// The footer's left hint cluster: the files mode adds the `⌘↵ run in new pane` action
-    /// (design §10.8), which the binary honors when `⌘` is held over a file entry.
-    fn footer_hints(&self) -> &'static str {
-        if self.mode_and_term().0 == Mode::Files {
-            FOOTER_HINTS_FILES
-        } else {
-            FOOTER_HINTS
-        }
-    }
-
     /// The fixed chrome heights (physical px) above and below the results region, as
     /// `(top, bottom)`. `top` covers the padding, input, and result-count rows; `bottom` covers
     /// the spacer, footer, and bottom padding. The binary adds the (capped) results height
@@ -725,7 +688,7 @@ impl Palette {
         let footer_y = panel.y + (PAD + INPUT_H + COUNT_H) * scale + results_h + SPACER_H * scale;
         push_line(
             &mut labels,
-            self.footer_hints(),
+            FOOTER_HINTS,
             FontRole::Caption,
             theme.fg_muted,
             prompt_x,
@@ -856,9 +819,6 @@ fn fuzzy_match(query: &str, label: &str) -> Option<(i32, Vec<usize>)> {
 /// The footer hint clusters (design §10.8): navigation/run hints left, `esc close`
 /// right-anchored, using key glyphs (`↕` arrows, `⏎` return) like the guide.
 const FOOTER_HINTS: &str = "\u{2195} navigate    \u{23CE} run";
-/// The files-mode footer adds the `⌘↵ run in new pane` action (design §10.8/§11): `↵` types the
-/// path into the focused pane, `⌘↵` opens it in a fresh split pane.
-const FOOTER_HINTS_FILES: &str = "\u{2195} navigate    \u{23CE} run    \u{2318}\u{23CE} new pane";
 const FOOTER_CLOSE: &str = "esc close";
 /// The empty-input placeholder.
 const PLACEHOLDER: &str = "search commands";
