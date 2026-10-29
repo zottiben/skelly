@@ -11,18 +11,10 @@
 use std::time::{Duration, Instant};
 
 /// Fast: hover / press / tooltip (design §03).
-#[allow(
-    dead_code,
-    reason = "token table; wired per transition as the motion slices land"
-)]
 pub(crate) const FAST: Duration = Duration::from_millis(120);
 /// Base: tab switch, menu / palette open.
 pub(crate) const BASE: Duration = Duration::from_millis(180);
 /// Slow: pane split / close.
-#[allow(
-    dead_code,
-    reason = "token table; wired per transition as the motion slices land"
-)]
 pub(crate) const SLOW: Duration = Duration::from_millis(260);
 /// Panel: sidebar / dock slide.
 #[allow(
@@ -34,16 +26,8 @@ pub(crate) const PANEL: Duration = Duration::from_millis(320);
 /// Decelerate `cubic-bezier(0,0,0,1)` - enter / expand (fast in, eases to rest).
 pub(crate) const DECELERATE: Bezier = Bezier::new(0.0, 0.0, 0.0, 1.0);
 /// Standard `cubic-bezier(.2,0,0,1)` - most transitions.
-#[allow(
-    dead_code,
-    reason = "token table; wired per transition as the motion slices land"
-)]
 pub(crate) const STANDARD: Bezier = Bezier::new(0.2, 0.0, 0.0, 1.0);
 /// Accelerate `cubic-bezier(.3,0,1,1)` - exit / collapse (eases in, fast out).
-#[allow(
-    dead_code,
-    reason = "token table; wired per transition as the motion slices land"
-)]
 pub(crate) const ACCELERATE: Bezier = Bezier::new(0.3, 0.0, 1.0, 1.0);
 
 /// A CSS-style cubic-bezier easing: control points `(x1,y1)` and `(x2,y2)` with the
@@ -66,7 +50,12 @@ impl Bezier {
     /// `x(t) == x` for `t` by bisection (`x(t)` is monotone for the guide's control points),
     /// then returns `y(t)`. Endpoints map exactly: `ease(0) == 0`, `ease(1) == 1`.
     pub(crate) fn ease(self, x: f32) -> f32 {
-        let x = x.clamp(0.0, 1.0);
+        if x <= 0.0 {
+            return 0.0;
+        }
+        if x >= 1.0 {
+            return 1.0;
+        }
         // One coordinate of the cubic with fixed 0 / 1 endpoints:
         // B(t) = 3(1-t)^2 t · c1 + 3(1-t) t^2 · c2 + t^3.
         let bezier = |c1: f32, c2: f32, t: f32| {
@@ -128,12 +117,12 @@ mod tests {
     #[test]
     fn easings_pin_their_endpoints() {
         for curve in [DECELERATE, ACCELERATE, super::STANDARD] {
-            assert!(curve.ease(0.0).abs() < 1e-3, "ease(0) == 0");
-            assert!((curve.ease(1.0) - 1.0).abs() < 1e-3, "ease(1) == 1");
+            assert_eq!(curve.ease(0.0).to_bits(), 0.0_f32.to_bits(), "ease(0) == 0");
+            assert_eq!(curve.ease(1.0).to_bits(), 1.0_f32.to_bits(), "ease(1) == 1");
         }
         // Out-of-range inputs clamp to the endpoints.
-        assert!(DECELERATE.ease(-1.0).abs() < 1e-3);
-        assert!((DECELERATE.ease(2.0) - 1.0).abs() < 1e-3);
+        assert_eq!(DECELERATE.ease(-1.0).to_bits(), 0.0_f32.to_bits());
+        assert_eq!(DECELERATE.ease(2.0).to_bits(), 1.0_f32.to_bits());
     }
 
     #[test]

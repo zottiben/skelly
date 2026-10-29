@@ -75,6 +75,12 @@ bottom, then around again), and there is no pane limit. Move focus with **⌥H/J
 (or **⌥1**…**⌥9**), zoom with **⌥Z**, and close with **⌥W**. The command palette is
 **⌘P**.
 
+Zoom moves the view into the focused pane with an animation, and **⌥Z** again moves it
+back out to the same spiral. While zoomed, **⌥H/J/K/L** and **⌥1**…**⌥9** pan to the
+next pane. On a Mac trackpad, spread two fingers over a pane to zoom into it and pinch
+to zoom out, or double-tap with two fingers to toggle zoom on the pane under the
+pointer.
+
 There is no pane leader, so **Ctrl+A** and the other Ctrl chords reach the foreground
 program, preserving shell line navigation and Neovim mappings.
 

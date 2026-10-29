@@ -20,7 +20,8 @@ use crate::prose::{ProseLabel, ProseLayer};
 use crate::text::{PaneTextInput, TextLayer};
 use crate::theme::Theme;
 use crate::{
-    ChromeQuad, GitDockView, OverlayView, PaneView, PxRect, SettingsView, SidebarView, TimelineView,
+    GitDockView, OverlayView, PaneLayer, PaneOverlayView, PaneView, PxRect, SettingsView,
+    SidebarView, TimelineView,
 };
 
 /// One chrome layer drawn over the terminal with `LoadOp::Load`: a quad pass then a text
@@ -90,6 +91,48 @@ impl ChromeLayer {
         self.prose.set_labels(labels, clip);
     }
 
+    /// Upload a display list in runs, each run's quads and labels clipped to its own rect
+    /// (`None`: the whole surface) and drawn above the runs before it.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "surface dimensions are far within f32's exact-integer range"
+    )]
+    fn set_paint_runs(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        surface: (u32, u32),
+        runs: &[(&[Quad], &[ProseLabel], Option<PxRect>)],
+    ) {
+        let quads: Vec<Quad> = runs
+            .iter()
+            .flat_map(|(q, _, _)| q.iter().copied())
+            .collect();
+        self.active = !quads.is_empty() || runs.iter().any(|(_, l, _)| !l.is_empty());
+        self.quads.set(device, queue, surface.0, surface.1, &quads);
+        let mut end = 0;
+        let clips: Vec<(usize, Option<PxRect>)> = runs
+            .iter()
+            .map(|(q, _, clip)| {
+                end += q.len();
+                (end, *clip)
+            })
+            .collect();
+        self.quads.set_clips(&clips);
+        self.text.set_panes(&[]);
+        let whole = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: surface.0 as f32,
+            h: surface.1 as f32,
+        };
+        let labels: Vec<(&[ProseLabel], PxRect)> = runs
+            .iter()
+            .map(|(_, l, clip)| (*l, clip.unwrap_or(whole)))
+            .collect();
+        self.prose.set_label_runs(&labels);
+    }
+
     /// Hide the layer (nothing drawn next frame).
     fn clear(&mut self) {
         self.active = false;
@@ -113,6 +156,91 @@ impl ChromeLayer {
         self.text.draw(device, queue, view, width, height)?;
         self.prose.draw(device, queue, view, width, height)?;
         Ok(())
+    }
+}
+
+/// Build the pane pass shared by the windowed renderer and the headless capture: each pane's
+/// cell backgrounds, cursor and selection cut to its rect, the empty-state watermark, and -
+/// with more than one pane - the dividers and focused ring at `layer.dividers` opacity; plus
+/// each pane's text, clipped to its rect within `layer.zone`. The quads are clipped to the
+/// zone by the caller's scissor.
+pub(crate) fn pane_pass<'a>(
+    text: &TextLayer,
+    panes: &[PaneView<'a>],
+    layer: PaneLayer,
+    theme: &Theme,
+) -> (Vec<Quad>, Vec<PaneTextInput<'a>>) {
+    let (cell_w, cell_h, _) = text.cell_metrics();
+    let stroke = text.scale();
+    let mut quads = Vec::new();
+    let mut inputs = Vec::with_capacity(panes.len());
+    for pane in panes {
+        let cursor = pane.focused.then_some(pane.cursor);
+        quads.extend(
+            grid_quads(
+                cell_w,
+                cell_h,
+                pane.origin,
+                pane.rows,
+                cursor,
+                pane.cursor_shape,
+                theme.accent,
+                pane.selection,
+            )
+            .into_iter()
+            .filter_map(|q| q.clipped_to(pane.rect)),
+        );
+        // The empty-state brand watermark (a pristine tab), beneath the glyphs.
+        if let Some(bounds) = pane.logo {
+            quads.extend(logo_quads(bounds, theme, LOGO_WATERMARK_OPACITY));
+        }
+        let clip = layer
+            .zone
+            .map_or(pane.rect, |zone| intersect(pane.rect, zone));
+        inputs.push(PaneTextInput {
+            rows: pane.rows,
+            left: pane.origin.0,
+            top: pane.origin.1,
+            clip: (clip.x, clip.y, clip.w, clip.h),
+        });
+    }
+    // A lone pane stays borderless (just the window margin), like a single shell.
+    // With several, draw the dividers, then the focused ring on top.
+    let fade = |mut color: [f32; 4]| {
+        color[3] *= layer.dividers.clamp(0.0, 1.0);
+        color
+    };
+    if panes.len() > 1 && layer.dividers > 0.0 {
+        for pane in panes {
+            let r = pane.rect;
+            push_outline(
+                &mut quads,
+                r.x,
+                r.y,
+                r.w,
+                r.h,
+                stroke,
+                fade(theme.border.to_linear()),
+            );
+        }
+        if let Some(pane) = panes.iter().find(|p| p.focused) {
+            let r = pane.rect;
+            let ring = fade(theme.border_strong.to_linear());
+            push_outline(&mut quads, r.x, r.y, r.w, r.h, 2.0 * stroke, ring);
+        }
+    }
+    (quads, inputs)
+}
+
+/// The overlap of `a` and `b` (zero-sized where they do not meet).
+fn intersect(a: PxRect, b: PxRect) -> PxRect {
+    let x = a.x.max(b.x);
+    let y = a.y.max(b.y);
+    PxRect {
+        x,
+        y,
+        w: ((a.x + a.w).min(b.x + b.w) - x).max(0.0),
+        h: ((a.y + a.h).min(b.y + b.h) - y).max(0.0),
     }
 }
 
@@ -343,69 +471,13 @@ impl Renderer {
         self.settings.set_default_fg(self.theme.fg_primary);
     }
 
-    /// Set the panes to display next frame. Each pane's grid (glyphs, cell backgrounds and
-    /// cursor) is filled at its `origin` and clipped to its `rect`; with more than one pane a `border` divider
-    /// is drawn around each and a `border.strong` ring around the focused one. Only
-    /// the focused pane draws a cursor.
-    pub fn set_panes(&mut self, panes: &[PaneView]) {
-        let (cell_w, cell_h, _) = self.text.cell_metrics();
-        let scale = self.text.scale();
-        let mut quads = Vec::new();
-        let mut text_inputs = Vec::with_capacity(panes.len());
-        for pane in panes {
-            let cursor = pane.focused.then_some(pane.cursor);
-            quads.extend(
-                grid_quads(
-                    cell_w,
-                    cell_h,
-                    pane.origin,
-                    pane.rows,
-                    cursor,
-                    pane.cursor_shape,
-                    self.theme.accent,
-                    pane.selection,
-                )
-                .into_iter()
-                .filter_map(|q| q.clipped_to(pane.rect)),
-            );
-            // The empty-state brand watermark (a pristine tab), beneath the glyphs.
-            if let Some(bounds) = pane.logo {
-                quads.extend(logo_quads(bounds, &self.theme, LOGO_WATERMARK_OPACITY));
-            }
-            text_inputs.push(PaneTextInput {
-                rows: pane.rows,
-                left: pane.origin.0,
-                top: pane.origin.1,
-                clip: (pane.rect.x, pane.rect.y, pane.rect.w, pane.rect.h),
-            });
-        }
-        // A lone pane stays borderless (just the window margin), like a single shell.
-        // With splits, draw the dividers, then the focused ring on top.
-        if panes.len() > 1 {
-            let divider = self.theme.border.to_linear();
-            for pane in panes {
-                push_outline(
-                    &mut quads,
-                    pane.rect.x,
-                    pane.rect.y,
-                    pane.rect.w,
-                    pane.rect.h,
-                    scale,
-                    divider,
-                );
-            }
-            if let Some(pane) = panes.iter().find(|p| p.focused) {
-                push_outline(
-                    &mut quads,
-                    pane.rect.x,
-                    pane.rect.y,
-                    pane.rect.w,
-                    pane.rect.h,
-                    2.0 * scale,
-                    self.theme.border_strong.to_linear(),
-                );
-            }
-        }
+    /// Set the panes to display next frame, framed by `layer` (see [`PaneLayer`]). Each
+    /// pane's grid (glyphs, cell backgrounds and cursor) is filled at its `origin` and
+    /// clipped to its `rect` within the zone; with more than one pane a `border` divider is
+    /// drawn around each and a `border.strong` ring around the focused one, at the layer's
+    /// divider opacity. Only the focused pane draws a cursor.
+    pub fn set_panes(&mut self, panes: &[PaneView], layer: PaneLayer) {
+        let (quads, text_inputs) = pane_pass(&self.text, panes, layer, &self.theme);
         self.quads.set(
             &self.device,
             &self.queue,
@@ -413,44 +485,38 @@ impl Renderer {
             self.config.height,
             &quads,
         );
+        self.quads.set_clips(&[(quads.len(), layer.zone)]);
         self.text.set_panes(&text_inputs);
     }
 
-    /// Set the pane-level overlays to draw next frame: a translucent `bg.base` `scrim` over
-    /// each exited pane's rect (dimming its preserved grid), plus the binary's content
-    /// `quads` (empty-state hint-chip pills) and proportional `labels` (the "shell exited"
-    /// message, the empty-state chip text). Clears when all are empty. Drawn above the
-    /// terminal text but beneath every other chrome layer (Hard rule 4 - a layer; the panes
-    /// never unmount, so a restart just respawns the shell in place).
-    #[allow(
-        clippy::cast_precision_loss,
-        reason = "surface dimensions are far within f32's exact-integer range"
-    )]
-    pub fn set_pane_overlays(
-        &mut self,
-        scrims: &[PxRect],
-        quads: &[ChromeQuad],
-        labels: &[ProseLabel],
-    ) {
-        if scrims.is_empty() && quads.is_empty() && labels.is_empty() {
+    /// Set the pane-level overlays to draw next frame (see [`PaneOverlayView`]), or clear
+    /// them when it holds nothing. Drawn above the terminal text but beneath every other
+    /// chrome layer (Hard rule 4 - a layer; the panes never unmount, so a restart just
+    /// respawns the shell in place).
+    pub fn set_pane_overlays(&mut self, overlay: &PaneOverlayView) {
+        let mut panes: Vec<Quad> = overlay
+            .scrims
+            .iter()
+            .map(|r| scrim_quad(*r, &self.theme))
+            .collect();
+        panes.extend(overlay.quads.iter().map(chrome_quad));
+        let window: Vec<Quad> = overlay.window_quads.iter().map(chrome_quad).collect();
+        if panes.is_empty()
+            && window.is_empty()
+            && overlay.labels.is_empty()
+            && overlay.window_labels.is_empty()
+        {
             self.pane_overlay.clear();
             return;
         }
-        let mut all: Vec<Quad> = scrims.iter().map(|r| scrim_quad(*r, &self.theme)).collect();
-        all.extend(quads.iter().map(chrome_quad));
-        let surface = PxRect {
-            x: 0.0,
-            y: 0.0,
-            w: self.config.width as f32,
-            h: self.config.height as f32,
-        };
-        self.pane_overlay.set_paint(
+        self.pane_overlay.set_paint_runs(
             &self.device,
             &self.queue,
             (self.config.width, self.config.height),
-            &all,
-            labels,
-            surface,
+            &[
+                (&panes, overlay.labels, overlay.zone),
+                (&window, overlay.window_labels, None),
+            ],
         );
     }
 

@@ -456,10 +456,11 @@ impl App {
         &mut self,
         quads: &mut Vec<skelly_render::ChromeQuad>,
         labels: &mut Vec<skelly_render::ProseLabel>,
+        layout: &[(skelly_pane::PaneId, skelly_pane::Rect)],
     ) {
         let hovered_pane = self.voice_bar_at_pointer().map(|(id, _)| id);
         let scale = crate::scale32(self.scale);
-        for (id, rect) in self.active_tab().tree.layout(self.viewport_rect()) {
+        for &(id, rect) in layout {
             let rect = skelly_render::PxRect {
                 x: rect.x,
                 y: rect.y,
@@ -479,25 +480,7 @@ impl App {
     pub(crate) fn voice_bar_at_pointer(
         &mut self,
     ) -> Option<(skelly_pane::PaneId, crate::voicebar::Bar)> {
-        if self.settings.open
-            || self.palette.open
-            || self.confirm.is_some()
-            || self.onboarding.is_some()
-            || self.cheatsheet_open
-            || self.context_menu.is_some()
-            || self.pointer_in_find_bar()
-            || self.pointer_in_right_dock()
-            || self.on_dock_edge()
-            || self.on_sidebar_edge()
-            || self
-                .dock_button_rect()
-                .is_some_and(|r| crate::voicebar::contains(r, crate::point_f32(self.pointer)))
-            || (self.sidebar.visible()
-                && crate::point_f32(self.pointer).0 < self.sidebar_width_px())
-        {
-            return None;
-        }
-        let (id, rect) = self.pane_at_pointer()?;
+        let (id, rect) = self.uncovered_pane_at_pointer()?;
         let bar = self.voice_bar(
             id,
             skelly_render::PxRect {
@@ -520,7 +503,7 @@ impl App {
         if pane != self.active_tab().tree.focused() {
             self.cancel_dictation("Capture cancelled: pane changed");
             self.end_conversation();
-            self.active_tab_mut().tree.set_focus(pane);
+            self.change_tree(|tree| tree.set_focus(pane));
             self.drain_dictation();
         }
         self.selecting = false;

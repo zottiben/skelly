@@ -3,8 +3,9 @@
 //! (the left sidebar / tab list, pane dividers, the focused-pane ring, and a cursor
 //! only in the focused pane, with a command palette on top) to a PNG, with no window
 //! or screen-recording needed.
-//! Run: `cargo run -p skelly --example pane_capture -- panes.png`, or
-//! `-- spiral.png ossein-dark spiral 9` for nine panes in the Fibonacci spiral.
+//! Run: `cargo run -p skelly --example pane_capture -- panes.png`,
+//! `-- spiral.png ossein-dark spiral 9` for nine panes in the Fibonacci spiral, or
+//! `-- zoom.png ossein-dark zoom 0.5 5` for the camera halfway into pane 3 of 5 (ADR-0011).
 #![allow(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
@@ -16,14 +17,15 @@
     reason = "example: one straight-line scene builder mirroring the binary"
 )]
 
+use std::collections::HashMap;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use skelly_config::Appearance;
-use skelly_pane::{PaneTree, Rect};
+use skelly_pane::{Camera, PaneId, PaneTree, Rect};
 use skelly_render::{
     measure_cell, AnsiPalette, CaptureOverlay, CapturePane, CaptureSidebar, ChromeQuad, FontRole,
-    GridCell, PaneOverlay, ProseLabel, PxRect, Srgb, TextMeasure, Theme,
+    GridCell, PaneLayer, PaneOverlay, ProseLabel, PxRect, Srgb, TextMeasure, Theme,
 };
 use skelly_term::{CellAttrs, CellColor, TermCell, Terminal};
 
@@ -55,6 +57,20 @@ fn main() {
             .and_then(|n| n.parse().ok())
             .unwrap_or(6_usize)
     });
+    // `zoom T N` opens N panes (default 5) and frames the camera `T` (eased, `0..=1`) of the
+    // way into pane 3 - one frame of the binary's `⌥Z` zoom.
+    let zoom = (std::env::args().nth(3).as_deref() == Some("zoom")).then(|| {
+        let progress: f32 = std::env::args()
+            .nth(4)
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0.5);
+        let count = std::env::args()
+            .nth(5)
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(5_usize);
+        (progress.clamp(0.0, 1.0), count)
+    });
+    let spiral = spiral.or(zoom.map(|(_, count)| count));
     let (width, height, scale) = if spiral.is_some() {
         (2880_u32, 1800_u32, 2.0_f64)
     } else {
@@ -107,15 +123,32 @@ fn main() {
     for _ in 1..count {
         tree.open();
     }
+    let layout = match zoom {
+        Some((progress, _)) => {
+            tree.set_focus(tree.panes()[2.min(count - 1)]);
+            tree.zoom_toggle();
+            let camera = Camera::OVERVIEW.lerp(tree.framing(tree.focused()), progress);
+            tree.view(viewport, camera)
+        }
+        None => tree.layout(viewport),
+    };
     let focused = tree.focused();
-    let layout = tree.layout(viewport);
+    // Each pane's grid is sized by where it rests, as the binary's `sync_layout` sizes it.
+    let resting: HashMap<PaneId, Rect> = tree.resting_layout(viewport).into_iter().collect();
+    let zone = PxRect {
+        x: viewport.x,
+        y: viewport.y,
+        w: viewport.w,
+        h: viewport.h,
+    };
 
     let palette = AnsiPalette::resolve(&appearance.theme);
     let mut panes = Vec::new();
     for (id, rect) in &layout {
-        let cols = ((rect.w - 2.0 * inset) / cell_w).floor().max(2.0) as u16;
+        let rest = resting[id];
+        let cols = ((rest.w - 2.0 * inset) / cell_w).floor().max(2.0) as u16;
         // Reserve the status-line strip at the bottom, as the binary's `pane_dims` does.
-        let rows = ((rect.h - 2.0 * inset - STATUS_H * sc) / cell_h)
+        let rows = ((rest.h - 2.0 * inset - STATUS_H * sc) / cell_h)
             .floor()
             .max(1.0) as u16;
 
@@ -182,7 +215,10 @@ fn main() {
     // The per-pane status line at each pane's bottom (§08 anatomy #9) - mirrors the binary's
     // `pane_overlay_paint`: the same process cwd/branch/shell, each pane's own cursor.
     let mut measure = TextMeasure::new(sc);
-    let mut pane_overlay = PaneOverlay::default();
+    let mut pane_overlay = PaneOverlay {
+        zone: Some(zone),
+        ..PaneOverlay::default()
+    };
     for (i, pane) in panes.iter().enumerate() {
         // The left ("editor") pane shows an editor mode + filetype (design §10.4); others don't.
         let mode = (i == 0).then_some("NORMAL");
@@ -219,6 +255,10 @@ fn main() {
         scale,
         &panes,
         &skelly_render::Chrome {
+            pane_layer: PaneLayer {
+                zone: Some(zone),
+                dividers: zoom.map_or(1.0, |(progress, _)| 1.0 - progress),
+            },
             pane_overlay,
             sidebar: Some(&sidebar),
             overlay: overlay.as_ref(),

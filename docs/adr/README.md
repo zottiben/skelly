@@ -18,6 +18,7 @@ old one and flip its status.
 | [0008](0008-snapshot-rewind.md)               | Rewind restores the working tree from content snapshots | Accepted |
 | [0009](0009-local-voice-pi-bridge.md)          | Local voice augments the existing Pi session | Accepted |
 | [0010](0010-fibonacci-spiral-panes.md)         | Panes tile as a clockwise Fibonacci spiral, opened with `⌘K` | Accepted |
+| [0011](0011-pane-zoom-camera.md)               | Pane zoom is an animated camera over the spiral | Accepted |
 
 ADRs 0001-0004 settle the open foundation decisions flagged in
 [`design/README.md`](../../design/README.md). Ratified 2026-07-11; the M1 walking
