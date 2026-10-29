@@ -292,6 +292,14 @@ follow-ups, finished opportunistically.
     none, the exit message needs room for all of it, and cell backgrounds + the cursor are
     clipped like the glyphs. `skelly-pane` unit + `proptest` tested; verified by the
     `pane_capture` PNG (`spiral 6` / `spiral 12`) in both themes.
+  - [x] **Animated pane zoom** (ADR-0011). Zoom is a camera over the unchanged spiral: `⌥Z`
+    glides into the focused pane and back out over the 260 ms pane token, the dividers and
+    focus ring fade with it, and focus moves while zoomed pan the camera. A macOS trackpad
+    pinch follows the fingers and settles in or springs back on release; a two-finger
+    double-tap toggles zoom on the pane under the pointer. Pane text keeps its size, each
+    terminal resizes once per zoom, and the pane layer is clipped to the pane zone.
+    `skelly-pane` unit + `proptest` tested (every camera step tiles the viewport), `zoom`
+    motion unit tested; verified by `pane_capture` `zoom` frames in both themes.
   - [ ] Remaining edge/empty states: detached/rewound "warns before forking",
     theme-with-no-light-variant fallback.
   - [x] **Panic hook + file logging** (playbook §7). Logs now also stream (non-blocking) to

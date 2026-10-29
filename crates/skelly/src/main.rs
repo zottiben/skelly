@@ -31,6 +31,7 @@ mod toast;
 mod tooltip;
 mod voice;
 mod voicebar;
+mod zoom;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -41,8 +42,9 @@ use anyhow::Context as _;
 use skelly_config::{Config, SidebarMode, TabTitle};
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
 use skelly_render::{
-    AnsiPalette, CursorShape, GitDockView, GridCell, OverlayView, PaneView, ProseLabel, PxRect,
-    Renderer, SettingsView, SidebarView, Srgb, TextMeasure, Theme, TimelineView,
+    AnsiPalette, CursorShape, GitDockView, GridCell, OverlayView, PaneLayer, PaneOverlayView,
+    PaneView, ProseLabel, PxRect, Renderer, SettingsView, SidebarView, Srgb, TextMeasure, Theme,
+    TimelineView,
 };
 use skelly_session::{Actor, Repo, SessionEvent, SnapshotStore, Status, Timeline};
 use skelly_term::{CellAttrs, CellColor, ExitStatus, KeyboardMode, TermCell, Terminal};
@@ -57,7 +59,9 @@ use timeline::TimelineDock;
 use toast::{Toast, ToastKind};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    ElementState, KeyEvent, MouseButton, MouseScrollDelta, TouchPhase, WindowEvent,
+};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey, PhysicalKey};
 use winit::window::{CursorIcon, Window, WindowId};
@@ -272,6 +276,9 @@ struct Tab {
     /// (the user starts typing), it tweens the mark + hint chips from full to gone. `None` when
     /// the tab is still pristine (mark shown solid) or long past its hand-off (nothing drawn).
     empty_fade: Option<motion::Anim>,
+    /// The camera's motion toward this tab's resting view (ADR-0011): a zoom gliding in or out,
+    /// or a trackpad pinch in progress. `None` at rest.
+    zoom: Option<zoom::Motion>,
     /// Each pane's live working directory (home-collapsed for display), refreshed on a throttle
     /// from the pane's shell process. Backs the status-line cwd (§10.3) and the cwd-based tab
     /// title (§10.3), so both track `cd` instead of showing a stale process-cwd snapshot.
@@ -334,6 +341,7 @@ impl Tab {
             job_name: None,
             job_pid: None,
             empty_fade: None,
+            zoom: None,
             pane_cwd: HashMap::new(),
             frozen_cwd_title: None,
             pinned: false,
@@ -765,6 +773,9 @@ struct App {
     /// The "running job" confirm modal's open / close animation - the same overlay tween as
     /// the palette (rise in, fall out); live only while it plays, cleared when it settles.
     confirm_anim: Option<OverlayAnim>,
+    /// Whether a trackpad pinch is in progress. A pinch left on a tab once the fingers lift
+    /// (the user switched tabs mid-gesture) springs back when that tab is next shown.
+    pinching: bool,
 }
 
 /// A floating overlay's in-flight open or close animation - shared by the command palette and
@@ -863,6 +874,7 @@ impl App {
             git_poll_ms: Arc::new(AtomicU64::new(interval_ms(GIT_POLL_INTERVAL))),
             palette_anim: None,
             confirm_anim: None,
+            pinching: false,
         }
     }
 
@@ -1183,12 +1195,26 @@ impl App {
         self.request_redraw();
     }
 
-    /// The rectangle of pane `id` in the active tab's current layout, if it is visible.
-    fn pane_rect(&self, id: PaneId) -> Option<Rect> {
+    /// Where the active tab's camera is at `now` while it moves (ADR-0011), or `None` at rest.
+    fn moving_shot(&self, now: Instant) -> Option<zoom::Shot> {
+        let ws = self.active_tab();
+        ws.zoom.map(|_| zoom::shown(&ws.tree, ws.zoom, now))
+    }
+
+    /// Each pane the active tab shows through `shot` (its resting layout when `None`), with its
+    /// rectangle - which, mid-motion, may reach past the viewport.
+    fn shown_layout(&self, shot: Option<zoom::Shot>) -> Vec<(PaneId, Rect)> {
         let viewport = self.viewport_rect();
-        self.active_tab()
-            .tree
-            .layout(viewport)
+        let tree = &self.active_tab().tree;
+        shot.map_or_else(
+            || tree.layout(viewport),
+            |shot| tree.view(viewport, shot.camera),
+        )
+    }
+
+    /// The rectangle of pane `id` as the active tab shows it now, if it is visible.
+    fn pane_rect(&self, id: PaneId) -> Option<Rect> {
+        self.shown_layout(self.moving_shot(Instant::now()))
             .into_iter()
             .find(|(pid, _)| *pid == id)
             .map(|(_, rect)| rect)
@@ -1198,11 +1224,36 @@ impl App {
     fn pane_at_pointer(&self) -> Option<(PaneId, Rect)> {
         let (px, py) = point_f32(self.pointer);
         let viewport = self.viewport_rect();
-        self.active_tab()
-            .tree
-            .layout(viewport)
+        let inside = |r: &Rect| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h;
+        if !inside(&viewport) {
+            return None;
+        }
+        self.shown_layout(self.moving_shot(Instant::now()))
             .into_iter()
-            .find(|(_, r)| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h)
+            .find(|(_, r)| inside(r))
+    }
+
+    /// The pane under the pointer when nothing covers it there: no modal, menu or settings view
+    /// is up, and the pointer is not on the sidebar, the right dock, their edges or the find bar.
+    fn uncovered_pane_at_pointer(&self) -> Option<(PaneId, Rect)> {
+        if self.settings.open
+            || self.palette.open
+            || self.confirm.is_some()
+            || self.onboarding.is_some()
+            || self.cheatsheet_open
+            || self.context_menu.is_some()
+            || self.pointer_in_find_bar()
+            || self.pointer_in_right_dock()
+            || self.on_dock_edge()
+            || self.on_sidebar_edge()
+            || self
+                .dock_button_rect()
+                .is_some_and(|r| voicebar::contains(r, point_f32(self.pointer)))
+            || (self.sidebar.visible() && point_f32(self.pointer).0 < self.sidebar_width_px())
+        {
+            return None;
+        }
+        self.pane_at_pointer()
     }
 
     /// Reconcile the live terminals with the pane tree: spawn a shell for any new
@@ -1227,7 +1278,7 @@ impl App {
         // taken so it applies once, then reverts to the default start dir.
         let inherit = std::mem::take(&mut self.inherit_cwd);
         let voice_enabled = self.config.voice.enabled;
-        let layout = self.active_tab().tree.layout(viewport);
+        let layout = self.active_tab().tree.resting_layout(viewport);
 
         let ws = self.active_tab_mut();
         // Drop shells for panes no longer in the tree (closed panes). Hidden-by-zoom
@@ -1270,6 +1321,7 @@ impl App {
                         // Roll the new pane back so every live pane still has a shell.
                         ws.tree.set_focus(id);
                         ws.tree.close();
+                        ws.zoom = None;
                     }
                 }
             }
@@ -1278,22 +1330,20 @@ impl App {
         self.refresh_poll_pids();
     }
 
-    /// Build the owned per-pane frame data for the active tab: each visible pane's
-    /// resolved cell grid, cursor, selection, rectangle, and focus flag.
-    fn pane_frames(&self) -> Vec<PaneFrame> {
+    /// Build the owned per-pane frame data for the active tab's shown `layout`: each visible
+    /// pane's resolved cell grid, cursor, selection, rectangle, and focus flag.
+    fn pane_frames(&self, layout: &[(PaneId, Rect)]) -> Vec<PaneFrame> {
         let inset = self.pane_inset();
         let scale = scale32(self.scale);
-        let viewport = self.viewport_rect();
         let blink_off = self.cursor_blink_off(Instant::now());
         let ws = self.active_tab();
         let focused = ws.tree.focused();
         // A pristine single-pane tab paints the empty-state mark + hint chips over its
         // (blank) grid, until the first command runs.
         let empty_state = ws.is_empty_state();
-        ws.tree
-            .layout(viewport)
-            .into_iter()
-            .filter_map(|(id, rect)| {
+        layout
+            .iter()
+            .filter_map(|&(id, rect)| {
                 let term = ws.panes.get(&id)?;
                 let rows: Vec<Vec<GridCell>> = term
                     .cells()
@@ -1405,19 +1455,17 @@ impl App {
         labels.extend(l);
     }
 
-    /// Build the pane-level overlay display list drawn above the terminal text: a `bg.base`
-    /// scrim + centered "shell exited" message for each pane whose shell ended, and - on a
-    /// pristine single-pane tab - the empty-state hint chips beneath the vertebra mark. Empty
-    /// while every pane is a live shell (the common case), so it costs nothing then.
+    /// Build the pane-level overlay display list for the shown `layout`, drawn above the
+    /// terminal text: a `bg.base` scrim + centered "shell exited" message for each pane whose
+    /// shell ended, each live pane's status line and voice bar, and - on a pristine
+    /// single-pane tab - the empty-state hint chips beneath the vertebra mark. The find bar
+    /// rides along as window chrome.
     #[allow(
         clippy::type_complexity,
         reason = "a local per-pane (rect, exit, cursor, editor-mode) collection"
     )]
-    fn pane_overlay_paint(
-        &mut self,
-    ) -> (Vec<PxRect>, Vec<skelly_render::ChromeQuad>, Vec<ProseLabel>) {
+    fn pane_overlay_paint(&mut self, layout: &[(PaneId, Rect)]) -> PaneOverlayPaint {
         let scale = scale32(self.scale);
-        let viewport = self.viewport_rect();
         let ws = &self.tabs[self.active];
         let empty_state = ws.is_empty_state();
         let focused_id = ws.tree.focused();
@@ -1436,11 +1484,9 @@ impl App {
             Option<&'static str>,
             Option<&'static str>,
             Option<String>,
-        )> = ws
-            .tree
-            .layout(viewport)
-            .into_iter()
-            .filter_map(|(id, rect)| {
+        )> = layout
+            .iter()
+            .filter_map(|&(id, rect)| {
                 let term = ws.panes.get(&id)?;
                 let px = PxRect {
                     x: rect.x,
@@ -1505,7 +1551,7 @@ impl App {
                 labels.extend(l);
             }
         }
-        self.push_voice_bars(&mut quads, &mut labels);
+        self.push_voice_bars(&mut quads, &mut labels, layout);
         // The empty state (design §10.2): a pristine single-pane tab shows the mark + hint chips,
         // which fade out together once the tab goes live (`empty_alpha` drives the fade).
         if let Some(alpha) = self.empty_alpha(Instant::now()) {
@@ -1522,15 +1568,21 @@ impl App {
                 }
             }
         }
+        let mut paint = PaneOverlayPaint {
+            scrims,
+            quads,
+            labels,
+            ..PaneOverlayPaint::default()
+        };
         // The scrollback find bar + match highlight (design §11 `⌘F`).
         if let Some((query, hit, searched)) = self
             .find
             .as_ref()
             .map(|f| (f.query.clone(), f.hit, f.searched))
         {
-            self.push_find_overlay(&mut quads, &mut labels, focused_rect, &query, hit, searched);
+            self.push_find_overlay(&mut paint, focused_rect, &query, hit, searched);
         }
-        (scrims, quads, labels)
+        paint
     }
 
     fn pointer_in_find_bar(&self) -> bool {
@@ -1543,8 +1595,7 @@ impl App {
     /// bottom (design §11 `⌘F`): `Find: <query>` with a match / no-match status.
     fn push_find_overlay(
         &mut self,
-        quads: &mut Vec<skelly_render::ChromeQuad>,
-        labels: &mut Vec<ProseLabel>,
+        paint: &mut PaneOverlayPaint,
         focused_rect: Option<PxRect>,
         query: &str,
         hit: Option<skelly_term::FindHit>,
@@ -1561,7 +1612,7 @@ impl App {
                 reason = "cell col/row are small grid coordinates"
             )]
             let (col, row, len) = (hit.col as f32, hit.row as f32, hit.len.max(1) as f32);
-            quads.push(ChromeQuad::tint(
+            paint.quads.push(ChromeQuad::tint(
                 PxRect {
                     x: rect.x + inset + col * cell_w,
                     y: rect.y + inset + row * cell_h,
@@ -1578,7 +1629,7 @@ impl App {
         let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
         let bar_h = statusline::HEIGHT * scale;
         let top = surface_h - bar_h;
-        quads.push(ChromeQuad::fill(
+        paint.window_quads.push(ChromeQuad::fill(
             PxRect {
                 x: 0.0,
                 y: top,
@@ -1587,7 +1638,7 @@ impl App {
             },
             self.theme.bg_inset,
         ));
-        quads.push(ChromeQuad::fill(
+        paint.window_quads.push(ChromeQuad::fill(
             PxRect {
                 x: 0.0,
                 y: top,
@@ -1599,7 +1650,7 @@ impl App {
         let pad = 14.0 * scale;
         let line = self.measure.line_height(FontRole::Mono);
         let cy = top + (bar_h - line) * 0.5;
-        labels.push(ProseLabel {
+        paint.window_labels.push(ProseLabel {
             text: format!("\u{2315} find: {query}"),
             x: pad,
             y: cy,
@@ -1616,7 +1667,7 @@ impl App {
             "\u{2191}\u{2193} next / prev  \u{21a9} search  esc close".to_owned()
         };
         let sw = self.measure.width(&status, FontRole::Mono, None);
-        labels.push(ProseLabel {
+        paint.window_labels.push(ProseLabel {
             text: status,
             x: surface_w - pad - sw,
             y: cy,
@@ -1785,18 +1836,38 @@ impl App {
         self.rescope_active_root();
     }
 
+    /// Build the active tab's pane layer for the frame at `now`: each shown pane's frame data,
+    /// how the layer is framed, and its overlay display list. One instant frames them all, so a
+    /// moving camera (ADR-0011) places each pane's grid and its status line together.
+    fn build_pane_layer(&mut self, now: Instant) -> (Vec<PaneFrame>, PaneLayer, PaneOverlayPaint) {
+        let shot = self.moving_shot(now);
+        let layout = self.shown_layout(shot);
+        let viewport = self.viewport_rect();
+        let layer = PaneLayer {
+            zone: Some(PxRect {
+                x: viewport.x,
+                y: viewport.y,
+                w: viewport.w,
+                h: viewport.h,
+            }),
+            dividers: shot.map_or(1.0, |shot| shot.dividers),
+        };
+        (
+            self.pane_frames(&layout),
+            layer,
+            self.pane_overlay_paint(&layout),
+        )
+    }
+
     /// Repaint every visible pane from its terminal grid, resolving cell colors and
     /// overlaying the selection and the focused-pane ring.
     fn redraw(&mut self) {
         let redraw_start = Instant::now();
         self.drain_dictation();
-        let frames = self.pane_frames();
-
+        // Build the panes, their overlays (exited-pane scrims/messages, status lines, empty-state
+        // chips) and the chrome frames, all before the mutable renderer borrow.
+        let (frames, pane_layer, pane_overlay) = self.build_pane_layer(redraw_start);
         let views: Vec<PaneView> = frames.iter().map(PaneFrame::view).collect();
-
-        // Build the pane-level overlays (exited-pane scrims/messages + empty-state chips) and
-        // the chrome frames, all before the mutable renderer borrow.
-        let (scrims, pane_overlay_quads, pane_overlay_labels) = self.pane_overlay_paint();
         let sidebar = self.sidebar.visible().then(|| self.build_sidebar_frame());
         let git_dock = self.git_dock.open.then(|| self.build_git_dock_frame());
         let timeline = self.timeline.open.then(|| self.build_timeline_frame());
@@ -1833,8 +1904,8 @@ impl App {
         let settings = self.settings.open.then(|| self.build_settings_frame());
 
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_panes(&views);
-            renderer.set_pane_overlays(&scrims, &pane_overlay_quads, &pane_overlay_labels);
+            renderer.set_panes(&views, pane_layer);
+            renderer.set_pane_overlays(&pane_overlay.view(pane_layer.zone));
             match &sidebar {
                 Some(paint) => renderer.set_sidebar(Some(&SidebarView {
                     panel: paint.panel,
@@ -3388,36 +3459,122 @@ impl App {
         let inherit = (action == PaneAction::Open && self.config.panes.split_inherits_cwd)
             .then(|| self.focused_pane_abs_cwd())
             .flatten();
-        let ws = self.active_tab_mut();
-        let changed = match action {
+        let changed = self.change_tree(|tree| match action {
             PaneAction::Open => {
-                ws.tree.open();
+                tree.open();
                 true
             }
-            PaneAction::Focus(dir) => ws.tree.focus(dir),
-            PaneAction::FocusIndex(index) => ws
-                .tree
+            PaneAction::Focus(dir) => tree.focus(dir),
+            PaneAction::FocusIndex(index) => tree
                 .panes()
                 .get(index)
-                .is_some_and(|&id| ws.tree.set_focus(id)),
-            PaneAction::Close => ws.tree.close(),
+                .is_some_and(|&id| tree.set_focus(id)),
+            PaneAction::Close => tree.close(),
             PaneAction::Zoom => {
-                ws.tree.zoom_toggle();
+                tree.zoom_toggle();
                 true
             }
-        };
+        });
         if changed {
             self.inherit_cwd = inherit;
-            let ws = self.active_tab_mut();
-            ws.selection = None;
-            ws.activated = true; // operating on panes means the tab is in use; clear its empty state
-            self.sync_layout();
-            // A focus/close/zoom may have changed which pane is focused; follow its repo at once
-            // (a differently-`cd`'d pane) instead of lagging the next poll.
-            self.rescope_active();
-            if let Some(window) = self.window.as_ref() {
-                window.request_redraw();
+            self.after_pane_change();
+        }
+    }
+
+    /// Change the active tab's pane tree with `change`, which reports whether it changed
+    /// anything, and move the camera from what the tab showed to its new resting view
+    /// (ADR-0011). Returns whether the tree changed.
+    fn change_tree(&mut self, change: impl FnOnce(&mut PaneTree) -> bool) -> bool {
+        let now = Instant::now();
+        let ws = self.active_tab_mut();
+        let before = zoom::Before::capture(&ws.tree, zoom::shown(&ws.tree, ws.zoom, now));
+        if !change(&mut ws.tree) {
+            return false;
+        }
+        ws.zoom = zoom::after_change(&ws.tree, before, ws.zoom, now);
+        true
+    }
+
+    /// Follow a change to the active tab's pane tree: drop the selection, reconcile the
+    /// terminals, and repaint.
+    fn after_pane_change(&mut self) {
+        let ws = self.active_tab_mut();
+        ws.selection = None;
+        ws.activated = true; // operating on panes means the tab is in use; clear its empty state
+        self.sync_layout();
+        // A focus/close/zoom may have changed which pane is focused; follow its repo at once
+        // (a differently-`cd`'d pane) instead of lagging the next poll.
+        self.rescope_active();
+        self.request_redraw();
+    }
+
+    /// Follow a trackpad pinch (ADR-0011): spreading two fingers over a pane zooms the view
+    /// into it and pinching them zooms back out to the spiral. The view tracks the fingers and,
+    /// once they lift, settles on whichever of the two fits best.
+    fn on_pinch(&mut self, delta: f64, phase: TouchPhase) {
+        let now = Instant::now();
+        match phase {
+            TouchPhase::Started => {
+                let Some((under, _)) = self.uncovered_pane_at_pointer() else {
+                    return;
+                };
+                let ws = self.active_tab_mut();
+                let shown = zoom::shown(&ws.tree, ws.zoom, now);
+                let Some(mut pinch) = zoom::Pinch::begin(&ws.tree, Some(under), shown) else {
+                    return;
+                };
+                pinch.update(delta);
+                ws.zoom = Some(zoom::Motion::Pinch(pinch));
+                self.pinching = true;
             }
+            TouchPhase::Moved => {
+                if !self.pinching {
+                    return;
+                }
+                if let Some(zoom::Motion::Pinch(pinch)) = &mut self.active_tab_mut().zoom {
+                    pinch.update(delta);
+                }
+            }
+            TouchPhase::Ended | TouchPhase::Cancelled => {
+                self.pinching = false;
+                if self.release_pinch(phase == TouchPhase::Ended, now) {
+                    self.after_pane_change();
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// Let go of the active tab's pinch, if it has one: `ended` settles on the view that fits
+    /// best, otherwise it springs back. Returns whether the pane tree changed.
+    fn release_pinch(&mut self, ended: bool, now: Instant) -> bool {
+        let ws = self.active_tab_mut();
+        let Some(zoom::Motion::Pinch(pinch)) = ws.zoom else {
+            return false;
+        };
+        let (glide, changed) = pinch.release(&mut ws.tree, ended, now);
+        ws.zoom = Some(glide);
+        changed
+    }
+
+    /// A two-finger double-tap on the trackpad (macOS smart zoom) zooms into the pane under
+    /// the pointer, or back out of the zoomed pane (ADR-0011).
+    fn on_double_tap(&mut self) {
+        let Some((id, _)) = self.uncovered_pane_at_pointer() else {
+            return;
+        };
+        let changed = self.change_tree(|tree| {
+            if !tree.is_zoomed() {
+                if tree.count() < 2 {
+                    return false;
+                }
+                tree.set_focus(id);
+            }
+            tree.zoom_toggle();
+            true
+        });
+        if changed {
+            self.after_pane_change();
         }
     }
 
@@ -4317,7 +4474,7 @@ impl App {
         tab.custom_title.clone_from(&ts.custom_title);
         tab.group = ts.group;
         tab.activated = ts.activated;
-        let rects: HashMap<PaneId, Rect> = tab.tree.layout(viewport).into_iter().collect();
+        let rects: HashMap<PaneId, Rect> = tab.tree.resting_layout(viewport).into_iter().collect();
         for (i, id) in tab.tree.panes().into_iter().enumerate() {
             let saved_cwd = ts.cwds.get(i).and_then(Clone::clone);
             let start = saved_cwd.as_deref().map(expand_home);
@@ -5473,7 +5630,7 @@ impl App {
                         sidebar::Hit::Util(action) => self.on_util_action(action),
                     }
                 } else if let Some((id, rect)) = self.pane_at_pointer() {
-                    self.active_tab_mut().tree.set_focus(id);
+                    self.change_tree(|tree| tree.set_focus(id));
                     let (cell_w, cell_h) = self.cell_size();
                     let cell =
                         pointer_cell_in(rect, cell_w, cell_h, self.pane_inset(), self.pointer);
@@ -5566,6 +5723,31 @@ impl PaneFrame {
             selection: &self.selection,
             focused: self.focused,
             logo: self.logo,
+        }
+    }
+}
+
+/// Owned pane-overlay display list the borrowed [`PaneOverlayView`] points at: the per-pane
+/// scrims, quads and labels, then the window chrome sharing the pass (the find bar).
+#[derive(Default)]
+struct PaneOverlayPaint {
+    scrims: Vec<PxRect>,
+    quads: Vec<skelly_render::ChromeQuad>,
+    labels: Vec<ProseLabel>,
+    window_quads: Vec<skelly_render::ChromeQuad>,
+    window_labels: Vec<ProseLabel>,
+}
+
+impl PaneOverlayPaint {
+    /// Borrow this display list as a [`PaneOverlayView`], the panes' part clipped to `zone`.
+    fn view(&self, zone: Option<PxRect>) -> PaneOverlayView<'_> {
+        PaneOverlayView {
+            zone,
+            scrims: &self.scrims,
+            quads: &self.quads,
+            labels: &self.labels,
+            window_quads: &self.window_quads,
+            window_labels: &self.window_labels,
         }
     }
 }
@@ -6119,6 +6301,8 @@ impl ApplicationHandler<Wakeup> for App {
                 ..
             } => self.on_right_click(),
             WindowEvent::MouseWheel { delta, .. } => self.on_mouse_wheel(delta),
+            WindowEvent::PinchGesture { delta, phase, .. } => self.on_pinch(delta, phase),
+            WindowEvent::DoubleTapGesture { .. } => self.on_double_tap(),
             WindowEvent::DroppedFile(path) => self.on_file_dropped(&path),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 // The window moved to a display with a different backing scale factor (e.g. a
@@ -6311,7 +6495,18 @@ impl App {
             .tabs
             .get(self.active)
             .is_some_and(|tab| tab.empty_fade.is_some());
-        self.palette_anim.is_some() || self.confirm_anim.is_some() || fading
+        // The active tab's camera (ADR-0011): a pinch the fingers already let go of (left on a
+        // tab the user switched away from mid-gesture) springs back, and a settled glide clears.
+        if !self.pinching {
+            self.release_pinch(false, now);
+        }
+        let zoom = self.tabs.get(self.active).and_then(|tab| tab.zoom);
+        if zoom.is_some_and(|motion| motion.settled(now)) {
+            self.tabs[self.active].zoom = None;
+            self.request_redraw();
+        }
+        let zooming = zoom.is_some_and(|motion| motion.gliding(now));
+        self.palette_anim.is_some() || self.confirm_anim.is_some() || fading || zooming
     }
 }
 

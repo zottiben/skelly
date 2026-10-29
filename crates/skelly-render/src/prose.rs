@@ -47,11 +47,13 @@ pub struct ProseLabel {
     pub max_w: f32,
 }
 
-/// One label's shaped buffer plus where it draws and a fingerprint of what was shaped.
+/// One label's shaped buffer plus where it draws, what it clips to, and a fingerprint of
+/// what was shaped.
 struct LabelBuf {
     buffer: Buffer,
     x: f32,
     y: f32,
+    clip: PxRect,
     color: Srgb,
     shaped: Option<u64>,
 }
@@ -60,7 +62,6 @@ struct LabelBuf {
 /// [`TextLayer`](crate::text::TextLayer) but keyed on labels rather than a cell grid.
 pub(crate) struct ProseLayer {
     scale: f32,
-    clip: PxRect,
     font_system: FontSystem,
     swash_cache: glyphon::SwashCache,
     viewport: Viewport,
@@ -88,12 +89,6 @@ impl ProseLayer {
             TextRenderer::new(&mut atlas, device, wgpu::MultisampleState::default(), None);
         Self {
             scale,
-            clip: PxRect {
-                x: 0.0,
-                y: 0.0,
-                w: 0.0,
-                h: 0.0,
-            },
             font_system,
             swash_cache,
             viewport,
@@ -117,6 +112,12 @@ impl ProseLayer {
                 buffer,
                 x: 0.0,
                 y: 0.0,
+                clip: PxRect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: 0.0,
+                    h: 0.0,
+                },
                 color: Srgb { r: 0, g: 0, b: 0 },
                 shaped: None,
             });
@@ -133,17 +134,25 @@ impl ProseLayer {
     /// Replace the labels drawn next frame, clipped to `clip`. Re-shapes only labels whose
     /// content fingerprint changed; repositioning is always cheap.
     pub(crate) fn set_labels(&mut self, input: &[ProseLabel], clip: PxRect) {
-        self.clip = clip;
-        self.ensure(input.len());
+        self.set_label_runs(&[(input, clip)]);
+    }
+
+    /// Replace the labels drawn next frame with runs of labels, each clipped to its own rect.
+    pub(crate) fn set_label_runs(&mut self, runs: &[(&[ProseLabel], PxRect)]) {
+        self.ensure(runs.iter().map(|(labels, _)| labels.len()).sum());
         let scale = self.scale;
         let Self {
             labels,
             font_system,
             ..
         } = self;
-        for (buf, label) in labels.iter_mut().zip(input) {
+        let input = runs
+            .iter()
+            .flat_map(|(labels, clip)| labels.iter().map(move |label| (label, *clip)));
+        for (buf, (label, clip)) in labels.iter_mut().zip(input) {
             buf.x = label.x;
             buf.y = label.y;
+            buf.clip = clip;
             buf.color = label.color;
             let fingerprint = label_fingerprint(label, scale);
             if buf.shaped == Some(fingerprint) {
@@ -199,13 +208,6 @@ impl ProseLayer {
             return Ok(());
         }
         self.viewport.update(queue, Resolution { width, height });
-        let (cx, cy, cw, ch) = (self.clip.x, self.clip.y, self.clip.w, self.clip.h);
-        let bounds = TextBounds {
-            left: clip_i32(cx),
-            top: clip_i32(cy),
-            right: clip_i32(cx + cw),
-            bottom: clip_i32(cy + ch),
-        };
         let areas: Vec<TextArea> = self
             .labels
             .iter()
@@ -214,7 +216,12 @@ impl ProseLayer {
                 left: label.x,
                 top: label.y,
                 scale: 1.0,
-                bounds,
+                bounds: TextBounds {
+                    left: clip_i32(label.clip.x),
+                    top: clip_i32(label.clip.y),
+                    right: clip_i32(label.clip.x + label.clip.w),
+                    bottom: clip_i32(label.clip.y + label.clip.h),
+                },
                 default_color: Color::rgb(label.color.r, label.color.g, label.color.b),
                 custom_glyphs: &[],
             })

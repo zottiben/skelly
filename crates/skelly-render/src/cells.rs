@@ -525,6 +525,24 @@ pub(crate) struct QuadLayer {
     instances: wgpu::Buffer,
     capacity: u64,
     count: u32,
+    surface: (u32, u32),
+    /// Scissored runs of the uploaded quads: each `(end, scissor)` draws from the previous
+    /// run's end up to `end`, cut to `scissor` (`None`: the whole surface).
+    runs: Vec<(u32, Option<Scissor>)>,
+}
+
+/// A scissor rectangle `[x, y, w, h]` in whole surface pixels; zero-sized when the clip
+/// misses the surface.
+type Scissor = [u32; 4];
+
+/// `clip` snapped to whole pixels and kept inside a `width` x `height` surface, as a render
+/// pass scissor must be. A pixel is kept when its center lies inside `clip`, the rule quads
+/// rasterize by.
+fn scissor(clip: crate::PxRect, width: u32, height: u32) -> Scissor {
+    let snap = |v: f32, max: u32| v.round().clamp(0.0, max as f32) as u32;
+    let (x0, x1) = (snap(clip.x, width), snap(clip.x + clip.w, width));
+    let (y0, y1) = (snap(clip.y, height), snap(clip.y + clip.h, height));
+    [x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0)]
 }
 
 impl QuadLayer {
@@ -615,11 +633,13 @@ impl QuadLayer {
             instances,
             capacity: 0,
             count: 0,
+            surface: (0, 0),
+            runs: Vec::new(),
         }
     }
 
     /// Upload the quads to draw, sized for a `surface_width` x `surface_height`
-    /// target. Grows the instance buffer as needed.
+    /// target, all unclipped. Grows the instance buffer as needed.
     pub(crate) fn set(
         &mut self,
         device: &wgpu::Device,
@@ -637,6 +657,8 @@ impl QuadLayer {
             }),
         );
 
+        self.surface = (surface_width, surface_height);
+        self.runs.clear();
         self.count = quads.len() as u32;
         if quads.is_empty() {
             return;
@@ -653,6 +675,22 @@ impl QuadLayer {
             self.capacity = needed;
         }
         queue.write_buffer(&self.instances, 0, bytes);
+    }
+
+    /// Clip the uploaded quads in runs: each `(end, clip)` cuts the quads from the previous
+    /// run's end up to index `end` to `clip` (`None`: unclipped). Quads past the last run
+    /// draw unclipped. Call after [`set`](Self::set), which clears the runs.
+    pub(crate) fn set_clips(&mut self, runs: &[(usize, Option<crate::PxRect>)]) {
+        let (width, height) = self.surface;
+        self.runs = runs
+            .iter()
+            .map(|&(end, clip)| {
+                (
+                    u32::try_from(end).unwrap_or(u32::MAX),
+                    clip.map(|c| scissor(c, width, height)),
+                )
+            })
+            .collect();
     }
 
     /// Draw the uploaded quads onto `view`. When `clear` is `Some`, the pass first
@@ -694,7 +732,20 @@ impl QuadLayer {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.bind_group, &[]);
                 pass.set_vertex_buffer(0, self.instances.slice(..));
-                pass.draw(0..6, 0..self.count);
+                let (width, height) = self.surface;
+                let mut start = 0;
+                let tail = (self.count, None);
+                for &(end, clip) in self.runs.iter().chain(std::iter::once(&tail)) {
+                    let end = end.min(self.count);
+                    if end > start {
+                        let [x, y, w, h] = clip.unwrap_or([0, 0, width, height]);
+                        if w > 0 && h > 0 {
+                            pass.set_scissor_rect(x, y, w, h);
+                            pass.draw(0..6, start..end);
+                        }
+                    }
+                    start = start.max(end);
+                }
             }
         }
         queue.submit(std::iter::once(encoder.finish()));
@@ -936,6 +987,24 @@ mod tests {
         );
         let inside = cursor((0, 0));
         assert!(rect_eq(inside[0].rect, [0.0, 0.0, 10.0, 20.0]));
+    }
+
+    #[test]
+    fn a_scissor_snaps_to_pixel_centers_and_stays_on_the_surface() {
+        let px = |x, y, w, h| crate::PxRect { x, y, w, h };
+        assert_eq!(
+            super::scissor(px(10.4, 20.6, 100.2, 50.0), 800, 600),
+            [10, 21, 101, 50]
+        );
+        assert_eq!(
+            super::scissor(px(-40.0, -10.0, 900.0, 700.0), 800, 600),
+            [0, 0, 800, 600]
+        );
+        assert_eq!(
+            super::scissor(px(900.0, 10.0, 50.0, 50.0), 800, 600)[2],
+            0,
+            "off the surface"
+        );
     }
 
     #[test]

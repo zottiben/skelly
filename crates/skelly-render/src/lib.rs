@@ -163,6 +163,51 @@ pub struct PaneView<'a> {
     pub logo: Option<PxRect>,
 }
 
+/// How the pane layer is framed this frame: the pane zone it is clipped to and the opacity
+/// of the dividers and focus ring.
+///
+/// At rest every pane lies inside the zone and the dividers are opaque. While the view
+/// zooms, panes slide past the zone's edges and are cut there, and the dividers fade out as
+/// one pane comes to fill the zone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaneLayer {
+    /// The pane zone, physical px; `None` clips each pane only to its own `rect`.
+    pub zone: Option<PxRect>,
+    /// Opacity of the dividers and the focused ring, `0..=1`.
+    pub dividers: f32,
+}
+
+impl Default for PaneLayer {
+    fn default() -> Self {
+        Self {
+            zone: None,
+            dividers: 1.0,
+        }
+    }
+}
+
+/// The pane-level overlays drawn just above the panes and beneath every other chrome layer:
+/// a translucent `bg.base` scrim over each exited pane plus the binary's quads and labels
+/// over the panes (status lines, voice bars, exit messages, empty-state chips), all clipped
+/// to the pane zone like the panes beneath, then window chrome sharing the pass unclipped
+/// (the find bar).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PaneOverlayView<'a> {
+    /// The pane zone the scrims, `quads` and `labels` are clipped to, physical px; `None`
+    /// leaves them unclipped.
+    pub zone: Option<PxRect>,
+    /// The exited-pane rects to scrim, physical px.
+    pub scrims: &'a [PxRect],
+    /// Quads over the panes, above the scrims.
+    pub quads: &'a [ChromeQuad],
+    /// Positioned proportional labels over the panes.
+    pub labels: &'a [ProseLabel],
+    /// Window chrome quads drawn above the pane overlays, unclipped.
+    pub window_quads: &'a [ChromeQuad],
+    /// Window chrome labels drawn above the pane overlays, unclipped.
+    pub window_labels: &'a [ProseLabel],
+}
+
 /// The command-palette / modal overlay to draw over the live terminal (proportional chrome).
 ///
 /// The renderer draws the floating card (the `e4` shadow, `border.strong` ring, and

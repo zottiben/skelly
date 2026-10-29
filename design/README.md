@@ -82,6 +82,19 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-10-29 - **Pane zoom is an animated camera over the spiral, from the keyboard, a pinch
+  or a two-finger double-tap.** User request: zoom into any pane with animation, in the
+  style of TrellisWM, and back out to the panes exactly as they were. The spiral never
+  re-tiles for a zoom; the camera glides into the focused pane and back out over the
+  guide's 260 ms pane token with the standard easing, and the dividers and focus ring fade
+  with it (ADR-0011). Zoom follows focus, so `⌥H/J/K/L` and `⌥1..9` pan from pane to pane
+  while zoomed. On macOS a trackpad pinch over a pane follows the fingers and, when they
+  lift, settles in or springs back; a two-finger double-tap toggles zoom on the pane under
+  the pointer. Pane text keeps its size while the rects move, and each terminal resizes
+  once per zoom. No new setting. Extends the guide's §10.4 "`⌥Z` zooms the focused pane to
+  full, again to restore", which gives no motion. _(was: an instant re-tile with no
+  zoom motion)_
+
 - 2026-10-29 - **Panes open only with `⌘K` and tile as a clockwise Fibonacci spiral with no
   cap; the command palette moves to `⌘P`.** User request: one chord opens a pane, panes
   size themselves along the Fibonacci sequence in a clockwise spiral, no pane limit, and no

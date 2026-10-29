@@ -13,6 +13,11 @@
 //! `F(k) / F(k+1)` of that space (`F` being the Fibonacci sequence). On a viewport sized
 //! `F(n+1) x F(n)` the `n` panes are exactly the squares of the Fibonacci spiral. Exactly
 //! one pane is always focused, and the focused pane can be zoomed to fill the viewport.
+//!
+//! Zooming never re-tiles the spiral: it moves a [`Camera`] over it. The resting view is the
+//! [`Camera::OVERVIEW`] when unzoomed, or [`PaneTree::framing`] the focused pane when zoomed,
+//! and [`Camera::lerp`] moves between two views with every pane still tiled edge to edge, so
+//! the binary can animate a zoom by drawing [`PaneTree::view`] at each step.
 
 #![doc(test(attr(deny(warnings))))]
 
@@ -43,6 +48,10 @@ enum Axis {
     Col,
 }
 
+/// The smallest pane extent (viewport-relative) a camera frames, so a pane past `f64`
+/// precision deep in the spiral still yields a finite camera.
+const MIN_FRAMED_EXTENT: f64 = 1e-12;
+
 /// A rectangle in the caller's coordinate space (e.g. physical pixels). Layout is
 /// resolution-independent: pass whatever viewport you render into and read back each
 /// pane's rectangle within it.
@@ -64,17 +73,36 @@ impl Rect {
     pub fn new(x: f32, y: f32, w: f32, h: f32) -> Self {
         Self { x, y, w, h }
     }
+}
+
+/// A rectangle in viewport-relative units (the viewport spans `0..1` on both axes), in `f64`
+/// so panes deep in the spiral, and cameras zoomed far into them, keep their precision.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Unit {
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+}
+
+impl Unit {
+    const VIEWPORT: Unit = Unit {
+        x: 0.0,
+        y: 0.0,
+        w: 1.0,
+        h: 1.0,
+    };
 
     /// Split into `(first, second)` along `axis`, the first taking `ratio` of the
     /// extent. The second takes the exact remainder, so the two always tile `self`
     /// with no gap or overlap regardless of float rounding.
-    fn split(self, axis: Axis, ratio: f32) -> (Rect, Rect) {
+    fn split(self, axis: Axis, ratio: f64) -> (Unit, Unit) {
         match axis {
             Axis::Row => {
                 let w1 = self.w * ratio;
                 (
-                    Rect { w: w1, ..self },
-                    Rect {
+                    Unit { w: w1, ..self },
+                    Unit {
                         x: self.x + w1,
                         w: self.w - w1,
                         ..self
@@ -84,14 +112,92 @@ impl Rect {
             Axis::Col => {
                 let h1 = self.h * ratio;
                 (
-                    Rect { h: h1, ..self },
-                    Rect {
+                    Unit { h: h1, ..self },
+                    Unit {
                         y: self.y + h1,
                         h: self.h - h1,
                         ..self
                     },
                 )
             }
+        }
+    }
+}
+
+/// Where the view looks over a tab's spiral: a per-axis scale and offset in viewport-relative
+/// units. [`Camera::OVERVIEW`] shows every pane at its resting size; [`PaneTree::framing`]
+/// fills the viewport with one pane and pushes the rest out past its edges. Relative units
+/// keep a camera valid across window resizes.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct Camera {
+    scale_x: f64,
+    scale_y: f64,
+    x: f64,
+    y: f64,
+}
+
+impl Camera {
+    /// The resting, unzoomed view: the whole spiral filling the viewport.
+    pub const OVERVIEW: Camera = Camera {
+        scale_x: 1.0,
+        scale_y: 1.0,
+        x: 0.0,
+        y: 0.0,
+    };
+
+    /// The camera that maps `target` onto the whole viewport.
+    fn framing(target: Unit) -> Camera {
+        let scale_x = 1.0 / target.w.max(MIN_FRAMED_EXTENT);
+        let scale_y = 1.0 / target.h.max(MIN_FRAMED_EXTENT);
+        Camera {
+            scale_x,
+            scale_y,
+            x: -target.x * scale_x,
+            y: -target.y * scale_y,
+        }
+    }
+
+    /// How many times larger than [`Camera::OVERVIEW`] this camera shows the spiral: the
+    /// geometric mean of its two axes' scales.
+    #[must_use]
+    pub fn zoom(self) -> f64 {
+        (self.scale_x * self.scale_y).sqrt()
+    }
+
+    /// The view `t` of the way from `self` to `to` (`t` clamped to `0..=1`). Every pane moves
+    /// along a straight line between its two placements, so the panes stay tiled edge to edge
+    /// at every step, and the endpoints are exact.
+    #[must_use]
+    pub fn lerp(self, to: Camera, t: f32) -> Camera {
+        if t <= 0.0 {
+            return self;
+        }
+        if t >= 1.0 {
+            return to;
+        }
+        let t = f64::from(t);
+        let mix = |a: f64, b: f64| a + (b - a) * t;
+        Camera {
+            scale_x: mix(self.scale_x, to.scale_x),
+            scale_y: mix(self.scale_y, to.scale_y),
+            x: mix(self.x, to.x),
+            y: mix(self.y, to.y),
+        }
+    }
+
+    /// Where the relative rectangle `r` lands within `viewport`.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "on-screen coordinates are pixel-scale values well inside f32"
+    )]
+    fn place(self, r: Unit, viewport: Rect) -> Rect {
+        let (vx, vy) = (f64::from(viewport.x), f64::from(viewport.y));
+        let (vw, vh) = (f64::from(viewport.w), f64::from(viewport.h));
+        Rect {
+            x: (vx + (r.x * self.scale_x + self.x) * vw) as f32,
+            y: (vy + (r.y * self.scale_y + self.y) * vh) as f32,
+            w: (r.w * self.scale_x * vw) as f32,
+            h: (r.h * self.scale_y * vh) as f32,
         }
     }
 }
@@ -161,11 +267,10 @@ impl PaneTree {
     }
 
     /// Focus pane `id` directly (e.g. on a mouse click). Returns `false` without
-    /// changing anything if `id` isn't a live pane. Cancels zoom.
+    /// changing anything if `id` isn't a live pane. A zoomed view moves to the new pane.
     pub fn set_focus(&mut self, id: PaneId) -> bool {
         if self.contains(id) {
             self.focused = id;
-            self.zoomed = false;
             true
         } else {
             false
@@ -201,7 +306,7 @@ impl PaneTree {
     }
 
     /// Move focus to the nearest pane in `dir` (by the tiled layout). Returns whether focus
-    /// moved (it will not at the edge of the layout). Cancels zoom.
+    /// moved (it will not at the edge of the layout). A zoomed view moves to the new pane.
     pub fn focus(&mut self, dir: Dir) -> bool {
         let layout = self.tiled_layout(Rect::new(0.0, 0.0, 1.0, 1.0));
         let Some(cur) = layout
@@ -219,7 +324,6 @@ impl PaneTree {
             .map(|(_, id)| id);
         if let Some(id) = target {
             self.focused = id;
-            self.zoomed = false;
             true
         } else {
             false
@@ -233,9 +337,10 @@ impl PaneTree {
         self.zoomed
     }
 
-    /// Each visible pane's rectangle within `viewport`. When a pane is zoomed, only
-    /// that pane is returned, filling the whole viewport; otherwise the panes tile
-    /// `viewport` exactly as the Fibonacci spiral, with no gaps or overlaps.
+    /// Each visible pane's rectangle within `viewport` at rest. When a pane is zoomed, only
+    /// that pane is returned, filling exactly the whole viewport; otherwise the panes tile
+    /// `viewport` as the Fibonacci spiral, with no gaps or overlaps. The same panes as
+    /// [`view`](Self::view) through [`camera`](Self::camera), without its rounding.
     #[must_use]
     pub fn layout(&self, viewport: Rect) -> Vec<(PaneId, Rect)> {
         if self.zoomed {
@@ -245,11 +350,62 @@ impl PaneTree {
         }
     }
 
+    /// Every pane with the rectangle its terminal is sized for: its slot in the spiral, or
+    /// `viewport` for the zoomed pane. Unlike [`layout`](Self::layout) it also lists the panes
+    /// the zoom hides, so each is ready for a camera move to show it (ADR-0011).
+    #[must_use]
+    pub fn resting_layout(&self, viewport: Rect) -> Vec<(PaneId, Rect)> {
+        let mut layout = self.tiled_layout(viewport);
+        if self.zoomed {
+            for (id, rect) in &mut layout {
+                if *id == self.focused {
+                    *rect = viewport;
+                }
+            }
+        }
+        layout
+    }
+
+    /// The resting camera: [`Camera::OVERVIEW`], or the focused pane framed when zoomed.
+    #[must_use]
+    pub fn camera(&self) -> Camera {
+        if self.zoomed {
+            self.framing(self.focused)
+        } else {
+            Camera::OVERVIEW
+        }
+    }
+
+    /// The camera that fills the viewport with pane `id`, or [`Camera::OVERVIEW`] when `id`
+    /// isn't a live pane.
+    #[must_use]
+    pub fn framing(&self, id: PaneId) -> Camera {
+        self.panes
+            .iter()
+            .zip(spiral(self.panes.len()))
+            .find(|(p, _)| **p == id)
+            .map_or(Camera::OVERVIEW, |(_, r)| Camera::framing(r))
+    }
+
+    /// Each pane `camera` shows within `viewport`, with its rectangle there - which may reach
+    /// past the viewport's edges. Panes the camera leaves wholly outside are omitted.
+    #[must_use]
+    pub fn view(&self, viewport: Rect, camera: Camera) -> Vec<(PaneId, Rect)> {
+        self.panes
+            .iter()
+            .copied()
+            .zip(spiral(self.panes.len()))
+            .map(|(id, r)| (id, camera.place(r, viewport)))
+            .filter(|(_, r)| shows(viewport, *r))
+            .collect()
+    }
+
     fn tiled_layout(&self, viewport: Rect) -> Vec<(PaneId, Rect)> {
         self.panes
             .iter()
             .copied()
-            .zip(spiral(viewport, self.panes.len()))
+            .zip(spiral(self.panes.len()))
+            .map(|(id, r)| (id, Camera::OVERVIEW.place(r, viewport)))
             .collect()
     }
 
@@ -291,13 +447,13 @@ impl Default for PaneTree {
     }
 }
 
-/// Tile `viewport` with `n` panes as a clockwise Fibonacci spiral, in spiral order.
-fn spiral(viewport: Rect, n: usize) -> Vec<Rect> {
+/// Tile the relative viewport with `n` panes as a clockwise Fibonacci spiral, in spiral order.
+fn spiral(n: usize) -> Vec<Unit> {
     let mut out = Vec::with_capacity(n);
     if n == 0 {
         return out;
     }
-    let mut rest = viewport;
+    let mut rest = Unit::VIEWPORT;
     for (i, ratio) in fibonacci_shares(n).into_iter().enumerate() {
         let (pane, remainder) = match i % 4 {
             0 => rest.split(Axis::Row, ratio),
@@ -321,15 +477,25 @@ fn spiral(viewport: Rect, n: usize) -> Vec<Rect> {
 /// The share each of the first `n - 1` panes takes of the space left to it: with `k` panes
 /// still to place, `F(k) / F(k+1)`. Built from the innermost split (`k = 2`, an even half)
 /// outward via `F(k+1) / F(k+2) = 1 / (1 + F(k) / F(k+1))`, so no Fibonacci number overflows.
-fn fibonacci_shares(n: usize) -> Vec<f32> {
+fn fibonacci_shares(n: usize) -> Vec<f64> {
     let mut shares = Vec::with_capacity(n.saturating_sub(1));
-    let mut share = 0.5_f32;
+    let mut share = 0.5_f64;
     for _ in 1..n {
         shares.push(share);
         share = 1.0 / (1.0 + share);
     }
     shares.reverse();
     shares
+}
+
+/// Whether `r` covers any of `viewport` (a sliver under a thousandth of a pixel-scale unit, from
+/// rounding at a pane edge, does not count).
+fn shows(viewport: Rect, r: Rect) -> bool {
+    let eps = 1e-3;
+    r.x < viewport.x + viewport.w - eps
+        && viewport.x < r.x + r.w - eps
+        && r.y < viewport.y + viewport.h - eps
+        && viewport.y < r.y + r.h - eps
 }
 
 /// Score `cand` as a focus target from `cur` moving `dir`: `Some((primary,
@@ -550,6 +716,107 @@ mod tests {
     }
 
     #[test]
+    fn zoom_follows_focus_to_another_pane() {
+        let mut t = PaneTree::new();
+        let first = t.focused();
+        t.open();
+        let third = t.open();
+        t.zoom_toggle();
+
+        assert!(t.focus(Dir::Left));
+        assert!(t.is_zoomed(), "moving focus keeps the zoom");
+        assert_eq!(t.layout(VIEWPORT), vec![(first, VIEWPORT)]);
+
+        assert!(t.set_focus(third));
+        assert!(t.is_zoomed());
+        assert_eq!(t.layout(VIEWPORT), vec![(third, VIEWPORT)]);
+    }
+
+    #[test]
+    fn the_resting_camera_shows_the_resting_layout() {
+        for n in 1..=9 {
+            let mut t = tree_with(n);
+            for _ in 0..2 {
+                assert_view_matches_layout(&t);
+                t.zoom_toggle();
+            }
+        }
+    }
+
+    #[test]
+    fn a_zoomed_tab_keeps_its_hidden_panes_sized_to_their_slots() {
+        let mut t = tree_with(4);
+        let tiled = t.layout(VIEWPORT);
+        assert_eq!(t.resting_layout(VIEWPORT), tiled);
+
+        let zoomed = t.panes()[1];
+        t.set_focus(zoomed);
+        t.zoom_toggle();
+        for ((id, rect), (slot_id, slot)) in t.resting_layout(VIEWPORT).iter().zip(&tiled) {
+            assert_eq!(id, slot_id);
+            assert_eq!(*rect, if *id == zoomed { VIEWPORT } else { *slot });
+        }
+    }
+
+    #[test]
+    fn framing_a_pane_fills_the_viewport_with_it_alone() {
+        let t = tree_with(6);
+        for id in t.panes() {
+            let view = t.view(VIEWPORT, t.framing(id));
+            assert_eq!(view.len(), 1, "{view:?}");
+            assert_eq!(view[0].0, id);
+            assert!(approx_rect(view[0].1, VIEWPORT), "{view:?}");
+        }
+        assert_eq!(t.framing(PaneId(99)), Camera::OVERVIEW);
+        assert!((Camera::OVERVIEW.zoom() - 1.0).abs() < 1e-12);
+        let half = tree_with(2).framing(t.panes()[0]);
+        assert!(
+            (half.zoom() - 2.0_f64.sqrt()).abs() < 1e-9,
+            "a half-width pane"
+        );
+    }
+
+    #[test]
+    fn a_camera_move_slides_each_pane_in_a_straight_line() {
+        let t = tree_with(5);
+        let focused = t.focused();
+        let to = t.framing(focused);
+        assert_eq!(Camera::OVERVIEW.lerp(to, -1.0), Camera::OVERVIEW);
+        assert_eq!(Camera::OVERVIEW.lerp(to, 2.0), to);
+
+        let start = rect_of(&t, focused);
+        let half = t
+            .view(VIEWPORT, Camera::OVERVIEW.lerp(to, 0.5))
+            .into_iter()
+            .find(|(p, _)| *p == focused)
+            .map(|(_, r)| r)
+            .expect("the zooming pane stays in view");
+        assert!(approx_rect(
+            half,
+            Rect::new(
+                f32::midpoint(start.x, VIEWPORT.x),
+                f32::midpoint(start.y, VIEWPORT.y),
+                f32::midpoint(start.w, VIEWPORT.w),
+                f32::midpoint(start.h, VIEWPORT.h),
+            )
+        ));
+    }
+
+    #[test]
+    fn framing_a_pane_deep_in_a_huge_spiral_stays_finite() {
+        let t = tree_with(2000);
+        let last = *t.panes().last().expect("panes");
+        for t_ in [0.0, 0.5, 1.0] {
+            for (_, r) in t.view(VIEWPORT, Camera::OVERVIEW.lerp(t.framing(last), t_)) {
+                assert!(
+                    r.x.is_finite() && r.y.is_finite() && r.w.is_finite() && r.h.is_finite(),
+                    "{r:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn directional_focus_follows_the_spiral_and_stops_at_edges() {
         let mut t = PaneTree::new();
         let first = t.focused();
@@ -624,6 +891,16 @@ mod tests {
         assert_eq!(unique.len(), n, "duplicate pane ids: {panes:?}");
         assert!(t.contains(t.focused()), "focus points at a missing pane");
 
+        assert_view_matches_layout(t);
+        let resting: Vec<PaneId> = t
+            .resting_layout(VIEWPORT)
+            .iter()
+            .map(|(id, _)| *id)
+            .collect();
+        assert_eq!(
+            resting, panes,
+            "every pane rests somewhere, in spiral order"
+        );
         let layout = t.layout(VIEWPORT);
         if t.is_zoomed() {
             assert_eq!(layout, vec![(t.focused(), VIEWPORT)]);
@@ -659,8 +936,52 @@ mod tests {
         );
     }
 
+    fn assert_view_matches_layout(t: &PaneTree) {
+        let view = t.view(VIEWPORT, t.camera());
+        let layout = t.layout(VIEWPORT);
+        assert_eq!(view.len(), layout.len(), "{view:?} != {layout:?}");
+        for ((vid, vr), (lid, lr)) in view.iter().zip(&layout) {
+            assert_eq!(vid, lid);
+            assert!(approx_rect(*vr, *lr), "{vr:?} != {lr:?}");
+        }
+    }
+
+    fn clipped_area(r: Rect) -> f32 {
+        let w = (r.x + r.w).min(VIEWPORT.x + VIEWPORT.w) - r.x.max(VIEWPORT.x);
+        let h = (r.y + r.h).min(VIEWPORT.y + VIEWPORT.h) - r.y.max(VIEWPORT.y);
+        w.max(0.0) * h.max(0.0)
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(400))]
+
+        /// Every step of a camera move between two resting views (the overview or any pane
+        /// framed) still covers the viewport exactly, so a zoom animation never shows a gap
+        /// or a doubled pane.
+        #[test]
+        fn a_camera_between_resting_views_still_tiles_the_viewport(
+            n in 1_usize..24,
+            from in proptest::prelude::any::<u8>(),
+            to in proptest::prelude::any::<u8>(),
+            step in 0.0_f32..=1.0,
+        ) {
+            let t = tree_with(n);
+            let panes = t.panes();
+            let resting = |i: u8| {
+                let i = usize::from(i) % (panes.len() + 1);
+                panes.get(i).map_or(Camera::OVERVIEW, |&id| t.framing(id))
+            };
+            let view = t.view(VIEWPORT, resting(from).lerp(resting(to), step));
+            proptest::prop_assert!(!view.is_empty());
+            for i in 0..view.len() {
+                for j in (i + 1)..view.len() {
+                    proptest::prop_assert!(!overlaps(view[i].1, view[j].1), "{view:?}");
+                }
+            }
+            let area: f32 = view.iter().map(|(_, r)| clipped_area(*r)).sum();
+            let vp_area = VIEWPORT.w * VIEWPORT.h;
+            proptest::prop_assert!((area - vp_area).abs() <= 1e-2 * vp_area, "{area} != {vp_area}");
+        }
 
         /// Any sequence of pane operations keeps the tree well-formed and its layout
         /// an exact tiling of the viewport - the invariants the renderer relies on.

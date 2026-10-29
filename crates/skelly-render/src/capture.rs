@@ -10,13 +10,14 @@
 use skelly_config::Appearance;
 
 use crate::cells::{
-    card_quads, chrome_quad, dock_frame_quads, grid_quads, logo_quads, push_outline, scrim_quad,
-    settings_frame_quads, Quad, QuadLayer, LOGO_WATERMARK_OPACITY,
+    card_quads, chrome_quad, dock_frame_quads, grid_quads, scrim_quad, settings_frame_quads, Quad,
+    QuadLayer,
 };
 use crate::prose::{ProseLabel, ProseLayer};
+use crate::renderer::pane_pass;
 use crate::text::{PaneTextInput, TextLayer};
 use crate::theme::{Rgba, Theme};
-use crate::{ChromeQuad, GridCell, PxRect};
+use crate::{ChromeQuad, GridCell, PaneLayer, PaneView, PxRect};
 
 /// Render plain `content` in `appearance`'s theme and cell font to an offscreen
 /// `width` x `height` sRGB target and return tight RGBA8 bytes (row-major, no row
@@ -42,7 +43,7 @@ pub fn capture_rgba(
         clear,
         |text| {
             text.set_content(content);
-            Vec::new()
+            (Vec::new(), None)
         },
         Vec::new(),
     ))
@@ -73,7 +74,7 @@ pub fn capture_cells_rgba(
         |text| {
             text.set_cells(rows);
             let (cell_w, cell_h, pad) = text.cell_metrics();
-            grid_quads(
+            let quads = grid_quads(
                 cell_w,
                 cell_h,
                 (pad, pad),
@@ -82,7 +83,8 @@ pub fn capture_cells_rgba(
                 crate::CursorShape::Block,
                 theme.accent,
                 selection,
-            )
+            );
+            (quads, None)
         },
         Vec::new(),
     ))
@@ -152,11 +154,14 @@ pub struct CaptureOverlay {
     pub labels: Vec<ProseLabel>,
 }
 
-/// The pane-level overlay for [`capture_panes_rgba`], mirroring `Renderer::set_pane_overlays`:
-/// a `bg.base` scrim over each exited pane, plus content quads (empty-state chip pills) and
-/// proportional labels (the exit message, chip text).
+/// The pane-level overlay for [`capture_panes_rgba`], mirroring
+/// [`PaneOverlayView`](crate::PaneOverlayView) without its window chrome: a `bg.base` scrim
+/// over each exited pane, plus content quads (empty-state chip pills) and proportional labels
+/// (the exit message, chip text), all clipped to `zone`.
 #[derive(Default)]
 pub struct PaneOverlay {
+    /// The pane zone the overlay is clipped to, physical px; `None` leaves it unclipped.
+    pub zone: Option<PxRect>,
     /// The exited-pane rects to scrim, physical px.
     pub scrims: Vec<PxRect>,
     /// Content quads over the scrims (empty-state chip pills).
@@ -169,6 +174,8 @@ pub struct PaneOverlay {
 /// mirroring the windowed renderer's base-chrome + overlay passes.
 #[derive(Default)]
 pub struct Chrome<'a> {
+    /// How the pane layer beneath is framed (its zone clip and divider opacity).
+    pub pane_layer: PaneLayer,
     /// The pane-level overlays (exited-pane scrims/messages + empty-state chips), drawn just
     /// above the panes.
     pub pane_overlay: PaneOverlay,
@@ -211,18 +218,26 @@ pub fn capture_panes_rgba(
         (!po.scrims.is_empty() || !po.quads.is_empty() || !po.labels.is_empty()).then(|| {
             let mut quads: Vec<Quad> = po.scrims.iter().map(|r| scrim_quad(*r, &theme)).collect();
             quads.extend(po.quads.iter().map(chrome_quad));
+            let clip = po.zone.unwrap_or(PxRect {
+                x: 0.0,
+                y: 0.0,
+                w: width as f32,
+                h: height as f32,
+            });
             Scene {
                 quads,
+                quad_clip: po.zone,
                 rows: &[],
                 left: 0.0,
                 top: 0.0,
-                clip: (0.0, 0.0, width as f32, height as f32),
+                clip: (clip.x, clip.y, clip.w, clip.h),
                 prose: po.labels.clone(),
             }
         });
     let dead_pane_scenes: Vec<Scene> = pane_overlay_scene.into_iter().collect();
     let sidebar_scene = chrome.sidebar.map(|sb| SidebarScene {
         quads: sb.quads.iter().map(chrome_quad).collect(),
+        quad_clip: None,
         rows: &[],
         left: sb.panel.x,
         top: sb.panel.y,
@@ -234,6 +249,7 @@ pub fn capture_panes_rgba(
         quads.extend(gd.quads.iter().map(chrome_quad));
         Scene {
             quads,
+            quad_clip: None,
             rows: &[],
             left: gd.panel.x,
             top: gd.panel.y,
@@ -246,6 +262,7 @@ pub fn capture_panes_rgba(
         quads.extend(tl.quads.iter().map(chrome_quad));
         Scene {
             quads,
+            quad_clip: None,
             rows: &[],
             left: tl.panel.x,
             top: tl.panel.y,
@@ -258,6 +275,7 @@ pub fn capture_panes_rgba(
         quads.extend(ov.quads.iter().map(chrome_quad));
         OverlayScene {
             quads,
+            quad_clip: None,
             rows: &[],
             left: ov.panel.x,
             top: ov.panel.y,
@@ -271,7 +289,7 @@ pub fn capture_panes_rgba(
         height,
         scale,
         color(theme.bg_base),
-        |text| paint_panes(text, panes, &theme),
+        |text| paint_panes(text, panes, chrome.pane_layer, &theme),
         // In the windowed renderer's order: the exited-pane overlays just above the panes,
         // then the sidebar (3-4), the git dock / timeline dock (5-6, mutually exclusive),
         // and the palette overlay (7-8) on top.
@@ -286,67 +304,30 @@ pub fn capture_panes_rgba(
     ))
 }
 
-/// Paint every pane's cells into `text` and return its quads (backgrounds/cursor, plus
-/// the dividers + focused ring when tiled) - the pane half of [`capture_panes_rgba`]'s
-/// setup, matching the windowed [`Renderer`](crate::Renderer)'s pane pass.
-fn paint_panes(text: &mut TextLayer, panes: &[CapturePane], theme: &Theme) -> Vec<Quad> {
-    let (cell_w, cell_h, _) = text.cell_metrics();
-    let stroke = text.scale();
-    let mut quads = Vec::new();
-    let mut inputs = Vec::with_capacity(panes.len());
-    for pane in panes {
-        let cursor = pane.focused.then_some(pane.cursor);
-        quads.extend(
-            grid_quads(
-                cell_w,
-                cell_h,
-                pane.origin,
-                &pane.rows,
-                cursor,
-                pane.cursor_shape,
-                theme.accent,
-                &[],
-            )
-            .into_iter()
-            .filter_map(|q| q.clipped_to(pane.rect)),
-        );
-        if let Some(bounds) = pane.logo {
-            quads.extend(logo_quads(bounds, theme, LOGO_WATERMARK_OPACITY));
-        }
-        inputs.push(PaneTextInput {
+/// Paint `panes` into `text` through the windowed renderer's pane pass, returning its quads
+/// and the zone they clip to.
+fn paint_panes(
+    text: &mut TextLayer,
+    panes: &[CapturePane],
+    layer: PaneLayer,
+    theme: &Theme,
+) -> (Vec<Quad>, Option<PxRect>) {
+    let views: Vec<PaneView> = panes
+        .iter()
+        .map(|pane| PaneView {
+            rect: pane.rect,
+            origin: pane.origin,
             rows: &pane.rows,
-            left: pane.origin.0,
-            top: pane.origin.1,
-            clip: (pane.rect.x, pane.rect.y, pane.rect.w, pane.rect.h),
-        });
-    }
-    if panes.len() > 1 {
-        let divider = theme.border.to_linear();
-        for pane in panes {
-            push_outline(
-                &mut quads,
-                pane.rect.x,
-                pane.rect.y,
-                pane.rect.w,
-                pane.rect.h,
-                stroke,
-                divider,
-            );
-        }
-        if let Some(pane) = panes.iter().find(|p| p.focused) {
-            push_outline(
-                &mut quads,
-                pane.rect.x,
-                pane.rect.y,
-                pane.rect.w,
-                pane.rect.h,
-                2.0 * stroke,
-                theme.border_strong.to_linear(),
-            );
-        }
-    }
+            cursor: pane.cursor,
+            cursor_shape: pane.cursor_shape,
+            selection: &[],
+            focused: pane.focused,
+            logo: pane.logo,
+        })
+        .collect();
+    let (quads, inputs) = pane_pass(text, &views, layer, theme);
     text.set_panes(&inputs);
-    quads
+    (quads, layer.zone)
 }
 
 /// The full-window settings view for [`capture_settings_rgba`], mirroring
@@ -388,6 +369,7 @@ pub fn capture_settings_rgba(
     quads.extend(settings.quads.iter().map(chrome_quad));
     let scene = Scene {
         quads,
+        quad_clip: None,
         rows: &[],
         left: settings.panel.x,
         top: settings.panel.y,
@@ -405,7 +387,7 @@ pub fn capture_settings_rgba(
         height,
         scale,
         color(theme.bg_base),
-        |_text| Vec::new(),
+        |_text| (Vec::new(), None),
         vec![scene],
     ))
 }
@@ -423,6 +405,8 @@ fn color(c: Rgba) -> wgpu::Color {
 /// headless capture, mirroring one of the windowed renderer's load-pass pairs.
 struct Scene<'a> {
     quads: Vec<Quad>,
+    /// The scissor for `quads`; `None` draws them unclipped.
+    quad_clip: Option<PxRect>,
     rows: &'a [Vec<GridCell>],
     left: f32,
     top: f32,
@@ -447,7 +431,7 @@ async fn capture_async<F>(
     chrome: Vec<Scene<'_>>,
 ) -> Vec<u8>
 where
-    F: FnOnce(&mut TextLayer) -> Vec<Quad>,
+    F: FnOnce(&mut TextLayer) -> (Vec<Quad>, Option<PxRect>),
 {
     let instance = wgpu::Instance::default();
     let adapter = instance
@@ -481,8 +465,9 @@ where
 
     let mut quad_layer = QuadLayer::new(&device, format);
     let mut text = TextLayer::new(&device, &queue, format, width, height, scale, appearance);
-    let quads = setup(&mut text);
+    let (quads, zone) = setup(&mut text);
     quad_layer.set(&device, &queue, width, height, &quads);
+    quad_layer.set_clips(&[(quads.len(), zone)]);
     quad_layer.draw(&device, &queue, &view, Some(clear));
     text.draw(&device, &queue, &view, width, height)
         .expect("draw text");
@@ -497,6 +482,7 @@ where
     for scene in chrome {
         let mut chrome_quads = QuadLayer::new(&device, format);
         chrome_quads.set(&device, &queue, width, height, &scene.quads);
+        chrome_quads.set_clips(&[(scene.quads.len(), scene.quad_clip)]);
         chrome_quads.draw(&device, &queue, &view, None);
         let mut chrome_text =
             TextLayer::new(&device, &queue, format, width, height, scale, appearance);
