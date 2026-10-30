@@ -15,14 +15,14 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-use glyphon::cosmic_text::LetterSpacing;
+use glyphon::cosmic_text::{FeatureTag, FontFeatures, LetterSpacing};
 use glyphon::{
     Attrs, Buffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, TextArea,
     TextAtlas, TextBounds, TextRenderer, Viewport, Weight, Wrap,
 };
 
 use crate::error::RenderError;
-use crate::fonts::{load_bundled, FontRole};
+use crate::fonts::{load_bundled, FontRole, FAMILY_MONO};
 use crate::theme::Srgb;
 use crate::PxRect;
 
@@ -168,16 +168,11 @@ impl ProseLayer {
             // is kept for callers' layout math, not for constraining the buffer).
             buf.buffer.set_size(None, Some(line_px.max(1.0)));
             let weight = Weight(label.weight.unwrap_or_else(|| role.weight()));
-            let mut attrs = Attrs::new()
-                .family(Family::Name(role.family()))
-                .weight(weight)
-                .color(Color::rgb(label.color.r, label.color.g, label.color.b));
-            // cosmic-text letter-spacing is in em (scaled by the font size at layout), so a
-            // pixel tracking of `t` px is `t / font_size` em - which reduces to the logical
-            // ratio, independent of DPI scale.
-            if let Some(spacing) = letter_spacing(role) {
-                attrs.letter_spacing_opt = Some(spacing);
-            }
+            let attrs = role_attrs(role, weight).color(Color::rgb(
+                label.color.r,
+                label.color.g,
+                label.color.b,
+            ));
             buf.buffer
                 .set_text(&label.text, &attrs, Shaping::Advanced, None);
             buf.buffer.shape_until_scroll(font_system, false);
@@ -272,6 +267,30 @@ impl ProseLayer {
 /// `None` when the role has no tracking. cosmic-text adds letter-spacing in em space and
 /// scales it by the font size at layout, so this em ratio yields the guide's pixel tracking
 /// at any font size and DPI scale.
+/// How `role` shapes at `weight`: its family and tracking, and - for the monospace roles - no
+/// ligatures, so code, paths and keys read character for character as the terminal grid
+/// draws them (the bundled mono face joins `->`, `!=` and the like through `calt`).
+fn role_attrs(role: FontRole, weight: Weight) -> Attrs<'static> {
+    let mut attrs = Attrs::new()
+        .family(Family::Name(role.family()))
+        .weight(weight);
+    // cosmic-text letter-spacing is in em (scaled by the font size at layout), so a pixel
+    // tracking of `t` px is `t / font_size` em - which reduces to the logical ratio,
+    // independent of DPI scale.
+    if let Some(spacing) = letter_spacing(role) {
+        attrs.letter_spacing_opt = Some(spacing);
+    }
+    if role.family() == FAMILY_MONO {
+        let mut features = FontFeatures::new();
+        features
+            .disable(FeatureTag::CONTEXTUAL_ALTERNATES)
+            .disable(FeatureTag::STANDARD_LIGATURES)
+            .disable(FeatureTag::CONTEXTUAL_LIGATURES);
+        attrs = attrs.font_features(features);
+    }
+    attrs
+}
+
 fn letter_spacing(role: FontRole) -> Option<LetterSpacing> {
     let track = role.tracking_px();
     (track.abs() > f32::EPSILON).then(|| LetterSpacing(track / role.size_px()))
@@ -345,12 +364,7 @@ impl TextMeasure {
         self.scratch.set_metrics(Metrics::new(font_px, line_px));
         self.scratch.set_size(None, Some(line_px.max(1.0)));
         let weight = Weight(weight.unwrap_or_else(|| role.weight()));
-        let mut attrs = Attrs::new()
-            .family(Family::Name(role.family()))
-            .weight(weight);
-        if let Some(spacing) = letter_spacing(role) {
-            attrs.letter_spacing_opt = Some(spacing);
-        }
+        let attrs = role_attrs(role, weight);
         self.scratch.set_text(text, &attrs, Shaping::Advanced, None);
         self.scratch
             .shape_until_scroll(&mut self.font_system, false);
@@ -385,6 +399,29 @@ mod tests {
         m.set_scale(1.0);
         let small = m.width("W", FontRole::Label, None);
         assert!(one > small * 1.5, "2x is wider than 1x");
+    }
+
+    /// The glyphs `text` shapes to in `role`.
+    fn glyphs(m: &mut TextMeasure, text: &str, role: FontRole) -> Vec<u16> {
+        let _ = m.width(text, role, None);
+        m.scratch
+            .layout_runs()
+            .flat_map(|run| run.glyphs.iter().map(|g| g.glyph_id))
+            .collect()
+    }
+
+    #[test]
+    fn mono_text_draws_character_for_character_like_the_terminal() {
+        let mut m = TextMeasure::new(2.0);
+        for role in [FontRole::Mono, FontRole::Micro] {
+            for code in ["->", "=>", "!=", "<=", "::", "//", "www"] {
+                let apart: Vec<u16> = code
+                    .chars()
+                    .flat_map(|c| glyphs(&mut m, &c.to_string(), role))
+                    .collect();
+                assert_eq!(glyphs(&mut m, code, role), apart, "{code:?} in {role:?}");
+            }
+        }
     }
 
     #[test]
