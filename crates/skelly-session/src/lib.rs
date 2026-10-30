@@ -24,6 +24,7 @@
 
 #![doc(test(attr(deny(warnings))))]
 
+mod changes;
 mod diff;
 pub mod review;
 mod snapshot;
@@ -35,6 +36,7 @@ use std::process::Command;
 
 use thiserror::Error;
 
+pub use changes::{FileChange, Skipped};
 pub use diff::{DiffLine, FileDiff, Hunk, LineKind};
 pub use snapshot::{session_root, SnapshotStore};
 pub use timeline::{Actor, SessionEvent, Timeline};
@@ -53,6 +55,19 @@ pub enum GitError {
         /// The trimmed stderr git produced.
         stderr: String,
     },
+    /// A hunk to stage or unstage is no longer in the file's staged or unstaged diff: the
+    /// file changed since the hunk was read.
+    #[error("that change is no longer in the file; refresh and try again")]
+    StaleHunk,
+}
+
+/// What [`Repo::toggle_hunk`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Staging {
+    /// The hunk was staged.
+    Staged,
+    /// The hunk was unstaged.
+    Unstaged,
 }
 
 /// A discovered git repository, identified by its working-tree root.
@@ -160,6 +175,85 @@ impl Repo {
         args.push(&path);
         let out = self.git_stdout(&args)?;
         Ok(diff::parse_unified_diff(&out))
+    }
+
+    /// Every change in the working tree against `HEAD`, one [`FileChange`] per file: tracked
+    /// changes whether staged or not, then each untracked file as a file of added lines. In a
+    /// repository with no commits yet, everything is against the empty tree.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git diff` or `git ls-files` cannot be run or fails.
+    pub fn changes(&self) -> Result<Vec<FileChange>, GitError> {
+        let base = if self
+            .git_stdout(&["rev-parse", "--verify", "--quiet", "HEAD"])
+            .is_ok()
+        {
+            "HEAD".to_owned()
+        } else {
+            self.git_stdout(&["hash-object", "-t", "tree", "/dev/null"])?
+                .trim()
+                .to_owned()
+        };
+        // Every flag a user's config could flip and change the text pinned to what the parser
+        // reads: no color, no external or text-converting diff driver, the default prefixes.
+        let patch = self.git_stdout(&[
+            "-c",
+            "core.quotePath=false",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--submodule=short",
+            "-U3",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            &base,
+        ])?;
+        let mut changes = changes::parse_patch(&patch);
+        let others = self.git_stdout(&["ls-files", "--others", "--exclude-standard", "-z"])?;
+        changes.extend(
+            others
+                .split('\0')
+                .filter(|path| !path.is_empty())
+                .map(|path| changes::untracked(&self.root, Path::new(path))),
+        );
+        Ok(changes)
+    }
+
+    /// Stage the part of `hunk` - a hunk of `path`'s change against `HEAD`, as
+    /// [`Self::changes`] reads it - that is not staged yet, or, when all of it is, unstage it.
+    ///
+    /// A hunk against `HEAD` spans both the index and the working tree, so it is never applied
+    /// as it is: the matching hunk of the unstaged diff (index to working tree) is staged, or
+    /// failing that the matching hunk of the staged diff (`HEAD` to index) is unstaged. Each of
+    /// those applies exactly to the base it was read against.
+    ///
+    /// # Errors
+    /// [`GitError::StaleHunk`] when neither diff has a change where `hunk` is, or any error
+    /// from reading those diffs or applying the patch.
+    pub fn toggle_hunk(&self, path: &Path, hunk: &Hunk) -> Result<Staging, GitError> {
+        let overlaps = |a: (u32, u32), b: (u32, u32)| a.0 <= b.1 && b.0 <= a.1;
+        if let Some(span) = hunk.changed_span(true) {
+            let unstaged = self.diff(path, false)?;
+            if let Some(part) = unstaged.hunks.iter().find(|part| {
+                part.changed_span(true)
+                    .is_some_and(|other| overlaps(other, span))
+            }) {
+                self.apply_hunk(path, part, false)?;
+                return Ok(Staging::Staged);
+            }
+        }
+        if let Some(span) = hunk.changed_span(false) {
+            let staged = self.diff(path, true)?;
+            if let Some(part) = staged.hunks.iter().find(|part| {
+                part.changed_span(false)
+                    .is_some_and(|other| overlaps(other, span))
+            }) {
+                self.apply_hunk(path, part, true)?;
+                return Ok(Staging::Unstaged);
+            }
+        }
+        Err(GitError::StaleHunk)
     }
 
     /// Stage `path` (repo-relative): `git add -- <path>`, which stages a modification, a

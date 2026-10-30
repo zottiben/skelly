@@ -48,12 +48,13 @@ use skelly_render::{
     PaneView, ProseLabel, PxRect, Renderer, SettingsView, SidebarView, Srgb, TextMeasure, Theme,
     TimelineView,
 };
+use skelly_session::review::{Author, Review, ReviewError, Status as ThreadStatus};
 use skelly_session::{Actor, Repo, SessionEvent, SnapshotStore, Status, Timeline};
 use skelly_term::{CellAttrs, CellColor, ExitStatus, KeyboardMode, TermCell, Terminal};
 
 use confirm::{CloseTarget, Confirm};
 use contextmenu::{ContextMenu, MenuAction, MenuContext};
-use gitdock::GitDock;
+use gitdock::{Compose, GitDock, Spot};
 use palette::Palette;
 use settings::Settings;
 use sidebar::Sidebar;
@@ -124,8 +125,6 @@ const DOCK_WIDTH_MIN: f32 = 360.0;
 const DOCK_WIDTH_MAX: f32 = 560.0;
 /// The grab zone (logical px, each side) around the dock's left edge for a resize drag.
 const DOCK_GRAB: f32 = 5.0;
-/// Diff lines scrolled per `PageUp`/`PageDown` in the git dock.
-const DIFF_SCROLL_LINES: i32 = 10;
 /// The command palette's width as a fraction of the window (design: ~half-width, centered),
 /// floored at the palette's comfortable minimum and capped clear of the window edges.
 const PALETTE_WIDTH_FRAC: f32 = 0.5;
@@ -405,11 +404,14 @@ struct RepoTimeline {
 }
 
 /// One repo's freshly-polled status, posted from the git-poll thread. `head` (short SHA) and the
-/// working-tree `snapshot` are computed on the thread so the UI never shells out for them.
+/// working-tree `snapshot` are computed on the thread so the UI never shells out for them; so is
+/// the git dock's whole `reading` of the repo it reviews (every change and the review comments),
+/// which only that repo carries.
 struct RepoStatus {
     status: Status,
     head: Option<String>,
     snapshot: Option<String>,
+    reading: Option<gitdock::Reading>,
 }
 
 /// One cycle's worth of polled statuses, stamped with the git generation they were read at.
@@ -692,8 +694,13 @@ struct App {
     /// When the session began, for the timeline's session-relative event times.
     session_start: Instant,
     /// The repository backing the dock (from the active pane context cwd), cached while it is
-    /// open so moving the file selection re-diffs without re-discovering.
+    /// open so its actions run without re-discovering.
     git_repo: Option<Repo>,
+    /// The root of [`Self::git_repo`], shared with the git-poll thread, which reads that repo in
+    /// full for the dock each cycle (its changes and review comments, which an agent changes
+    /// from outside Skelly). `None` while the dock is closed, so the poll does no more than a
+    /// status then.
+    review_root: Arc<Mutex<Option<std::path::PathBuf>>>,
     /// The system clipboard, or `None` when none could be reached (see [`open_clipboard`]).
     clipboard: Option<arboard::Clipboard>,
     window: Option<Arc<Window>>,
@@ -848,6 +855,7 @@ impl App {
             rewind_off_notified: false,
             session_start: Instant::now(),
             git_repo: None,
+            review_root: Arc::new(Mutex::new(None)),
             clipboard: open_clipboard(),
             window: None,
             renderer: None,
@@ -2357,8 +2365,13 @@ impl App {
             .git_dock
             .build(content, scale, &self.theme, &mut self.measure);
         self.push_dock_button(&mut paint.quads, &mut paint.labels, scale);
-        // Write the clamped diff scroll back so repeated paging past the end settles.
-        self.git_dock.set_scroll(paint.diff_scroll);
+        // A scroll or a reload moves the review under a still pointer: hover what is there now.
+        if self.git_dock.open && self.pointer_in_right_dock() {
+            let (px, py) = point_f32(self.pointer);
+            if self.git_dock.hover_at(px, py) {
+                self.request_redraw();
+            }
+        }
         GitDockFrame {
             panel,
             clip: self.dock_clip_rect(),
@@ -2557,6 +2570,7 @@ impl App {
         let snapshots = Arc::clone(&self.snapshots);
         let interval_ms = Arc::clone(&self.git_poll_ms);
         let generation_slot = Arc::clone(&self.git_generation);
+        let review_slot = Arc::clone(&self.review_root);
         let record = self.config.session.timeline;
         let proxy = self.proxy.clone();
         std::thread::spawn(move || loop {
@@ -2571,6 +2585,9 @@ impl App {
             if cwds.is_empty() {
                 cwds.extend(std::env::current_dir());
             }
+            // The dock's repo is read in full, and polled even when no pane is in it.
+            let review_root = review_slot.lock().ok().and_then(|g| g.clone());
+            cwds.extend(review_root.clone());
             // Discover + status each distinct repo once (dedup cwds that share a repo root).
             let mut result: HashMap<std::path::PathBuf, RepoStatus> = HashMap::new();
             for cwd in cwds {
@@ -2586,12 +2603,16 @@ impl App {
                     let snapshot = record
                         .then(|| capture_snapshot(&snapshots, &root))
                         .flatten();
+                    let reading = (review_root.as_ref() == Some(&root))
+                        .then(|| review::read(&repo, status.clone()).ok())
+                        .flatten();
                     result.insert(
                         root,
                         RepoStatus {
                             status,
                             head,
                             snapshot,
+                            reading,
                         },
                     );
                 }
@@ -2639,18 +2660,19 @@ impl App {
         }
         let statuses = polled.repos;
         let mut changed = false;
-        let mut active_status = None;
+        let mut dock_reading = None;
         for (
             root,
             RepoStatus {
                 status,
                 head,
                 snapshot,
+                reading,
             },
         ) in statuses
         {
-            if self.active_root.as_ref() == Some(&root) {
-                active_status = Some(status.clone());
+            if reading.is_some() && self.git_repo.as_ref().map(Repo::root) == Some(root.as_path()) {
+                dock_reading = reading;
             }
             let current = dirty_stats(&status);
             let totals = dirty_totals(&status);
@@ -2702,26 +2724,25 @@ impl App {
         }
         // The active repo's dirty/branch may have moved; keep the status line coherent (F3).
         self.sync_active_status();
-        if let Some(status) = active_status {
-            changed |= self.refresh_git_dock_live(status);
+        if let Some(reading) = dock_reading {
+            changed |= self.refresh_git_dock_live(reading);
         }
         if changed {
             self.request_redraw();
         }
     }
 
-    /// Reload the open diff dock from a freshly polled `status` for the active repo, so it tracks
-    /// the working tree while it is on screen instead of showing what git said when it opened.
-    /// Returns whether anything actually changed (an idle poll must not force a repaint).
+    /// Reload the open diff dock from a freshly polled `reading` of its repo, so it tracks the
+    /// working tree - and the agent's answers to the review - while it is on screen instead of
+    /// showing what it read when it opened. Returns whether anything actually changed (an idle
+    /// poll must not force a repaint).
     ///
-    /// Reuses the poll thread's status rather than re-running `git status` here, so the only work
-    /// on the UI thread is re-reading the selected file's diff - and only when the status moved.
-    fn refresh_git_dock_live(&mut self, status: Status) -> bool {
-        if !self.git_dock.open || self.git_repo.is_none() || self.git_dock.matches(&status) {
+    /// The poll thread did the reading, so the UI thread only compares and swaps it in.
+    fn refresh_git_dock_live(&mut self, reading: gitdock::Reading) -> bool {
+        if !self.git_dock.open || self.git_repo.is_none() || self.git_dock.matches(&reading) {
             return false;
         }
-        self.git_dock.load(status);
-        self.load_selected_diff();
+        self.git_dock.load(reading);
         true
     }
 
@@ -2731,7 +2752,7 @@ impl App {
     fn toggle_git_dock(&mut self) {
         if self.git_dock.open {
             self.git_dock.close();
-            self.git_repo = None;
+            self.set_git_repo(None);
         } else {
             // Only one right dock at a time (Hard rule 4): opening the diff closes the timeline and
             // returns to now. Re-read the pane context first so a foreground agent's linked
@@ -2757,7 +2778,7 @@ impl App {
             self.close_timeline();
         } else {
             self.git_dock.close();
-            self.git_repo = None;
+            self.set_git_repo(None);
             // A foreground agent may have entered a linked worktree since the last poll; scope the
             // timeline synchronously on open so it never flashes/falls back to the primary branch.
             self.refresh_active_context_now();
@@ -3136,35 +3157,36 @@ impl App {
     /// follows the selected tab / its cwd. Scopes to the cached [`active_cwd`](Self::active_cwd)
     /// (the last *successfully* polled cwd, so a transient read failure never re-points the dock at
     /// the launch dir), seeding it from a fresh read only before the first poll lands. Caches the
-    /// repo, loads the working status, then the selected file's diff.
+    /// repo, then reads its changes and review into the dock.
     fn refresh_git(&mut self) {
         let start = self
             .active_cwd
             .clone()
             .unwrap_or_else(|| self.active_pane_cwd());
         match Repo::discover(&start) {
-            Ok(Some(repo)) => match repo.status() {
-                Ok(status) => {
-                    // The status-line dirty/branch are projected from the git-poll thread's per-repo
-                    // cache (`sync_active_status`), not written here - the dock owns only the dock.
-                    self.git_dock.load(status);
-                    self.git_repo = Some(repo);
-                    self.load_selected_diff();
-                }
-                Err(err) => {
-                    self.git_dock.set_error(err.to_string());
-                    self.git_repo = None;
-                }
-            },
+            Ok(Some(repo)) => {
+                // The status-line dirty/branch are projected from the git-poll thread's per-repo
+                // cache (`sync_active_status`), not written here - the dock owns only the dock.
+                self.set_git_repo(Some(repo));
+                self.reload_git_dock();
+            }
             Ok(None) => {
                 self.git_dock.set_no_repo();
-                self.git_repo = None;
+                self.set_git_repo(None);
             }
             Err(err) => {
                 self.git_dock.set_error(err.to_string());
-                self.git_repo = None;
+                self.set_git_repo(None);
             }
         }
+    }
+
+    /// Cache the dock's repository, and point the git-poll thread's full reading at it.
+    fn set_git_repo(&mut self, repo: Option<Repo>) {
+        if let Ok(mut root) = self.review_root.lock() {
+            *root = repo.as_ref().map(|r| r.root().to_path_buf());
+        }
+        self.git_repo = repo;
     }
 
     /// Initialize a git repository in the active tab's focused-pane cwd (the git dock's "Init
@@ -3177,29 +3199,6 @@ impl App {
             Err(err) => self.git_dock.set_error(err.to_string()),
         }
         self.request_redraw();
-    }
-
-    /// Load the selected file's unified diff into the dock from the cached repo. Shows the
-    /// unstaged change when there is one, else the staged change; untracked files have no
-    /// diff (the dock shows a placeholder for them).
-    fn load_selected_diff(&mut self) {
-        let Some(repo) = self.git_repo.clone() else {
-            return;
-        };
-        let Some(file) = self.git_dock.selected_file() else {
-            return;
-        };
-        if matches!(file.status, skelly_session::FileStatus::Untracked) {
-            self.git_dock
-                .set_diff(skelly_session::FileDiff::default(), false);
-            return;
-        }
-        let path = file.path.clone();
-        let staged = file.staged && !file.unstaged;
-        match repo.diff(&path, staged) {
-            Ok(diff) => self.git_dock.set_diff(diff, staged),
-            Err(err) => self.git_dock.set_error(err.to_string()),
-        }
     }
 
     /// Map the pointer to a sidebar row action, or `None` if it isn't over the sidebar.
@@ -5058,8 +5057,8 @@ impl App {
         }
     }
 
-    /// Handle a key while the git dock is open. `⇧⌘G` closes and `⌘Q` quits in either
-    /// focus; otherwise input routes to the file list or the commit box depending on which
+    /// Handle a key while the git dock is open. `⇧⌘G` closes and `⌘Q` quits in any focus;
+    /// otherwise input routes to the review, the comment composer, or the commit box, whichever
     /// has focus. The terminal stays live underneath but receives no keys until close.
     fn on_gitdock_key(&mut self, event_loop: &ActiveEventLoop, key_event: &KeyEvent) {
         if self.modifiers.super_key() {
@@ -5079,72 +5078,133 @@ impl App {
                 }
             }
         }
-        if self.git_dock.commit_focused() {
+        if self.git_dock.composer_focused() {
+            self.on_composer_key(key_event);
+        } else if self.git_dock.commit_focused() {
             self.on_commit_key(key_event);
         } else {
-            self.on_gitlist_key(key_event);
+            self.on_review_key(key_event);
         }
+        self.request_redraw();
     }
 
-    /// Keys while the file list has focus: arrows move between files (re-diffing),
-    /// `PageUp/PageDown` scroll the diff, `Space` stages/unstages the selected file, `a`
-    /// stages everything, `u` undoes the last commit, `Tab` moves to the commit box, and
-    /// `Esc` closes the dock.
-    fn on_gitlist_key(&mut self, key_event: &KeyEvent) {
-        // `⌘↵` stages (or unstages) the focused hunk.
-        if self.modifiers.super_key()
-            && matches!(key_event.logical_key.as_ref(), Key::Named(NamedKey::Enter))
-        {
-            self.stage_hunk();
-            return;
-        }
+    /// Keys while the review has focus: `↑/↓` move the cursor a row, `⇧↑/⇧↓` a file, `[`/`]` a
+    /// hunk, and `PageUp/PageDown` page; `Enter` folds the cursor's file, or opens the composer
+    /// on its line (a reply on its thread) as `c` does; `v` marks the file viewed, `r` resolves
+    /// or reopens a thread and `⌫` deletes it; `Space` stages the file, `⌘↵` the hunk, and `a`
+    /// everything; `u` undoes the last commit; `Tab` moves to the commit box, and `Esc` closes
+    /// the dock.
+    fn on_review_key(&mut self, key_event: &KeyEvent) {
+        let shift = self.modifiers.shift_key();
+        let command = self.modifiers.super_key() || self.modifiers.control_key();
         match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::Enter) if self.modifiers.super_key() => {
+                if let Some((path, index)) = self.git_dock.cursor_hunk() {
+                    self.toggle_hunk(&path, index);
+                }
+            }
             Key::Named(NamedKey::Escape) => self.toggle_git_dock(),
             // In the no-repo empty state, `Enter` runs the "Init repo" action.
             Key::Named(NamedKey::Enter) if self.git_dock.no_repo() => self.init_repo(),
-            Key::Named(NamedKey::Tab) => {
-                self.git_dock.focus_commit();
-                self.request_redraw();
-            }
-            // `[` / `]` move the focused hunk (jumping the diff scroll to it).
-            Key::Character("[") => {
-                self.git_dock.focus_hunk(-1);
-                self.request_redraw();
-            }
-            Key::Character("]") => {
-                self.git_dock.focus_hunk(1);
-                self.request_redraw();
-            }
-            Key::Named(NamedKey::ArrowUp) => {
-                if self.git_dock.move_selection(-1) {
-                    self.load_selected_diff();
+            Key::Named(NamedKey::Enter) => self.open_review_cursor(),
+            Key::Named(NamedKey::Tab) => self.git_dock.focus_commit(),
+            Key::Named(NamedKey::ArrowUp) if shift => self.git_dock.move_file(-1),
+            Key::Named(NamedKey::ArrowDown) if shift => self.git_dock.move_file(1),
+            Key::Named(NamedKey::ArrowUp) => self.git_dock.move_cursor(-1),
+            Key::Named(NamedKey::ArrowDown) => self.git_dock.move_cursor(1),
+            Key::Named(NamedKey::PageUp) => self.git_dock.page(-1),
+            Key::Named(NamedKey::PageDown) => self.git_dock.page(1),
+            Key::Named(NamedKey::Space) => {
+                if let Some(path) = self.git_dock.cursor_file() {
+                    self.toggle_stage(&path);
                 }
-                self.request_redraw();
             }
-            Key::Named(NamedKey::ArrowDown) => {
-                if self.git_dock.move_selection(1) {
-                    self.load_selected_diff();
+            Key::Named(NamedKey::Backspace | NamedKey::Delete) => {
+                if let Some(&Spot::Thread(id)) = self.git_dock.cursor() {
+                    self.change_review(|review| review.delete(id));
                 }
-                self.request_redraw();
             }
-            Key::Named(NamedKey::PageUp) => {
-                self.git_dock.scroll_diff(-DIFF_SCROLL_LINES);
-                self.request_redraw();
+            Key::Character(ch) if !command => self.on_review_letter(ch),
+            _ => {}
+        }
+    }
+
+    /// The review's one-character keys (see [`Self::on_review_key`]).
+    fn on_review_letter(&mut self, ch: &str) {
+        let cursor = self.git_dock.cursor().cloned();
+        match ch.to_ascii_lowercase().as_str() {
+            "[" => self.git_dock.move_hunk(-1),
+            "]" => self.git_dock.move_hunk(1),
+            "c" => {
+                if let Some(spot) = cursor {
+                    self.comment_on(&spot);
+                }
             }
-            Key::Named(NamedKey::PageDown) => {
-                self.git_dock.scroll_diff(DIFF_SCROLL_LINES);
-                self.request_redraw();
+            "v" => {
+                if let Some(path) = self.git_dock.cursor_file() {
+                    self.toggle_viewed(&path);
+                }
             }
-            Key::Named(NamedKey::Space) => self.toggle_stage_selected(),
-            Key::Character(ch) if ch.eq_ignore_ascii_case("a") => self.stage_all(),
-            Key::Character(ch) if ch.eq_ignore_ascii_case("u") => self.undo_last_commit(),
+            "r" => {
+                if let Some(Spot::Thread(id)) = cursor {
+                    let open = self
+                        .git_dock
+                        .thread(id)
+                        .is_some_and(|t| t.status == ThreadStatus::Open);
+                    if open {
+                        self.change_review(|review| {
+                            review.resolve(id, Author::Human, None, review::now())
+                        });
+                    } else {
+                        self.change_review(|review| review.reopen(id));
+                    }
+                }
+            }
+            "a" => self.stage_all(),
+            "u" => self.undo_last_commit(),
+            _ => {}
+        }
+    }
+
+    /// `Enter` on the review's cursor: fold or unfold its file, or open the composer on its
+    /// line, or a reply on its thread.
+    fn open_review_cursor(&mut self) {
+        match self.git_dock.cursor().cloned() {
+            Some(Spot::File(path)) => self.git_dock.toggle_fold(&path),
+            Some(spot) => self.comment_on(&spot),
+            None => {}
+        }
+    }
+
+    /// Keys while the comment composer has focus: typing writes, `⇧↵` breaks the line, `↵`
+    /// sends, `⌘V` pastes, and `Esc` leaves it (an empty composer closes; a draft stays under
+    /// its line, unfocused, until it is sent or cancelled).
+    fn on_composer_key(&mut self, key_event: &KeyEvent) {
+        let command = self.modifiers.super_key() || self.modifiers.control_key();
+        match key_event.logical_key.as_ref() {
+            Key::Named(NamedKey::Escape) => self.git_dock.leave_composer(),
+            Key::Named(NamedKey::Enter) if self.modifiers.shift_key() => {
+                self.git_dock.compose_text("\n");
+            }
+            Key::Named(NamedKey::Enter) => self.send_comment(),
+            Key::Named(NamedKey::Backspace) => self.git_dock.compose_backspace(),
+            Key::Character(ch) if command && ch.eq_ignore_ascii_case("v") => {
+                if let Some(text) = self.clipboard.as_mut().and_then(|c| c.get_text().ok()) {
+                    self.git_dock.compose_text(&text);
+                }
+            }
+            _ if !command => {
+                if let Some(text) = &key_event.text {
+                    self.git_dock.compose_text(text);
+                }
+            }
             _ => {}
         }
     }
 
     /// Keys while the commit box has focus: printable characters edit the message,
     /// `Backspace` deletes, `Enter` commits (when allowed), `Esc` / `Tab` return to the
-    /// file list.
+    /// review.
     fn on_commit_key(&mut self, key_event: &KeyEvent) {
         match key_event.logical_key.as_ref() {
             Key::Named(NamedKey::Escape | NamedKey::Tab) => self.git_dock.focus_list(),
@@ -5160,7 +5220,83 @@ impl App {
                 }
             }
         }
-        self.request_redraw();
+    }
+
+    /// Open the composer on the diff line at `spot`, or a reply on the thread there; when the
+    /// review cannot be written, say why instead.
+    fn comment_on(&mut self, spot: &Spot) {
+        if !self.git_dock.can_comment() {
+            let problem = self.git_dock.review_problem().unwrap_or_default();
+            self.show_toast(
+                format!("Comments are unavailable: {problem}"),
+                ToastKind::Error,
+            );
+            return;
+        }
+        match spot {
+            Spot::Thread(id) => self.git_dock.start_reply(*id),
+            Spot::Line { .. } => {
+                self.git_dock.start_comment(spot);
+            }
+            Spot::File(_) => {}
+        }
+    }
+
+    /// Send the composer's comment or reply to the review, as the human; then close the
+    /// composer, put the cursor on the thread, and reload. A failure is shown in the composer,
+    /// which keeps its text.
+    fn send_comment(&mut self) {
+        let Some((target, text)) = self.git_dock.composed() else {
+            return;
+        };
+        let at = review::now();
+        let result = self.update_review(|review| match target {
+            Compose::Comment(anchor) => review.comment(Some(anchor), Author::Human, &text, at),
+            Compose::Reply(id) => review.reply(id, Author::Human, &text, at).map(|()| id),
+        });
+        match result {
+            Ok(id) => {
+                self.git_dock.close_composer();
+                self.git_dock.set_cursor(Spot::Thread(id));
+                self.reload_git_dock();
+            }
+            Err(err) => self.git_dock.set_composer_problem(err),
+        }
+    }
+
+    /// Apply `change` to the review of the dock's repository and reload the dock; a failure is
+    /// a toast.
+    fn change_review(&mut self, change: impl FnOnce(&mut Review) -> Result<(), ReviewError>) {
+        match self.update_review(change) {
+            Ok(()) => self.reload_git_dock(),
+            Err(err) => self.show_toast(err, ToastKind::Error),
+        }
+    }
+
+    /// Apply `change` to the review of the dock's repository, under the review store's lock
+    /// (an agent may be writing it too). The error is what to tell the user.
+    fn update_review<T>(
+        &self,
+        change: impl FnOnce(&mut Review) -> Result<T, ReviewError>,
+    ) -> Result<T, String> {
+        let repo = self.git_repo.as_ref().ok_or("No repository here")?;
+        let store = review::store_for(repo).ok_or(review::NO_STATE_DIR)?;
+        store.update(change).map_err(|err| err.to_string())
+    }
+
+    /// Mark `path` viewed as its change is now (folding it), or clear the mark.
+    fn toggle_viewed(&mut self, path: &str) {
+        let Some(fingerprint) = self.git_dock.fingerprint(path).map(str::to_owned) else {
+            return;
+        };
+        let mark = (!self.git_dock.is_viewed(path)).then_some(fingerprint);
+        let changed = self.git_dock.changed_paths();
+        self.change_review(|review| {
+            let changed: Vec<&str> = changed.iter().map(String::as_str).collect();
+            review.set_viewed(path, mark.as_deref(), &changed);
+            Ok(())
+        });
+        self.git_dock.unfold_by_hand(path);
     }
 
     /// Commit the staged changes with the box's message (when allowed), then keep the
@@ -5195,7 +5331,7 @@ impl App {
                     self.show_toast(format!("Committed {sha}"), ToastKind::Success);
                 }
                 self.git_dock.set_committed(sha);
-                self.reload_git_status();
+                self.reload_git_dock();
             }
             Err(err) => self.git_dock.set_error(err.to_string()),
         }
@@ -5213,28 +5349,27 @@ impl App {
         match repo.undo_commit() {
             Ok(()) => {
                 self.git_dock.clear_last_commit();
-                self.reload_git_status();
+                self.reload_git_dock();
             }
             Err(err) => self.git_dock.set_error(err.to_string()),
         }
         self.request_redraw();
     }
 
-    /// Stage (or unstage) the selected file, then reload the status + diff and repaint.
-    /// A file that is fully staged toggles back to unstaged; anything else stages.
-    fn toggle_stage_selected(&mut self) {
+    /// Stage `path`, or unstage it when everything in it is staged; then reload the dock.
+    fn toggle_stage(&mut self, path: &str) {
         let Some(repo) = self.git_repo.clone() else {
             return;
         };
-        let Some(file) = self.git_dock.selected_file() else {
-            return;
-        };
-        let path = file.path.clone();
-        let fully_staged = file.staged && !file.unstaged;
+        let fully_staged = self
+            .git_dock
+            .status_of(path)
+            .is_some_and(|f| f.staged && !f.unstaged);
+        let path = std::path::Path::new(path);
         let result = if fully_staged {
-            repo.unstage(&path)
+            repo.unstage(path)
         } else {
-            repo.stage(&path)
+            repo.stage(path)
         };
         match result {
             Ok(()) => {
@@ -5244,33 +5379,31 @@ impl App {
                 );
                 let verb = if fully_staged { "Unstaged" } else { "Staged" };
                 self.record_event(Actor::Human, format!("{verb} {name}"), String::new(), None);
-                self.reload_git_status();
+                self.reload_git_dock();
             }
-            Err(err) => self.git_dock.set_error(err.to_string()),
+            Err(err) => self.show_toast(err.to_string(), ToastKind::Error),
         }
-        self.request_redraw();
     }
 
-    /// Stage (or unstage) the focused hunk of the selected file, then reload and repaint.
-    /// The direction follows which diff is shown: staging when viewing the working-tree
-    /// diff, unstaging (`--reverse`) when viewing the staged diff.
-    fn stage_hunk(&mut self) {
+    /// Stage hunk `index` of `path` when it is unstaged, or unstage it when it is staged (an
+    /// untracked file, which has no index entry to patch, stages whole); then reload the dock.
+    fn toggle_hunk(&mut self, path: &str, index: usize) {
         let Some(repo) = self.git_repo.clone() else {
             return;
         };
-        let Some(file) = self.git_dock.selected_file() else {
-            return;
+        let file = std::path::Path::new(path);
+        let result = if self.git_dock.is_untracked(path) {
+            repo.stage(file)
+        } else {
+            let Some(hunk) = self.git_dock.hunk(path, index).cloned() else {
+                return;
+            };
+            repo.toggle_hunk(file, &hunk).map(|_| ())
         };
-        let path = file.path.clone();
-        let reverse = self.git_dock.diff_is_staged();
-        let Some(hunk) = self.git_dock.focused_hunk().cloned() else {
-            return;
-        };
-        match repo.apply_hunk(&path, &hunk, reverse) {
-            Ok(()) => self.reload_git_status(),
-            Err(err) => self.git_dock.set_error(err.to_string()),
+        if let Err(err) = result {
+            self.show_toast(err.to_string(), ToastKind::Error);
         }
-        self.request_redraw();
+        self.reload_git_dock();
     }
 
     /// Stage every change in the working tree (`git add -A`), then reload and repaint.
@@ -5281,28 +5414,24 @@ impl App {
         match repo.stage_all() {
             Ok(()) => {
                 self.record_event(Actor::Human, "Staged all changes", String::new(), None);
-                self.reload_git_status();
+                self.reload_git_dock();
             }
             Err(err) => self.git_dock.set_error(err.to_string()),
         }
-        self.request_redraw();
     }
 
-    /// Reload the working status from the cached repo (after a stage/unstage), keeping the
-    /// file selection, then re-diff the selected file. Cheaper than [`Self::refresh_git`]
-    /// (no re-discovery).
-    fn reload_git_status(&mut self) {
+    /// Re-read the dock's repository - status, changes, review - after the UI changed it
+    /// (staging, committing, commenting), keeping the reader's place. Cheaper than
+    /// [`Self::refresh_git`] (no re-discovery).
+    fn reload_git_dock(&mut self) {
         // This is the UI changing the repository, so any poll already in flight is now describing
         // the past; retire its generation before reading the new truth.
         self.git_generation.fetch_add(1, Ordering::Relaxed);
         let Some(repo) = self.git_repo.clone() else {
             return;
         };
-        match repo.status() {
-            Ok(status) => {
-                self.git_dock.load(status);
-                self.load_selected_diff();
-            }
+        match repo.status().and_then(|status| review::read(&repo, status)) {
+            Ok(reading) => self.git_dock.load(reading),
             Err(err) => self.git_dock.set_error(err.to_string()),
         }
     }
@@ -5740,6 +5869,7 @@ impl App {
         if voice_button.is_some() || self.hover_tip.is_some() {
             self.request_redraw();
         }
+        let dock_target = self.hover_git_dock();
         // Show a horizontal-resize cursor when hovering either draggable edge (dock or sidebar).
         if let Some(window) = self.window.as_ref() {
             window.set_cursor(if self.on_dock_edge() || self.on_sidebar_edge() {
@@ -5749,6 +5879,12 @@ impl App {
                     CursorIcon::Pointer
                 } else {
                     CursorIcon::NotAllowed
+                }
+            } else if let Some(target) = dock_target {
+                match target {
+                    gitdock::Target::Compose | gitdock::Target::Message => CursorIcon::Text,
+                    target if target.clickable() => CursorIcon::Pointer,
+                    _ => CursorIcon::Default,
                 }
             } else {
                 CursorIcon::Default
@@ -5857,15 +5993,7 @@ impl App {
                 // Clicking the open right dock focuses it (its keyboard controls take over);
                 // clicking anywhere else returns keyboard focus to the terminal panes.
                 if self.pointer_in_right_dock() {
-                    if !self.dock_focused {
-                        self.dock_focused = true;
-                        self.request_redraw();
-                    }
-                    // On the timeline, the click also picks the moment under it and restores the
-                    // codebase to it (design §10.7 "scrub the track, or click any entry").
-                    if let Some(index) = self.timeline_row_at_pointer() {
-                        self.timeline_select(index);
-                    }
+                    self.on_right_dock_press();
                     return;
                 }
                 self.dock_focused = false;
@@ -5920,6 +6048,78 @@ impl App {
             }
         }
         self.request_redraw();
+    }
+
+    /// A press on the open right dock: focus it, then act on what is under the pointer - on the
+    /// timeline, pick the moment and restore the codebase to it (design §10.7 "scrub the track,
+    /// or click any entry"); on the git dock, run its target.
+    fn on_right_dock_press(&mut self) {
+        self.dock_focused = true;
+        if let Some(index) = self.timeline_row_at_pointer() {
+            self.timeline_select(index);
+        }
+        if self.git_dock.open {
+            self.on_git_dock_click();
+        }
+        self.request_redraw();
+    }
+
+    /// A press on the open git dock: run the target under the pointer. A press anywhere but on
+    /// the composer leaves it (an empty composer closes; a draft stays), and anywhere but on the
+    /// commit box leaves that.
+    fn on_git_dock_click(&mut self) {
+        use gitdock::Target;
+        let (px, py) = point_f32(self.pointer);
+        let target = self.git_dock.target_at(px, py);
+        if self.git_dock.composer_focused()
+            && !matches!(
+                target,
+                Some(Target::Compose | Target::Send | Target::Cancel)
+            )
+        {
+            self.git_dock.leave_composer();
+        }
+        if self.git_dock.commit_focused() && target != Some(Target::Message) {
+            self.git_dock.focus_list();
+        }
+        let Some(target) = target else {
+            return;
+        };
+        match target {
+            Target::Init => self.init_repo(),
+            Target::Stage(path) => self.toggle_stage(&path),
+            Target::Fold(path) => self.git_dock.toggle_fold(&path),
+            Target::Viewed(path) => self.toggle_viewed(&path),
+            Target::Row(spot) => self.git_dock.set_cursor(spot),
+            Target::Comment(spot) => self.comment_on(&spot),
+            Target::Hunk { path, hunk } => self.toggle_hunk(&path, hunk),
+            Target::Reply(id) => self.comment_on(&Spot::Thread(id)),
+            Target::Resolve(id) => {
+                self.change_review(|review| review.resolve(id, Author::Human, None, review::now()));
+            }
+            Target::Reopen(id) => self.change_review(|review| review.reopen(id)),
+            Target::Delete(id) => self.change_review(|review| review.delete(id)),
+            Target::Compose => self.git_dock.focus_composer(),
+            Target::Send => self.send_comment(),
+            Target::Cancel => self.git_dock.close_composer(),
+            Target::Message => self.git_dock.focus_commit(),
+        }
+    }
+
+    /// Track the git dock target under the pointer, repainting when it changes (the dock's
+    /// hover states: the `+` on a line, the buttons); the target, for the pointer's shape.
+    fn hover_git_dock(&mut self) -> Option<gitdock::Target> {
+        let over = self.git_dock.open && self.pointer_in_right_dock() && !self.on_dock_edge();
+        let changed = if over {
+            let (px, py) = point_f32(self.pointer);
+            self.git_dock.hover_at(px, py)
+        } else {
+            self.git_dock.clear_hover()
+        };
+        if changed {
+            self.request_redraw();
+        }
+        self.git_dock.hovered().cloned()
     }
 
     /// A left press or release over the settings view (design §10.9): run the widget under the
@@ -6152,10 +6352,10 @@ impl App {
             return;
         }
         // The git dock is outside `pane_at_pointer`, so route a wheel/trackpad gesture over it to
-        // the selected file's diff. Winit's positive delta means scrolling up; the diff model's
-        // positive delta advances downward, hence the sign inversion.
+        // the review. Winit's positive delta means scrolling up; the review's positive delta
+        // advances downward, hence the sign inversion.
         if self.git_dock.open && self.pointer_in_right_dock() {
-            self.git_dock.scroll_diff(-lines);
+            self.git_dock.scroll_rows(-lines);
             self.request_redraw();
             return;
         }

@@ -17,7 +17,7 @@
 //! [`Anchor::locate`] follows the text when it moved somewhere unambiguous, and reports the
 //! comment outdated when it cannot.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io;
@@ -186,13 +186,16 @@ impl Thread {
     }
 }
 
-/// Every thread on one repository.
+/// Every thread on one repository, and which changed files the human has read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Review {
     version: u32,
     repo: PathBuf,
     next_id: u64,
     threads: Vec<Thread>,
+    /// The files marked viewed, each with the fingerprint of the change that was read.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    viewed: BTreeMap<String, String>,
 }
 
 impl Review {
@@ -202,6 +205,7 @@ impl Review {
             repo: repo.to_path_buf(),
             next_id: 1,
             threads: Vec::new(),
+            viewed: BTreeMap::new(),
         }
     }
 
@@ -283,6 +287,51 @@ impl Review {
         thread.status = Status::Resolved;
         thread.resolved_at = Some(at);
         Ok(())
+    }
+
+    /// Reopen thread `id`: whatever resolved it did not do what was asked.
+    ///
+    /// # Errors
+    /// [`ReviewError::NoSuchComment`].
+    pub fn reopen(&mut self, id: u64) -> Result<(), ReviewError> {
+        let thread = self.thread_mut(id)?;
+        thread.status = Status::Open;
+        thread.resolved_at = None;
+        Ok(())
+    }
+
+    /// Delete thread `id` and its replies. Its number is not given out again.
+    ///
+    /// # Errors
+    /// [`ReviewError::NoSuchComment`].
+    pub fn delete(&mut self, id: u64) -> Result<(), ReviewError> {
+        let index = self
+            .threads
+            .iter()
+            .position(|thread| thread.id == id)
+            .ok_or(ReviewError::NoSuchComment(id))?;
+        self.threads.remove(index);
+        Ok(())
+    }
+
+    /// Whether `path` is marked viewed as of the change with `fingerprint`. A mark made
+    /// against an earlier version of the change does not count.
+    #[must_use]
+    pub fn is_viewed(&self, path: &str, fingerprint: &str) -> bool {
+        self.viewed
+            .get(path)
+            .is_some_and(|seen| seen == fingerprint)
+    }
+
+    /// Mark `path` viewed as of the change with `fingerprint`, or clear its mark (`None`).
+    /// Marks on files outside `changed` are dropped on the way: they describe changes that
+    /// are gone (committed, or undone).
+    pub fn set_viewed(&mut self, path: &str, fingerprint: Option<&str>, changed: &[&str]) {
+        self.viewed
+            .retain(|seen, _| seen != path && changed.contains(&seen.as_str()));
+        if let Some(fingerprint) = fingerprint {
+            self.viewed.insert(path.to_owned(), fingerprint.to_owned());
+        }
     }
 
     fn thread_mut(&mut self, id: u64) -> Result<&mut Thread, ReviewError> {
@@ -448,9 +497,9 @@ pub fn instructions(threads: &[Located<'_>]) -> String {
              working tree. When one is addressed, resolve it by its number with a short note \
              saying what you changed.\n\n",
             if n == 1 {
-                String::from("a comment")
+                String::from("an open comment")
             } else {
-                format!("{n} comments")
+                format!("{n} open comments")
             }
         ),
     };
@@ -549,7 +598,22 @@ mod tests {
         let at = text.find("#1 src/lib.rs:42\n").expect(&text);
         assert!(at < text.find("> let x = foo();").unwrap());
         assert!(text.find("> let x = foo();").unwrap() < text.find("name this").unwrap());
-        assert!(text.contains("left a comment"), "{text}");
+        assert!(text.contains("left an open comment"), "{text}");
+    }
+
+    #[test]
+    fn the_count_is_of_open_comments_when_resolved_ones_are_listed_too() {
+        let mut r = review();
+        for body in ["one", "two", "three"] {
+            r.comment(None, Author::Human, body, 1).unwrap();
+        }
+        r.resolve(1, Author::Agent, None, 1).unwrap();
+        let text = written(&r, Location::Whole);
+        assert!(
+            text.contains("#1 On the change as a whole - resolved"),
+            "{text}"
+        );
+        assert!(text.contains("left 2 open comments."), "{text}");
     }
 
     #[test]
@@ -702,6 +766,36 @@ mod tests {
             "a bad note resolves nothing"
         );
         assert_eq!(r.comment(None, Author::Human, "c", 1).unwrap(), 3);
+    }
+
+    #[test]
+    fn a_thread_reopens_and_deletes_without_giving_its_number_away() {
+        let mut r = review();
+        let id = r.comment(None, Author::Human, "a", 1).unwrap();
+        r.resolve(id, Author::Agent, Some("done"), 2).unwrap();
+        r.reopen(id).unwrap();
+        assert_eq!(r.threads()[0].status, Status::Open);
+        assert_eq!(r.threads()[0].resolved_at, None);
+        assert_eq!(r.threads()[0].messages.len(), 2, "the history stays");
+        r.delete(id).unwrap();
+        assert!(r.threads().is_empty());
+        assert!(matches!(r.delete(id), Err(ReviewError::NoSuchComment(1))));
+        assert!(matches!(r.reopen(id), Err(ReviewError::NoSuchComment(1))));
+        assert_eq!(r.comment(None, Author::Human, "b", 3).unwrap(), 2);
+    }
+
+    #[test]
+    fn a_viewed_mark_holds_only_for_the_change_that_was_read() {
+        let mut r = review();
+        r.set_viewed("a.rs", Some("f1"), &["a.rs", "b.rs"]);
+        r.set_viewed("b.rs", Some("f2"), &["a.rs", "b.rs"]);
+        assert!(r.is_viewed("a.rs", "f1"));
+        assert!(!r.is_viewed("a.rs", "f9"), "the file changed since");
+        r.set_viewed("b.rs", None, &["a.rs", "b.rs"]);
+        assert!(!r.is_viewed("b.rs", "f2"));
+        r.set_viewed("c.rs", Some("f3"), &["c.rs"]);
+        assert!(!r.is_viewed("a.rs", "f1"), "a.rs is no longer changed");
+        assert!(r.is_viewed("c.rs", "f3"));
     }
 
     #[test]

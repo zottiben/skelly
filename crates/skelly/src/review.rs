@@ -13,8 +13,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context as _};
 use serde::Serialize;
 use skelly_session::review::{self, Anchor, Author, Location, ReviewStore, Side, Status, Thread};
-use skelly_session::Repo;
+use skelly_session::{GitError, Repo, Status as Working};
 
+use crate::gitdock::Reading;
 use crate::session_state;
 
 /// The review store for `repo`, under Skelly's state directory.
@@ -22,6 +23,39 @@ pub(crate) fn store_for(repo: &Repo) -> Option<ReviewStore> {
     let dir = session_state::state_dir()?.join("reviews");
     Some(ReviewStore::open(&dir, repo.root()))
 }
+
+/// Read everything the git dock shows about `repo`, whose status is `status`: every change
+/// against `HEAD`, and the review with where each thread is now. A review that cannot be read
+/// leaves the changes to read, with why.
+///
+/// # Errors
+/// [`GitError`] when git cannot list the changes.
+pub(crate) fn read(repo: &Repo, status: Working) -> Result<Reading, GitError> {
+    let changes = repo.changes()?;
+    let (review, review_problem) = match store_for(repo).map(|store| store.load()) {
+        Some(Ok(review)) => (Some(review), None),
+        Some(Err(err)) => (None, Some(err.to_string())),
+        None => (None, Some(NO_STATE_DIR.to_owned())),
+    };
+    let locations = review.as_ref().map_or_else(Vec::new, |review| {
+        review::locate(repo, review.threads())
+            .into_iter()
+            .map(|located| located.location)
+            .collect()
+    });
+    Ok(Reading {
+        root: repo.root().to_path_buf(),
+        status,
+        changes,
+        review,
+        locations,
+        review_problem,
+    })
+}
+
+/// Why there is nowhere to keep reviews.
+pub(crate) const NO_STATE_DIR: &str =
+    "no state directory to keep reviews in: set HOME or XDG_STATE_HOME";
 
 /// `skelly review --help`.
 pub(crate) const USAGE: &str = "Usage:\n  \
@@ -134,7 +168,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<i32> {
         bail!("{} is not inside a git repository", cwd.display());
     };
     let Some(store) = store_for(&repo) else {
-        bail!("no state directory to keep reviews in: set HOME or XDG_STATE_HOME");
+        bail!(NO_STATE_DIR);
     };
     match command {
         Command::List { all, json } => list(&repo, &store, all, json)?,
@@ -271,7 +305,7 @@ fn real(path: &Path) -> PathBuf {
 }
 
 /// Seconds since the Unix epoch.
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())

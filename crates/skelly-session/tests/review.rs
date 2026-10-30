@@ -113,7 +113,7 @@ fn comments_are_located_on_both_sides_and_never_touch_the_repository() {
     assert_eq!(saved.threads()[2].status, Status::Resolved);
 
     let text = review::instructions(&located);
-    assert!(text.contains("left 2 comments"), "{text}");
+    assert!(text.contains("left 2 open comments"), "{text}");
     assert!(
         text.contains("#1 src/lib.rs:2 in HEAD, before the change\n"),
         "{text}"

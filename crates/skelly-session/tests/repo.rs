@@ -10,7 +10,7 @@
 use std::path::Path;
 use std::process::Command;
 
-use skelly_session::{FileStatus, Repo};
+use skelly_session::{FileStatus, Repo, Skipped, Staging};
 
 /// A 20-line file `line 1..line 20`, where `edit(n)` may override line `n`'s text.
 fn numbered(edit: impl Fn(u32) -> Option<&'static str>) -> String {
@@ -324,6 +324,138 @@ fn apply_hunk_stages_and_unstages_a_single_hunk() {
         .expect("unstage hunk 0");
     let after = changed(&repo);
     assert!(!after.staged && after.unstaged, "fully unstaged again");
+}
+
+#[test]
+fn changes_read_staged_unstaged_and_untracked_work_against_head() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    git(root, &["init", "-b", "main"]);
+    std::fs::write(root.join("f.txt"), numbered(|_| None)).expect("write f");
+    std::fs::write(root.join("gone.txt"), "bye\n").expect("write gone");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "init", "--no-gpg-sign"]);
+
+    // One edit staged, one not, a deletion, and an untracked directory with a text file and a
+    // binary one in it - which `git status` reports as the directory alone.
+    std::fs::write(
+        root.join("f.txt"),
+        numbered(|n| (n == 3).then_some("line 3 staged")),
+    )
+    .expect("edit f");
+    git(root, &["add", "f.txt"]);
+    std::fs::write(
+        root.join("f.txt"),
+        numbered(|n| match n {
+            3 => Some("line 3 staged"),
+            18 => Some("line 18 unstaged"),
+            _ => None,
+        }),
+    )
+    .expect("edit f again");
+    std::fs::remove_file(root.join("gone.txt")).expect("delete");
+    std::fs::create_dir(root.join("new")).expect("mkdir");
+    std::fs::write(root.join("new/a b.txt"), "first\nsecond\n").expect("write new");
+    std::fs::write(root.join("new/blob"), [0_u8, 159, 146, 150]).expect("write blob");
+
+    let repo = Repo::discover(root).expect("discover").expect("in a repo");
+    let changes = repo.changes().expect("changes");
+    let paths: Vec<&str> = changes.iter().map(|c| c.path.to_str().unwrap()).collect();
+    assert_eq!(paths, ["f.txt", "gone.txt", "new/a b.txt", "new/blob"]);
+
+    let f = &changes[0];
+    assert_eq!(f.status, FileStatus::Modified);
+    assert_eq!(
+        f.diff.hunks.len(),
+        2,
+        "the staged and the unstaged edit, together"
+    );
+    assert_eq!(changes[1].status, FileStatus::Deleted);
+    assert_eq!(changes[1].diff.stats(), (0, 1));
+    assert_eq!(changes[2].status, FileStatus::Untracked);
+    assert_eq!(changes[2].diff.stats(), (2, 0));
+    assert_eq!(changes[3].skipped, Some(Skipped::Binary));
+
+    // Reading changes nothing: the same call gives the same fingerprints.
+    let again = repo.changes().expect("changes again");
+    assert_eq!(again, changes);
+}
+
+#[test]
+fn changes_in_a_repository_with_no_commits_are_against_nothing() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    git(root, &["init", "-b", "main"]);
+    std::fs::write(root.join("staged.txt"), "a\n").expect("write");
+    git(root, &["add", "."]);
+    std::fs::write(root.join("loose.txt"), "b\n").expect("write");
+    let repo = Repo::discover(root).expect("discover").expect("in a repo");
+    let changes = repo.changes().expect("changes");
+    let kinds: Vec<(&str, FileStatus)> = changes
+        .iter()
+        .map(|c| (c.path.to_str().unwrap(), c.status))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("staged.txt", FileStatus::Added),
+            ("loose.txt", FileStatus::Untracked),
+        ]
+    );
+}
+
+#[test]
+fn toggle_hunk_stages_what_is_unstaged_then_unstages_what_is_staged() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    git(root, &["init", "-b", "main"]);
+    std::fs::write(root.join("f.txt"), numbered(|_| None)).expect("write f");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "init", "--no-gpg-sign"]);
+    std::fs::write(
+        root.join("f.txt"),
+        numbered(|n| (n == 3).then_some("line 3 staged")),
+    )
+    .expect("edit f");
+    git(root, &["add", "f.txt"]);
+    std::fs::write(
+        root.join("f.txt"),
+        numbered(|n| match n {
+            3 => Some("line 3 staged"),
+            18 => Some("line 18 unstaged"),
+            _ => None,
+        }),
+    )
+    .expect("edit f again");
+
+    let repo = Repo::discover(root).expect("discover").expect("in a repo");
+    let f = Path::new("f.txt");
+    let against_head = repo.changes().expect("changes").remove(0).diff;
+    let (staged_part, unstaged_part) = (&against_head.hunks[0], &against_head.hunks[1]);
+
+    // The line-3 hunk is already staged, so toggling it unstages it.
+    assert_eq!(
+        repo.toggle_hunk(f, staged_part).expect("toggle 3"),
+        Staging::Unstaged
+    );
+    assert!(repo.diff(f, true).expect("staged").hunks.is_empty());
+    // The line-18 hunk is not, so toggling it stages it - and only it.
+    assert_eq!(
+        repo.toggle_hunk(f, unstaged_part).expect("toggle 18"),
+        Staging::Staged
+    );
+    let staged = repo.diff(f, true).expect("staged");
+    assert_eq!(staged.hunks.len(), 1);
+    assert!(staged.hunks[0]
+        .lines
+        .iter()
+        .any(|l| l.text == "line 18 unstaged"));
+    // Toggled again, it goes back.
+    assert_eq!(
+        repo.toggle_hunk(f, unstaged_part).expect("toggle 18 back"),
+        Staging::Unstaged
+    );
+    assert!(repo.diff(f, true).expect("staged").hunks.is_empty());
 }
 
 #[test]

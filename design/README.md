@@ -82,6 +82,27 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-10-30 - **The git dock is one review scroll of every change, with comment threads
+  under their lines.** User request: review an agent's changes the way AI Team does. The
+  dock lists every change in the working tree against `HEAD` (staged and unstaged together;
+  untracked files after the tracked ones, as all-added) in one scroll, each file under a
+  header with its stage checkbox, fold chevron, status, path, comment count, `+/-` counts and
+  a **Viewed** checkbox. A viewed mark is kept in the review file as the path and a
+  fingerprint of its change, so the file folds until the change changes again. A file with a
+  line over 1000 characters starts folded unless it has a comment. One gutter: the `+` on a
+  hovered or cursor line comments on it; a removed line is on the file at `HEAD`, an added or
+  unchanged line on the file on disk. Threads sit under their line; comments on the whole
+  change lead the scroll; an outdated thread closes its file; an open thread on an unchanged
+  file brings that file in after the changed ones. There is one inline composer: `↩` sends,
+  `⇧↩` breaks the line, and `Esc` leaves a draft in place. A card offers Reply,
+  Resolve or Reopen, and Delete, all as the human. Staging stays: a file (`Space` or its
+  checkbox), a hunk (`⌘↩`, mapped from the `HEAD` diff onto the index by the lines it
+  changes; an untracked file stages whole) or everything (`a`). The git poll reads the
+  changes and the review together for the dock's repository, so an agent's replies show while
+  it works, and a reload keeps the rows on screen and the cursor where they were. Mono text
+  in the chrome draws without ligatures, like the terminal grid. _(was: the 2026-07-12
+  layout: a changed-file list, then the selected file's diff, with no comments)_
+
 - 2026-10-30 - **Review comments are a per-repository thread store that the agent reads
   through `skelly review`.** User request: rebuild the diff review the way AI Team does it.
   The agent changes the code, the human comments on specific lines of the diff and asks the

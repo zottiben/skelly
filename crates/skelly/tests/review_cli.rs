@@ -77,7 +77,7 @@ fn an_agent_reads_answers_and_resolves_line_comments() {
     assert_eq!(removed.trim(), "Added comment #2 on src/lib.rs:2.");
 
     let open = stdout(&skelly(&src, home.path(), &[]));
-    assert!(open.contains("left 2 comments"), "{open}");
+    assert!(open.contains("left 2 open comments"), "{open}");
     assert!(
         open.contains("#1 src/lib.rs:2\n  > fn total() {}\n  call it sum\n"),
         "{open}"
@@ -100,7 +100,7 @@ fn an_agent_reads_answers_and_resolves_line_comments() {
     assert_eq!(resolved.trim(), "Resolved #1.");
 
     let open = stdout(&skelly(&root, home.path(), &[]));
-    assert!(open.contains("left a comment"), "{open}");
+    assert!(open.contains("left an open comment"), "{open}");
     assert!(
         !open.contains("#1 "),
         "a resolved comment is not asked for again: {open}"

@@ -90,6 +90,32 @@ layout presets and the pane leader are gone. Existing `[panes] max` and
 Skelly drops them the next time it saves the file. A restored session keeps its pane
 count and re-tiles it as a spiral.
 
+## Review an agent's changes
+
+Press **⇧⌘G** to open the git dock. It shows every change in the working tree against
+`HEAD` in one scroll, staged and unstaged together, with new files as all-added. Comment
+on a line, ask the agent to read your comments, and see its answers appear under them:
+
+1. The agent changes the code.
+2. In the dock, click the **+** next to a line (or move to it and press **c**), write the
+   comment, and press **↩** to send it (**⇧↩** starts a new line). A comment on a removed
+   line is on the file as it is in `HEAD`.
+3. Ask Pi to read your review comments. With the companion extension, Pi uses the
+   `skelly_review_comments` tool; any other agent can run `skelly review`.
+4. The agent makes the changes, then resolves each comment with a note. The dock updates
+   while it works: the note shows under your comment, and the comment is marked resolved.
+
+In the dock, **↑/↓** move between rows, **⇧↑/⇧↓** between files and **[ / ]** between
+hunks. **↩** folds a file or opens the composer on a line or comment. **v** marks a file
+viewed and folds it until it changes again, **r** resolves or reopens a comment, and
+**⌫** deletes one. **Space** stages a file, **⌘↩** stages one hunk, **a** stages
+everything, **Tab** moves to the commit message, and **u** undoes the last commit.
+
+The comments are kept outside the repository, one file per repository, and the dock never
+moves your `HEAD`, branches or index except when you stage or commit. See
+[the Pi extension](integrations/pi/README.md#review-comments) for the tools and the
+`skelly review` commands.
+
 ## Optional local voice (experimental)
 
 Voice is off by default. With Pi running directly in a Skelly pane, local

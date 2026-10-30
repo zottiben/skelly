@@ -67,6 +67,32 @@ impl Hunk {
     }
 }
 
+impl Hunk {
+    /// The first and last line this hunk changes, counted in the new file (`new`) or the old
+    /// one. A line that exists only on the other side counts where it would sit on this one,
+    /// so two diffs of the same file against different bases - `HEAD` and the index - agree
+    /// on where a change is in the file they share.
+    pub(crate) fn changed_span(&self, new: bool) -> Option<(u32, u32)> {
+        let mut at = if new { self.new_start } else { self.old_start };
+        let mut span: Option<(u32, u32)> = None;
+        for line in &self.lines {
+            let own = match line.kind {
+                LineKind::Context => {
+                    at += 1;
+                    continue;
+                }
+                LineKind::Add => new,
+                LineKind::Del => !new,
+            };
+            span = Some(span.map_or((at, at), |(first, last)| (first.min(at), last.max(at))));
+            if own {
+                at += 1;
+            }
+        }
+        span
+    }
+}
+
 /// Reconstruct a standalone unified-diff patch for a single `hunk` of `path` (repo-
 /// relative), suitable for `git apply --cached` to (un)stage just that hunk. The header
 /// counts are recomputed from the hunk's lines so they are always consistent.
@@ -297,6 +323,25 @@ mod tests {
         // The trailing context line resumes numbering on both sides.
         let tail = hunk.lines.last().unwrap();
         assert_eq!((tail.old_no, tail.new_no), (Some(21), Some(22)));
+    }
+
+    #[test]
+    fn a_changed_span_counts_one_side_and_places_the_other_on_it() {
+        let diff = parse_unified_diff(SAMPLE);
+        let hunk = &diff.hunks[0];
+        assert_eq!(
+            hunk.changed_span(true),
+            Some((20, 21)),
+            "the two added lines"
+        );
+        assert_eq!(
+            hunk.changed_span(false),
+            Some((20, 21)),
+            "the removed line, then where the adds sit"
+        );
+        let gone = parse_unified_diff("@@ -1,2 +0,0 @@\n-a\n-b\n");
+        assert_eq!(gone.hunks[0].changed_span(true), Some((0, 0)));
+        assert_eq!(gone.hunks[0].changed_span(false), Some((1, 2)));
     }
 
     #[test]

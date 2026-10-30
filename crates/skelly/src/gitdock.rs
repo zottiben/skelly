@@ -1,27 +1,31 @@
 //! The git diff dock: a per-repo right dock over the live terminal (AGENTS Hard rule 4 -
 //! a layer, the pane tree never unmounts; only one right-dock surface shows at a time).
-//! Opened with `⇧⌘G` and dismissed with `Esc`. This module is pure state + layout: it holds
-//! the git-derived data ([`Status`] + the selected file's [`FileDiff`]) and builds a
-//! *proportional* display list (decorative quads for the diff backgrounds + selection, and
-//! positioned labels - chrome in IBM Plex Sans, diff code + metadata in the `mono` role
-//! (`JetBrains` Mono) so columns stay aligned). The binary owns the [`Repo`] calls (discover
-//! / diff), routing keys, and the viewport inset.
+//! Opened with `⇧⌘G` and dismissed with `Esc`.
 //!
-//! v1 is read-only: a status bar (branch, ahead/behind, totals), the changed-file list
-//! (status letter, path, `+add`/`-del` counts), and the selected file's unified diff.
-//! Per-file / hunk staging, the commit box, split view, and the resizable dock width are
-//! later M4 slices; the dock width is fixed at the guide's 420px default for now.
+//! It is where a person reviews what an agent changed, the way AI Team's review does: every
+//! changed file in one scroll against `HEAD` - staged or not, untracked files as added - each
+//! under a header that folds it, stages it, and marks it viewed; comment threads under the
+//! lines they are about; and a composer that opens under a line from its `+`. The agent reads
+//! the threads through `skelly review` and answers them there, and the dock shows the answers
+//! as they land. Staging by file or hunk and the commit box stay, the commit box at the foot.
 //!
-//! [`Repo`]: skelly_session::Repo
+//! This module is pure state + layout: it holds a [`Reading`] of the repository and builds a
+//! *proportional* display list (quads + positioned labels - chrome in IBM Plex Sans, code and
+//! metadata in the `mono` role so columns stay aligned) with the hit targets for it. The
+//! binary owns the git and review-store calls, routing keys and clicks, and the viewport inset.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
-use skelly_session::{ChangedFile, FileDiff, FileStatus, Hunk, LineKind, Status};
+use skelly_session::review::{Anchor, Author, Location, Review, Side, Status as Open, Thread};
+use skelly_session::{
+    ChangedFile, DiffLine, FileChange, FileStatus, Hunk, LineKind, Skipped, Status,
+};
 
 /// Git-dock layout constants in **logical** px (multiplied by the DPI scale). Tuned to the
-/// guide's §10.6: a status bar, a `CHANGED - N` file list at `bg.inset`, the selected file's
-/// diff (code in `mono`), and a commit box at the foot.
+/// guide's §10.6: a status bar, the `CHANGED - N` label, the review scroll, and a commit box
+/// at the foot.
 const PAD_X: f32 = 12.0;
 /// Top padding above the status bar.
 const PAD_TOP: f32 = 12.0;
@@ -29,66 +33,216 @@ const PAD_TOP: f32 = 12.0;
 const STATUS_H: f32 = 26.0;
 /// Section-label (`CHANGED - N`) row height.
 const LABEL_H: f32 = 24.0;
-/// Changed-file row height.
-const FILE_ROW_H: f32 = 26.0;
-/// Diff header (file path + counts) row height.
-const DIFF_HEADER_H: f32 = 26.0;
+/// A file header's height.
+const FILE_HEAD_H: f32 = 30.0;
+/// The height of the line saying why a file's lines are not shown.
+const NOTE_H: f32 = 24.0;
 /// Diff body line height (compact, code).
 const DIFF_ROW_H: f32 = 20.0;
+/// A thread or composer card's header height.
+const CARD_HEAD_H: f32 = 26.0;
+/// A card's text-line height.
+const CARD_TEXT_H: f32 = 20.0;
+/// A card's author-line height.
+const CARD_AUTHOR_H: f32 = 18.0;
+/// The composer's button-row height.
+const CARD_FOOT_H: f32 = 32.0;
+/// The space under a card.
+const CARD_GAP_H: f32 = 6.0;
+/// A card's inner horizontal padding.
+const CARD_PAD: f32 = 10.0;
+/// The width of a card's left status bar.
+const CARD_BAR: f32 = 2.0;
 /// Each commit-band row's height (message input, status line).
 const COMMIT_ROW_H: f32 = 24.0;
 /// The commit band's total height at the foot (a divider + input + status + padding).
 const COMMIT_BAND_H: f32 = 78.0;
-/// Most file rows to show at once; a longer list scrolls to keep the selection visible.
-const FILE_ROWS_MAX: usize = 10;
 /// Gutter width for the diff line-number, in mono chars.
 const GUTTER_CHARS: usize = 4;
+/// The width of the column the `+` comment button sits in, left of the gutter.
+const ADD_W: f32 = 16.0;
+/// A small button's height and horizontal padding, the gap between buttons, and its radius.
+const BUTTON_H: f32 = 20.0;
+const BUTTON_PAD_X: f32 = 7.0;
+const BUTTON_GAP: f32 = 4.0;
+const BUTTON_RADIUS: f32 = 5.0;
+/// The Viewed checkbox's side.
+const CHECK: f32 = 12.0;
 /// Alpha for an add/del diff-line background (the guide's `diff.*.bg` tokens).
 const DIFF_BG_ALPHA: f32 = 0.14;
 /// Alpha for a hunk-header background (the lighter `diff.hunk.bg`).
 const HUNK_BG_ALPHA: f32 = 0.08;
+/// A line longer than this is not for reading: a minified bundle, or generated output. A
+/// file with one starts folded, unless a comment is on it.
+const UNREADABLE_LINE: usize = 1000;
+/// The comment glyph (codicon `comment`), drawn in the bundled Nerd font.
+const COMMENT_ICON: &str = "\u{EA6B}";
+/// A file header's fold carets (codicon `chevron-down` / `chevron-right`), in the Nerd font.
+const CHEVRON_DOWN: &str = "\u{EAB4}";
+const CHEVRON_RIGHT: &str = "\u{EAB6}";
 
 /// Which part of the dock has keyboard focus.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Focus {
-    /// The changed-file list (arrows / Space / `a` / PageUp-Down).
+    /// The review scroll (arrows, fold, stage, comment).
     List,
     /// The commit-message box (typing edits the message; Enter commits).
     Commit,
+    /// The comment composer (typing edits the comment; Enter sends it).
+    Composer,
 }
 
-/// The git diff dock's state: the open flag, the loaded git data, and the selection /
-/// scroll positions. The binary refreshes [`Self::status`]/[`Self::diff`] via the setters
-/// whenever it opens the dock or moves the selection.
+/// Everything the dock shows about a repository, read together so it is one consistent
+/// view: the status, every change against `HEAD`, and the review with where each thread is.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Reading {
+    /// The repository's root.
+    pub(crate) root: PathBuf,
+    /// The working status (branch, ahead/behind, and what is staged).
+    pub(crate) status: Status,
+    /// Every changed file against `HEAD`, untracked files included.
+    pub(crate) changes: Vec<FileChange>,
+    /// The review's threads and viewed marks, when the review could be read.
+    pub(crate) review: Option<Review>,
+    /// Where each of the review's threads is now, in the same order as its threads.
+    pub(crate) locations: Vec<Location>,
+    /// Why the review could not be read, when it could not.
+    pub(crate) review_problem: Option<String>,
+}
+
+/// A row the keyboard cursor can rest on, by identity, so a reload keeps it in place.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Spot {
+    /// A file's header.
+    File(String),
+    /// A diff line, by the side and number a comment on it anchors to.
+    Line {
+        /// The file.
+        path: String,
+        /// The side the line number counts on.
+        side: Side,
+        /// The line number on that side.
+        line: u32,
+    },
+    /// A thread's header.
+    Thread(u64),
+}
+
+/// What a click or a hover lands on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Target {
+    /// The empty state's "Init repo" button.
+    Init,
+    /// A file's stage checkbox.
+    Stage(String),
+    /// A file header, which folds or unfolds it.
+    Fold(String),
+    /// A file's Viewed checkbox.
+    Viewed(String),
+    /// A row the cursor can rest on.
+    Row(Spot),
+    /// A diff line's `+`, which opens the composer on it.
+    Comment(Spot),
+    /// A hunk's stage / unstage button.
+    Hunk {
+        /// The file.
+        path: String,
+        /// The hunk's index in the file's change.
+        hunk: usize,
+    },
+    /// A thread's Reply button.
+    Reply(u64),
+    /// A thread's Resolve button.
+    Resolve(u64),
+    /// A thread's Reopen button.
+    Reopen(u64),
+    /// A thread's Delete button.
+    Delete(u64),
+    /// The composer's text.
+    Compose,
+    /// The composer's send button.
+    Send,
+    /// The composer's Cancel button.
+    Cancel,
+    /// The commit-message input.
+    Message,
+}
+
+impl Target {
+    /// Whether clicking it does something (the pointer cursor shows), as opposed to a row
+    /// that only takes the keyboard cursor.
+    pub(crate) fn clickable(&self) -> bool {
+        !matches!(self, Target::Row(_))
+    }
+}
+
+/// What the composer is writing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Compose {
+    /// A new comment on these lines.
+    Comment(Anchor),
+    /// A reply on this thread.
+    Reply(u64),
+}
+
+/// The open comment composer.
+struct Composer {
+    target: Compose,
+    text: String,
+    /// Why the last send failed, shown under the text.
+    problem: Option<String>,
+}
+
+/// What the next build scrolls into view.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Reveal {
+    Cursor,
+    Composer,
+}
+
+/// The git diff dock's state: the open flag, the loaded [`Reading`], the review scroll's
+/// cursor / folds / scroll, the composer, and the commit box.
 pub(crate) struct GitDock {
-    /// Whether the dock is showing (captures navigation keys while open).
+    /// Whether the dock is showing (captures navigation keys while open and focused).
     pub(crate) open: bool,
     /// Whether a repository was found for the current context (else the empty state).
     repo_present: bool,
-    /// The working status (branch, ahead/behind, changed files).
-    status: Status,
-    /// The selected file's unified diff (empty when none / untracked / binary).
-    diff: FileDiff,
-    /// Index of the selected file in `status.files`.
-    selected: usize,
-    /// Whether `diff` is the staged (index-vs-HEAD) diff rather than the working-tree
-    /// one; determines whether `⌘↵` stages or unstages the focused hunk.
-    diff_is_staged: bool,
-    /// The path `diff` was read for, so a live refresh can tell a reload of the file on
-    /// screen (keep the scroll) from a move to another file (reset it).
-    diff_path: Option<PathBuf>,
-    /// Index of the focused hunk in `diff.hunks` (the target of `⌘↵`).
-    focused_hunk: usize,
-    /// Top line offset into the selected file's flattened diff (scrolled with PageUp/Dn).
-    diff_scroll: usize,
-    /// Which part of the dock has keyboard focus (the list or the commit box).
+    /// The repository as last read.
+    data: Reading,
+    /// Files folded or unfolded by hand, over the default (folded when viewed).
+    folds: HashMap<String, bool>,
+    /// The keyboard cursor.
+    cursor: Option<Spot>,
+    /// The cursor's index among the focusable rows, and the row before it: where it goes when
+    /// the row it was on goes away.
+    cursor_at: usize,
+    cursor_before: Option<Spot>,
+    /// The first row of the scroll on screen.
+    scroll: usize,
+    /// How many rows the last build showed (a page).
+    page: usize,
+    /// Where the scroll stood, by row identity, so a reload that moves rows above it does
+    /// not move the reader: the nearest focusable row at or above the top and its file's
+    /// header, each with how many rows below it the top was.
+    anchors: Vec<(Spot, usize)>,
+    /// Whether the next build resolves [`Self::anchors`] (set by a reload).
+    reanchor: bool,
+    /// What the next build scrolls into view.
+    reveal: Option<Reveal>,
+    /// Which part of the dock has keyboard focus.
     focus: Focus,
+    /// The comment composer, while one is open.
+    composer: Option<Composer>,
+    /// The target under the pointer.
+    hover: Option<Target>,
+    /// The hit targets of the last build, back to front.
+    targets: Vec<(PxRect, Target)>,
     /// The commit message being typed in the commit box.
     message: String,
     /// The short SHA of the just-made commit, shown with an Undo hint until the next
     /// action clears it.
     last_commit: Option<String>,
-    /// A git error to surface instead of the file list, if the last refresh failed.
+    /// A git error to surface instead of the review, if the last refresh failed.
     error: Option<String>,
 }
 
@@ -98,21 +252,27 @@ impl GitDock {
         Self {
             open: false,
             repo_present: false,
-            status: Status::default(),
-            diff: FileDiff::default(),
-            selected: 0,
-            diff_is_staged: false,
-            diff_path: None,
-            focused_hunk: 0,
-            diff_scroll: 0,
+            data: Reading::default(),
+            folds: HashMap::new(),
+            cursor: None,
+            cursor_at: 0,
+            cursor_before: None,
+            scroll: 0,
+            page: 0,
+            anchors: Vec::new(),
+            reanchor: false,
+            reveal: None,
             focus: Focus::List,
+            composer: None,
+            hover: None,
+            targets: Vec::new(),
             message: String::new(),
             last_commit: None,
             error: None,
         }
     }
 
-    /// Open the dock on the file list (the binary loads the repo status right after).
+    /// Open the dock on the review (the binary loads the repository right after).
     pub(crate) fn open(&mut self) {
         self.open = true;
         self.focus = Focus::List;
@@ -122,6 +282,26 @@ impl GitDock {
     /// Close the dock.
     pub(crate) fn close(&mut self) {
         self.open = false;
+        self.hover = None;
+        if self.focus == Focus::Composer {
+            self.focus = Focus::List;
+        }
+    }
+
+    /// Forget the place in the review - cursor, folds, scroll, composer, message - for a
+    /// different repository, whose files the old place does not name.
+    fn reset_view(&mut self) {
+        self.folds.clear();
+        self.cursor = None;
+        self.cursor_at = 0;
+        self.cursor_before = None;
+        self.scroll = 0;
+        self.anchors.clear();
+        self.reveal = None;
+        self.composer = None;
+        self.focus = Focus::List;
+        self.message.clear();
+        self.last_commit = None;
     }
 
     /// Whether the commit box currently has focus.
@@ -129,12 +309,17 @@ impl GitDock {
         self.focus == Focus::Commit
     }
 
+    /// Whether the composer currently has focus.
+    pub(crate) fn composer_focused(&self) -> bool {
+        self.focus == Focus::Composer && self.composer.is_some()
+    }
+
     /// Move focus to the commit box (so typing edits the message).
     pub(crate) fn focus_commit(&mut self) {
         self.focus = Focus::Commit;
     }
 
-    /// Move focus back to the file list.
+    /// Move focus back to the review scroll.
     pub(crate) fn focus_list(&mut self) {
         self.focus = Focus::List;
     }
@@ -156,7 +341,7 @@ impl GitDock {
 
     /// How many changed files have something staged (the commit gate + status line).
     pub(crate) fn staged_count(&self) -> usize {
-        self.status.files.iter().filter(|f| f.staged).count()
+        self.data.status.files.iter().filter(|f| f.staged).count()
     }
 
     /// Whether a commit is allowed: at least one file staged and a non-blank message.
@@ -164,7 +349,7 @@ impl GitDock {
         self.staged_count() > 0 && !self.message.trim().is_empty()
     }
 
-    /// Record a successful commit: clear the message, return focus to the list, and keep
+    /// Record a successful commit: clear the message, return focus to the review, and keep
     /// the short SHA for the Undo hint.
     pub(crate) fn set_committed(&mut self, short_sha: String) {
         self.message.clear();
@@ -190,140 +375,584 @@ impl GitDock {
 
     /// Record that the current context is not inside a git repository (the empty state).
     pub(crate) fn set_no_repo(&mut self) {
+        self.reset_view();
         self.repo_present = false;
-        self.status = Status::default();
-        self.diff = FileDiff::default();
-        self.diff_path = None;
-        self.selected = 0;
-        self.diff_scroll = 0;
-        self.focus = Focus::List;
-        self.message.clear();
-        self.last_commit = None;
+        self.data = Reading::default();
         self.error = None;
     }
 
-    /// Whether `status` is what the dock is already showing - the guard that keeps a live
-    /// refresh (design §10.4) free when the working tree has not moved.
-    pub(crate) fn matches(&self, status: &Status) -> bool {
-        self.repo_present && self.error.is_none() && self.status == *status
+    /// Whether `reading` is what the dock is already showing - the guard that keeps a live
+    /// refresh (design §10.4) free when nothing moved.
+    pub(crate) fn matches(&self, reading: &Reading) -> bool {
+        self.repo_present && self.error.is_none() && self.data == *reading
     }
 
-    /// Load a fresh repository status, keeping the user's place: the selection follows the
-    /// selected **path** rather than its index, so a refresh that reorders or adds files
-    /// (the dock re-reads the working tree while it is open) never jumps the cursor to
-    /// another file. Call [`Self::selected_file`] afterwards to fetch the selected diff.
-    pub(crate) fn load(&mut self, status: Status) {
+    /// Load a fresh reading of the repository, keeping the reader's place: the cursor and
+    /// the scroll follow the rows they were on, by identity, rather than their positions.
+    pub(crate) fn load(&mut self, reading: Reading) {
+        if reading.root != self.data.root {
+            self.reset_view();
+        }
         self.repo_present = true;
         self.error = None;
-        let previous = self.selected_file().map(|f| f.path.clone());
-        self.selected = previous
-            .and_then(|path| status.files.iter().position(|f| f.path == path))
-            .unwrap_or_else(|| self.selected.min(status.files.len().saturating_sub(1)));
-        self.status = status;
+        self.data = reading;
+        self.reanchor = true;
     }
 
-    /// Set the selected file's diff (from `Repo::diff`), recording whether it is the
-    /// staged side. Scroll and hunk focus reset when this is a different file (or a
-    /// different side of the same one) and are kept when it is a refresh of the one on
-    /// screen, so a live reload does not scroll the diff out from under the reader.
-    pub(crate) fn set_diff(&mut self, diff: FileDiff, staged: bool) {
-        let path = self.selected_file().map(|f| f.path.clone());
-        if path != self.diff_path || staged != self.diff_is_staged {
-            self.focused_hunk = 0;
-            self.diff_scroll = 0;
-        }
-        self.diff_path = path;
-        self.diff = diff;
-        self.diff_is_staged = staged;
-        self.focused_hunk = self
-            .focused_hunk
-            .min(self.diff.hunks.len().saturating_sub(1));
-    }
-
-    /// Whether the shown diff is the staged side (so `⌘↵` unstages rather than stages).
-    pub(crate) fn diff_is_staged(&self) -> bool {
-        self.diff_is_staged
-    }
-
-    /// The focused hunk of the shown diff, if any (the target of `⌘↵`).
-    pub(crate) fn focused_hunk(&self) -> Option<&Hunk> {
-        self.diff.hunks.get(self.focused_hunk)
-    }
-
-    /// Move the focused hunk by `delta`, clamped, and scroll the diff so its header is at
-    /// the top of the body. A no-op when the diff has no hunks.
-    pub(crate) fn focus_hunk(&mut self, delta: i32) {
-        let count = self.diff.hunks.len();
-        if count == 0 {
-            return;
-        }
-        let last = i32::try_from(count - 1).unwrap_or(0);
-        let cur = i32::try_from(self.focused_hunk).unwrap_or(0);
-        self.focused_hunk = usize::try_from((cur + delta).clamp(0, last)).unwrap_or(0);
-        self.diff_scroll = self.hunk_line_offset(self.focused_hunk);
-    }
-
-    /// The flattened-diff display-line index of hunk `index`'s header (each earlier hunk
-    /// contributes its header line plus its body lines).
-    fn hunk_line_offset(&self, index: usize) -> usize {
-        self.diff
-            .hunks
-            .iter()
-            .take(index)
-            .map(|h| 1 + h.lines.len())
-            .sum()
-    }
-
-    /// Surface a git error in place of the file list.
+    /// Surface a git error in place of the review.
     pub(crate) fn set_error(&mut self, message: String) {
         self.repo_present = true;
         self.error = Some(message);
     }
 
-    /// The selected changed file, if any (the binary uses its path + staged flag to fetch
-    /// the diff).
-    pub(crate) fn selected_file(&self) -> Option<&ChangedFile> {
-        self.status.files.get(self.selected)
+    /// The review's threads (none when it could not be read).
+    fn threads(&self) -> &[Thread] {
+        self.data.review.as_ref().map_or(&[], Review::threads)
     }
 
-    /// Move the file selection by `delta`, clamped to the file list. Returns `true` when
-    /// the selection actually moved (so the binary reloads the diff); resets the scroll.
-    pub(crate) fn move_selection(&mut self, delta: i32) -> bool {
-        let count = self.status.files.len();
-        if count == 0 {
-            return false;
+    /// Where thread `index` is now.
+    fn location(&self, index: usize) -> Location {
+        self.data
+            .locations
+            .get(index)
+            .copied()
+            .unwrap_or(Location::Outdated)
+    }
+
+    /// Thread `id`, if the review has it.
+    pub(crate) fn thread(&self, id: u64) -> Option<&Thread> {
+        self.threads().iter().find(|t| t.id == id)
+    }
+
+    /// Whether comments can be written: the review was read (a damaged file, or one from a
+    /// newer Skelly, is never written over).
+    pub(crate) fn can_comment(&self) -> bool {
+        self.data.review.is_some()
+    }
+
+    /// The change to `path`, if it changed.
+    fn change(&self, path: &str) -> Option<&FileChange> {
+        self.data
+            .changes
+            .iter()
+            .find(|c| c.path.to_string_lossy() == path)
+    }
+
+    /// Whether the change to `path` is marked viewed as it is now.
+    pub(crate) fn is_viewed(&self, path: &str) -> bool {
+        self.change(path).is_some_and(|c| self.viewed(c))
+    }
+
+    /// Whether `change` is marked viewed as it is now.
+    fn viewed(&self, change: &FileChange) -> bool {
+        self.data
+            .review
+            .as_ref()
+            .is_some_and(|r| r.is_viewed(&change.path.to_string_lossy(), &change.fingerprint))
+    }
+
+    /// The fingerprint a viewed mark on `path` is kept against.
+    pub(crate) fn fingerprint(&self, path: &str) -> Option<&str> {
+        self.change(path).map(|c| c.fingerprint.as_str())
+    }
+
+    /// Every changed path (what viewed marks are kept for).
+    pub(crate) fn changed_paths(&self) -> Vec<String> {
+        self.data
+            .changes
+            .iter()
+            .map(|c| c.path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// What `git status` says about `path`: its own entry, or the untracked directory it is in.
+    pub(crate) fn status_of(&self, path: &str) -> Option<&ChangedFile> {
+        let files = &self.data.status.files;
+        files
+            .iter()
+            .find(|f| f.path.to_string_lossy() == path)
+            .or_else(|| {
+                files.iter().find(|f| {
+                    f.status == FileStatus::Untracked
+                        && std::path::Path::new(path).starts_with(&f.path)
+                })
+            })
+    }
+
+    /// Hunk `index` of the change to `path`.
+    pub(crate) fn hunk(&self, path: &str, index: usize) -> Option<&Hunk> {
+        self.change(path)?.diff.hunks.get(index)
+    }
+
+    /// Whether `path` is untracked (staging a hunk of it stages the file).
+    pub(crate) fn is_untracked(&self, path: &str) -> bool {
+        self.change(path)
+            .is_some_and(|c| c.status == FileStatus::Untracked)
+    }
+
+    /// Fold or unfold `path`, with the cursor on its header.
+    pub(crate) fn toggle_fold(&mut self, path: &str) {
+        let folded = self
+            .outline()
+            .sections
+            .iter()
+            .find(|s| s.path == path)
+            .is_some_and(|s| s.folded);
+        self.folds.insert(path.to_owned(), !folded);
+        self.set_cursor(Spot::File(path.to_owned()));
+    }
+
+    /// Drop the hand-set fold on `path`, so it folds by its viewed mark again - called after
+    /// marking it, the way AI Team folds a file as it is marked viewed.
+    pub(crate) fn unfold_by_hand(&mut self, path: &str) {
+        self.folds.remove(path);
+        if self.cursor_file().as_deref() == Some(path) {
+            self.cursor = Some(Spot::File(path.to_owned()));
+            self.reveal = Some(Reveal::Cursor);
         }
-        let last = i32::try_from(count - 1).unwrap_or(0);
-        let cur = i32::try_from(self.selected).unwrap_or(0);
-        let next = usize::try_from((cur + delta).clamp(0, last)).unwrap_or(0);
-        if next == self.selected {
-            return false;
+    }
+
+    /// The keyboard cursor.
+    pub(crate) fn cursor(&self) -> Option<&Spot> {
+        self.cursor.as_ref()
+    }
+
+    /// Put the keyboard cursor on `spot` and scroll it into view.
+    pub(crate) fn set_cursor(&mut self, spot: Spot) {
+        self.cursor = Some(spot);
+        self.reveal = Some(Reveal::Cursor);
+    }
+
+    /// The file the cursor is in.
+    pub(crate) fn cursor_file(&self) -> Option<String> {
+        match self.cursor.as_ref()? {
+            Spot::File(path) | Spot::Line { path, .. } => Some(path.clone()),
+            Spot::Thread(id) => self.thread(*id)?.anchor.as_ref().map(|a| a.path.clone()),
         }
-        self.selected = next;
-        self.diff_scroll = 0;
+    }
+
+    /// The hunk the cursor is in: its file and index.
+    pub(crate) fn cursor_hunk(&self) -> Option<(String, usize)> {
+        let Some(Spot::Line { path, side, line }) = &self.cursor else {
+            return None;
+        };
+        let change = self.change(path)?;
+        let index = change.diff.hunks.iter().position(|hunk| {
+            hunk.lines
+                .iter()
+                .any(|l| line_spot(l) == Some((*side, *line)))
+        })?;
+        Some((path.clone(), index))
+    }
+
+    /// Move the cursor `delta` focusable rows, clamped; from no cursor, onto the first.
+    pub(crate) fn move_cursor(&mut self, delta: i32) {
+        let spots = self.spots();
+        if spots.is_empty() {
+            return;
+        }
+        let next = match self.cursor_index(&spots.iter().collect::<Vec<_>>()) {
+            Some(at) => step(at, delta, spots.len()),
+            None => 0,
+        };
+        self.set_cursor(spots[next].clone());
+    }
+
+    /// Move the cursor to the next (`delta > 0`) or previous file header.
+    pub(crate) fn move_file(&mut self, delta: i32) {
+        self.jump(delta, |spot| matches!(spot, Spot::File(_)));
+    }
+
+    /// Move the cursor to the first line of the next (`delta > 0`) or previous hunk.
+    pub(crate) fn move_hunk(&mut self, delta: i32) {
+        let outline = self.outline();
+        let starts: Vec<Spot> = outline
+            .items
+            .windows(2)
+            .filter(|pair| matches!(pair[0], Item::Hunk(..)))
+            .filter_map(|pair| self.item_spot(&outline, pair[1]))
+            .collect();
+        self.jump(delta, |spot| starts.contains(spot));
+    }
+
+    /// Move the cursor to the nearest focusable row past it in `delta`'s direction that
+    /// `accept` takes.
+    fn jump(&mut self, delta: i32, accept: impl Fn(&Spot) -> bool) {
+        let spots = self.spots();
+        let at = self.cursor_index(&spots.iter().collect::<Vec<_>>());
+        let found = if delta > 0 {
+            let from = at.map_or(0, |i| i + 1);
+            (from..spots.len()).find(|&i| accept(&spots[i]))
+        } else {
+            let to = at.unwrap_or(spots.len());
+            (0..to).rev().find(|&i| accept(&spots[i]))
+        };
+        if let Some(index) = found {
+            self.set_cursor(spots[index].clone());
+        }
+    }
+
+    /// Where the cursor is among `spots`: on its own row; or, when that row has gone (the line
+    /// was edited away, the file folded), on the row after the one that was before it; or
+    /// failing that, where it last was.
+    fn cursor_index(&self, spots: &[&Spot]) -> Option<usize> {
+        let cursor = self.cursor.as_ref()?;
+        let last = spots.len().checked_sub(1)?;
+        spots
+            .iter()
+            .position(|s| *s == cursor)
+            .or_else(|| {
+                let before = self.cursor_before.as_ref()?;
+                let at = spots.iter().position(|s| *s == before)?;
+                Some((at + 1).min(last))
+            })
+            .or(Some(self.cursor_at.min(last)))
+    }
+
+    /// Scroll the review by `delta` rows (clamped in [`Self::build`]).
+    pub(crate) fn scroll_rows(&mut self, delta: i32) {
+        self.scroll = step_unclamped(self.scroll, delta);
+        self.reveal = None;
+    }
+
+    /// Scroll the review by `delta` pages.
+    pub(crate) fn page(&mut self, delta: i32) {
+        let page = i32::try_from(self.page.max(1)).unwrap_or(1);
+        self.scroll_rows(delta.saturating_mul(page));
+    }
+
+    /// Open the composer on the diff line at `spot`, keeping any text already written: there is
+    /// one composer, and a draft moves with it rather than being lost. `false` when `spot` is
+    /// not a line.
+    pub(crate) fn start_comment(&mut self, spot: &Spot) -> bool {
+        let Spot::Line { path, side, line } = spot else {
+            return false;
+        };
+        let Some(text) = self.change(path).and_then(|c| {
+            c.diff
+                .hunks
+                .iter()
+                .flat_map(|h| &h.lines)
+                .find(|l| line_spot(l) == Some((*side, *line)))
+                .map(|l| l.text.clone())
+        }) else {
+            return false;
+        };
+        let anchor = Anchor {
+            path: path.clone(),
+            side: *side,
+            line: *line,
+            line_end: *line,
+            text,
+        };
+        self.compose(Compose::Comment(anchor));
+        self.cursor = Some(spot.clone());
         true
     }
 
-    /// Scroll the selected file's diff by `delta` lines (clamped in [`Self::build`]).
-    pub(crate) fn scroll_diff(&mut self, delta: i32) {
-        let next =
-            i64::from(i32::try_from(self.diff_scroll).unwrap_or(i32::MAX)) + i64::from(delta);
-        self.diff_scroll = usize::try_from(next.max(0)).unwrap_or(0);
+    /// Open the composer for a reply on thread `id`.
+    pub(crate) fn start_reply(&mut self, id: u64) {
+        self.compose(Compose::Reply(id));
+        self.cursor = Some(Spot::Thread(id));
     }
 
-    /// Store the clamped diff scroll [`Self::build`] settled on, so paging past the end of a
-    /// diff does not leave a large value that then needs many pages back to undo.
-    pub(crate) fn set_scroll(&mut self, scroll: usize) {
-        self.diff_scroll = scroll;
+    fn compose(&mut self, target: Compose) {
+        let text = self.composer.take().map(|c| c.text).unwrap_or_default();
+        self.composer = Some(Composer {
+            target,
+            text,
+            problem: None,
+        });
+        self.focus = Focus::Composer;
+        self.reveal = Some(Reveal::Composer);
     }
 
-    /// Build the dock's proportional display list within `panel` (physical px) at DPI
-    /// `scale`, in `theme`'s UI tokens: the status bar, the `CHANGED - N` file list (the
-    /// selected file filled), the selected file's diff (add/del/hunk backgrounds + `mono`
-    /// code), and the commit box. The renderer draws the dock frame (shadow + divider).
-    /// Returns the clamped diff scroll actually used (the binary writes it back).
+    /// Give the open composer focus again.
+    pub(crate) fn focus_composer(&mut self) {
+        if self.composer.is_some() {
+            self.focus = Focus::Composer;
+        }
+    }
+
+    /// Type `text` into the composer (a paste, or a keystroke). Control characters other
+    /// than a newline are dropped.
+    pub(crate) fn compose_text(&mut self, text: &str) {
+        if let Some(composer) = self.composer.as_mut() {
+            composer
+                .text
+                .extend(text.chars().filter(|c| *c == '\n' || !c.is_control()));
+            composer.problem = None;
+        }
+    }
+
+    /// Delete the composer's last character.
+    pub(crate) fn compose_backspace(&mut self) {
+        if let Some(composer) = self.composer.as_mut() {
+            composer.text.pop();
+        }
+    }
+
+    /// Leave the composer (`Esc`): an empty one closes; one with a draft stays where it is,
+    /// unfocused, so the draft is never lost to a stray key.
+    pub(crate) fn leave_composer(&mut self) {
+        if self
+            .composer
+            .as_ref()
+            .is_some_and(|c| c.text.trim().is_empty())
+        {
+            self.composer = None;
+        }
+        self.focus = Focus::List;
+    }
+
+    /// Close the composer and discard what it held (its Cancel, or after a send).
+    pub(crate) fn close_composer(&mut self) {
+        self.composer = None;
+        if self.focus == Focus::Composer {
+            self.focus = Focus::List;
+        }
+    }
+
+    /// What the composer would send: its target and text, when there is text.
+    pub(crate) fn composed(&self) -> Option<(Compose, String)> {
+        let composer = self.composer.as_ref()?;
+        let text = composer.text.trim();
+        (!text.is_empty()).then(|| (composer.target.clone(), text.to_owned()))
+    }
+
+    /// Show why the last send failed, under the composer's text.
+    pub(crate) fn set_composer_problem(&mut self, problem: String) {
+        if let Some(composer) = self.composer.as_mut() {
+            composer.problem = Some(problem);
+        }
+    }
+
+    /// Track the target under the pointer at (`px`, `py`); `true` when it changed (repaint).
+    pub(crate) fn hover_at(&mut self, px: f32, py: f32) -> bool {
+        let hover = self.target_at(px, py);
+        let changed = hover != self.hover;
+        self.hover = hover;
+        changed
+    }
+
+    /// The target under the pointer.
+    pub(crate) fn hovered(&self) -> Option<&Target> {
+        self.hover.as_ref()
+    }
+
+    /// Why the review could not be read, when it could not.
+    pub(crate) fn review_problem(&self) -> Option<&str> {
+        self.data.review_problem.as_deref()
+    }
+
+    /// Forget the hovered target (the pointer left the dock); `true` when there was one.
+    pub(crate) fn clear_hover(&mut self) -> bool {
+        self.hover.take().is_some()
+    }
+
+    /// The target at (`px`, `py`) in the last build, the frontmost first.
+    pub(crate) fn target_at(&self, px: f32, py: f32) -> Option<Target> {
+        self.targets
+            .iter()
+            .rev()
+            .find(|(r, _)| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h)
+            .map(|(_, target)| target.clone())
+    }
+
+    /// The scroll's structure: its sections and items, folds applied.
+    fn outline(&self) -> Outline {
+        let threads = self.threads();
+        let composer_path = self.composer_path();
+        let mut sections: Vec<Section> = self
+            .data
+            .changes
+            .iter()
+            .enumerate()
+            .map(|(i, c)| Section {
+                path: c.path.to_string_lossy().into_owned(),
+                change: Some(i),
+                folded: false,
+            })
+            .collect();
+        let mut extra: Vec<String> = threads
+            .iter()
+            .filter(|t| t.status == Open::Open)
+            .filter_map(|t| t.anchor.as_ref().map(|a| a.path.clone()))
+            .filter(|path| !sections.iter().any(|s| &s.path == path))
+            .collect();
+        extra.sort();
+        extra.dedup();
+        sections.extend(extra.into_iter().map(|path| Section {
+            path,
+            change: None,
+            folded: false,
+        }));
+        for section in &mut sections {
+            section.folded = self.folded(section, composer_path.as_deref());
+        }
+        let mut items = Vec::new();
+        // A resolved thread shows while what it is about is still changed, as on a file.
+        let changed = !self.data.changes.is_empty();
+        let general: Vec<usize> = (0..threads.len())
+            .filter(|&t| {
+                threads[t].anchor.is_none() && (changed || threads[t].status == Open::Open)
+            })
+            .collect();
+        if !general.is_empty() {
+            items.push(Item::General);
+            for t in general {
+                self.push_thread(&mut items, t, true);
+            }
+        }
+        for (si, section) in sections.iter().enumerate() {
+            items.push(Item::File(si));
+            if !section.folded {
+                self.push_section(&mut items, si, section);
+            }
+        }
+        Outline { sections, items }
+    }
+
+    /// The file the composer is on, which stays unfolded while it is open.
+    fn composer_path(&self) -> Option<String> {
+        match &self.composer.as_ref()?.target {
+            Compose::Comment(anchor) => Some(anchor.path.clone()),
+            Compose::Reply(id) => self.thread(*id)?.anchor.as_ref().map(|a| a.path.clone()),
+        }
+    }
+
+    /// Whether `section` is folded: as set by hand, else when it is viewed, or unreadable
+    /// (a minified line) with nothing to read on it.
+    fn folded(&self, section: &Section, composer_path: Option<&str>) -> bool {
+        if composer_path == Some(section.path.as_str()) {
+            return false;
+        }
+        if let Some(&folded) = self.folds.get(&section.path) {
+            return folded;
+        }
+        let Some(change) = section.change.map(|i| &self.data.changes[i]) else {
+            return false;
+        };
+        let commented = self
+            .threads()
+            .iter()
+            .any(|t| t.anchor.as_ref().is_some_and(|a| a.path == section.path));
+        self.viewed(change) || (longest_line(change) > UNREADABLE_LINE && !commented)
+    }
+
+    /// A thread card, and the composer under it when it is replying there.
+    fn push_thread(&self, items: &mut Vec<Item>, thread: usize, attached: bool) {
+        items.push(Item::Thread(thread, attached));
+        let id = self.threads()[thread].id;
+        if self
+            .composer
+            .as_ref()
+            .is_some_and(|c| c.target == Compose::Reply(id))
+        {
+            items.push(Item::Composer);
+        }
+    }
+
+    /// An unfolded file's rows: its hunks and lines with each thread under the line it is
+    /// on, then the threads that are on no line shown, then the composer if it is here.
+    fn push_section(&self, items: &mut Vec<Item>, si: usize, section: &Section) {
+        let threads = self.threads();
+        let mut pending: Vec<usize> = (0..threads.len())
+            .filter(|&t| {
+                threads[t]
+                    .anchor
+                    .as_ref()
+                    .is_some_and(|a| a.path == section.path)
+                    && (section.change.is_some() || threads[t].status == Open::Open)
+            })
+            .collect();
+        let mut composer = self.composer.as_ref().and_then(|c| match &c.target {
+            Compose::Comment(a) if a.path == section.path => Some((a.side, a.line)),
+            _ => None,
+        });
+        let change = section.change.map(|i| &self.data.changes[i]);
+        match change {
+            Some(change) if change.skipped.is_none() && !change.diff.hunks.is_empty() => {
+                for (hi, hunk) in change.diff.hunks.iter().enumerate() {
+                    items.push(Item::Hunk(si, hi));
+                    for (li, line) in hunk.lines.iter().enumerate() {
+                        items.push(Item::Line(si, hi, li));
+                        let Some(spot) = line_spot(line) else {
+                            continue;
+                        };
+                        pending.retain(|&t| {
+                            let here = self.thread_spot(t) == Some(spot);
+                            if here {
+                                self.push_thread(items, t, true);
+                            }
+                            !here
+                        });
+                        if composer == Some(spot) {
+                            items.push(Item::Composer);
+                            composer = None;
+                        }
+                    }
+                }
+            }
+            _ => items.push(Item::Note(si)),
+        }
+        for t in pending {
+            self.push_thread(items, t, false);
+        }
+        if composer.is_some() {
+            items.push(Item::Composer);
+        }
+    }
+
+    /// The side and line thread `index` is on now, when it is on one.
+    fn thread_spot(&self, index: usize) -> Option<(Side, u32)> {
+        let anchor = self.threads()[index].anchor.as_ref()?;
+        match self.location(index) {
+            Location::At(line) => Some((anchor.side, line)),
+            Location::Whole | Location::Outdated => None,
+        }
+    }
+
+    /// The focusable rows, top to bottom.
+    fn spots(&self) -> Vec<Spot> {
+        let outline = self.outline();
+        outline
+            .items
+            .iter()
+            .filter_map(|&item| self.item_spot(&outline, item))
+            .collect()
+    }
+
+    /// The spot of `item`, when the cursor can rest on it.
+    fn item_spot(&self, outline: &Outline, item: Item) -> Option<Spot> {
+        match item {
+            Item::File(si) => Some(Spot::File(outline.sections[si].path.clone())),
+            Item::Line(si, hi, li) => {
+                let line = self.diff_line(outline, si, hi, li)?;
+                let (side, number) = line_spot(line)?;
+                Some(Spot::Line {
+                    path: outline.sections[si].path.clone(),
+                    side,
+                    line: number,
+                })
+            }
+            Item::Thread(t, _) => Some(Spot::Thread(self.threads()[t].id)),
+            Item::General | Item::Note(_) | Item::Hunk(..) | Item::Composer => None,
+        }
+    }
+
+    /// Diff line `li` of hunk `hi` of section `si`.
+    fn diff_line(&self, outline: &Outline, si: usize, hi: usize, li: usize) -> Option<&DiffLine> {
+        let change = &self.data.changes[outline.sections[si].change?];
+        change.diff.hunks.get(hi)?.lines.get(li)
+    }
+
+    /// Build the dock's display list within `panel` (physical px) at DPI `scale`, in
+    /// `theme`'s UI tokens: the status bar, the review scroll, and the commit box. Keeps the
+    /// hit targets for [`Self::target_at`]. The renderer draws the dock frame (shadow +
+    /// divider).
     pub(crate) fn build(
-        &self,
+        &mut self,
         panel: PxRect,
         scale: f32,
         theme: &Theme,
@@ -336,70 +965,42 @@ impl GitDock {
             scale,
             theme,
         };
-        let mid = panel.y + panel.h * 0.5;
-        // Empty / error states short-circuit with their own centered message.
-        if let Some(paint) = self.empty_paint(&ctx, measure, mid) {
-            return paint;
+        let mut out = Out::default();
+        let outline = self.outline();
+        if !self.empty_paint(&ctx, measure, &outline, &mut out) {
+            self.push_status_bar(&mut out, &ctx, measure, panel.y + PAD_TOP * scale);
+            let top = panel.y + (PAD_TOP + STATUS_H) * scale;
+            self.push_label_row(&mut out, &ctx, measure, top);
+            let body = (
+                top + LABEL_H * scale,
+                panel.y + panel.h - COMMIT_BAND_H * scale,
+            );
+            let rows = self.rows(&outline, &ctx, measure);
+            self.settle(&outline, &rows, body.1 - body.0, scale);
+            self.paint_rows(&outline, &rows, &ctx, measure, body, &mut out);
+            self.push_commit(&mut out, &ctx, measure, body.1);
         }
-        let mut quads = Vec::new();
-        let mut labels = Vec::new();
-        self.push_status_bar(&mut labels, &ctx, measure, panel.y + PAD_TOP * scale);
-
-        // The commit box occupies a fixed band at the foot; the file list + diff lay out above.
-        let content_bottom = panel.y + panel.h - COMMIT_BAND_H * scale;
-        let mut y = panel.y + PAD_TOP * scale + STATUS_H * scale;
-        // File-list section label + a key hint.
-        push_row(
-            &mut labels,
-            measure,
-            &format!("CHANGED - {}", self.status.files.len()),
-            FontRole::Micro,
-            theme.fg_muted,
-            ctx.cx,
-            y,
-            LABEL_H,
-            scale,
-        );
-        push_right(
-            &mut labels,
-            measure,
-            "space stage  a all",
-            FontRole::Caption,
-            theme.fg_muted,
-            ctx.cr,
-            y,
-            LABEL_H,
-            scale,
-        );
-        y += LABEL_H * scale;
-
-        let files_bottom =
-            self.push_file_list(&mut quads, &mut labels, &ctx, measure, y, content_bottom);
-        let diff_scroll = self.push_diff(
-            &mut quads,
-            &mut labels,
-            &ctx,
-            measure,
-            files_bottom,
-            content_bottom,
-        );
-        self.push_commit(&mut quads, &mut labels, &ctx, measure, content_bottom);
+        self.targets = out.targets;
         Paint {
-            quads,
-            labels,
-            diff_scroll,
+            quads: out.quads,
+            labels: out.labels,
         }
     }
 
     /// The empty / error states, each a centered message: no repo (with an Init button), a
-    /// git error, or a clean tree (with the status bar). `Some` short-circuits [`Self::build`].
-    fn empty_paint(&self, ctx: &GCtx, measure: &mut TextMeasure, mid: f32) -> Option<Paint> {
+    /// git error, or nothing to review (with the status bar). `true` when it painted one.
+    fn empty_paint(
+        &self,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        outline: &Outline,
+        out: &mut Out,
+    ) -> bool {
         let (panel, scale, theme) = (ctx.panel, ctx.scale, ctx.theme);
+        let mid = panel.y + panel.h * 0.5;
         if !self.repo_present {
-            let mut quads = Vec::new();
-            let mut labels = Vec::new();
             push_centered(
-                &mut labels,
+                &mut out.labels,
                 measure,
                 "No repository here",
                 FontRole::Body,
@@ -411,18 +1012,19 @@ impl GitDock {
             let by = mid + 34.0 * scale;
             let w = measure.width("Init repo  \u{21a9}", FontRole::Body, None);
             let bx = panel.x + (panel.w - w) * 0.5;
-            quads.push(ChromeQuad::rounded(
-                PxRect {
-                    x: bx - 10.0 * scale,
-                    y: by,
-                    w: w + 20.0 * scale,
-                    h: 28.0 * scale,
-                },
+            let rect = PxRect {
+                x: bx - 10.0 * scale,
+                y: by,
+                w: w + 20.0 * scale,
+                h: 28.0 * scale,
+            };
+            out.quads.push(ChromeQuad::rounded(
+                rect,
                 theme.accent_subtle_on(theme.bg_base.to_srgb()),
                 6.0 * scale,
             ));
             push_row(
-                &mut labels,
+                &mut out.labels,
                 measure,
                 "Init repo  \u{21a9}",
                 FontRole::Body,
@@ -432,16 +1034,12 @@ impl GitDock {
                 28.0,
                 scale,
             );
-            return Some(Paint {
-                quads,
-                labels,
-                diff_scroll: 0,
-            });
+            out.targets.push((rect, Target::Init));
+            return true;
         }
         if let Some(error) = &self.error {
-            let mut labels = Vec::new();
             push_centered(
-                &mut labels,
+                &mut out.labels,
                 measure,
                 "git error",
                 FontRole::Body,
@@ -457,7 +1055,7 @@ impl GitDock {
                 .take(60)
                 .collect();
             push_centered(
-                &mut labels,
+                &mut out.labels,
                 measure,
                 &msg,
                 FontRole::Caption,
@@ -465,66 +1063,52 @@ impl GitDock {
                 panel,
                 mid + 14.0 * scale,
             );
-            return Some(Paint {
-                quads: Vec::new(),
-                labels,
-                diff_scroll: 0,
-            });
+            return true;
         }
-        if self.status.files.is_empty() {
-            let mut labels = Vec::new();
-            self.push_status_bar(&mut labels, ctx, measure, panel.y + PAD_TOP * scale);
-            let message = match &self.last_commit {
-                Some(sha) => format!("committed {sha} - press u to undo"),
-                None => "Working tree clean".to_owned(),
-            };
-            push_centered(
-                &mut labels,
-                measure,
-                &message,
-                FontRole::Body,
-                theme.fg_muted,
-                panel,
-                mid,
-            );
-            return Some(Paint {
-                quads: Vec::new(),
-                labels,
-                diff_scroll: 0,
-            });
+        if !outline.items.is_empty() {
+            return false;
         }
-        None
+        self.push_status_bar(out, ctx, measure, panel.y + PAD_TOP * scale);
+        let message = match &self.last_commit {
+            Some(sha) => format!("committed {sha} - press u to undo"),
+            None => "Working tree clean".to_owned(),
+        };
+        push_centered(
+            &mut out.labels,
+            measure,
+            &message,
+            FontRole::Body,
+            theme.fg_muted,
+            panel,
+            mid,
+        );
+        true
     }
 
     /// The status bar: branch (`diff.hunk`), ahead/behind (muted), the `+added`/`-removed`
     /// totals right-anchored, and an `esc` hint.
-    fn push_status_bar(
-        &self,
-        labels: &mut Vec<ProseLabel>,
-        ctx: &GCtx,
-        measure: &mut TextMeasure,
-        top: f32,
-    ) {
+    fn push_status_bar(&self, out: &mut Out, ctx: &GCtx, measure: &mut TextMeasure, top: f32) {
         let theme = ctx.theme;
-        let branch = self.status.branch.as_deref().unwrap_or("(detached)");
-        let mut x = ctx.cx;
+        let labels = &mut out.labels;
+        let status = &self.data.status;
+        let branch = format!(
+            "\u{2442} {}",
+            status.branch.as_deref().unwrap_or("(detached)")
+        );
         push_row(
             labels,
             measure,
-            &format!("\u{2442} {branch}"),
+            &branch,
             FontRole::Mono,
             theme.diff_hunk,
-            x,
+            ctx.cx,
             top,
             STATUS_H,
             ctx.scale,
         );
-        x += measure.width(&format!("\u{2442} {branch}"), FontRole::Mono, None) + 10.0 * ctx.scale;
-        if self.status.ahead > 0 || self.status.behind > 0 {
-            let text = format!(
-                "\u{2191}{} \u{2193}{}",
-                self.status.ahead, self.status.behind
-            );
+        if status.ahead > 0 || status.behind > 0 {
+            let x = ctx.cx + measure.width(&branch, FontRole::Mono, None) + 10.0 * ctx.scale;
+            let text = format!("\u{2191}{} \u{2193}{}", status.ahead, status.behind);
             push_row(
                 labels,
                 measure,
@@ -537,191 +1121,1286 @@ impl GitDock {
                 ctx.scale,
             );
         }
-        let (added, removed): (u32, u32) = self
-            .status
-            .files
-            .iter()
-            .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
+        let (added, removed) = self.data.changes.iter().fold((0, 0), |(a, r), c| {
+            let (ca, cr) = c.diff.stats();
+            (a + ca, r + cr)
+        });
         // Right-anchored right-to-left: esc, then -removed, then +added.
-        let mut end = ctx.cr;
-        end = push_right(
+        let end = push_right(
             labels,
             measure,
             "esc",
             FontRole::Caption,
             theme.fg_muted,
-            end,
+            ctx.cr,
             top,
             STATUS_H,
             ctx.scale,
         ) - 10.0 * ctx.scale;
-        end = push_right(
-            labels,
+        push_counts(labels, measure, ctx, (added, removed), end, top, STATUS_H);
+    }
+
+    /// The label over the scroll: `CHANGED - N` and how many are viewed, with the open
+    /// comment count (or the key hints, when nothing is open) right-anchored.
+    fn push_label_row(&self, out: &mut Out, ctx: &GCtx, measure: &mut TextMeasure, top: f32) {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let total = self.data.changes.len();
+        let label = format!("CHANGED - {total}");
+        push_row(
+            &mut out.labels,
             measure,
-            &format!("-{removed}"),
-            FontRole::Mono,
-            theme.diff_del,
-            end,
+            &label,
+            FontRole::Micro,
+            theme.fg_muted,
+            ctx.cx,
             top,
-            STATUS_H,
-            ctx.scale,
-        ) - 8.0 * ctx.scale;
+            LABEL_H,
+            scale,
+        );
+        let viewed = self.data.changes.iter().filter(|c| self.viewed(c)).count();
+        if total > 0 {
+            let x = ctx.cx + measure.width(&label, FontRole::Micro, None) + 10.0 * scale;
+            push_row(
+                &mut out.labels,
+                measure,
+                &format!("{viewed}/{total} viewed"),
+                FontRole::Caption,
+                theme.fg_muted,
+                x,
+                top,
+                LABEL_H,
+                scale,
+            );
+        }
+        let open = self
+            .threads()
+            .iter()
+            .filter(|t| t.status == Open::Open)
+            .count();
+        let (text, role, color) = if let Some(problem) = &self.data.review_problem {
+            (
+                format!("comments unavailable: {problem}"),
+                FontRole::Caption,
+                theme.diff_del,
+            )
+        } else if open > 0 {
+            (
+                format!("{open} open comment{}", if open == 1 { "" } else { "s" }),
+                FontRole::Caption,
+                theme.accent,
+            )
+        } else {
+            (
+                "c comment  v viewed".to_owned(),
+                FontRole::Caption,
+                theme.fg_muted,
+            )
+        };
         push_right(
-            labels,
+            &mut out.labels,
             measure,
-            &format!("+{added}"),
-            FontRole::Mono,
-            theme.diff_add,
-            end,
+            &text,
+            role,
+            color,
+            ctx.cr,
             top,
-            STATUS_H,
+            LABEL_H,
+            scale,
+        );
+    }
+
+    /// Expand the outline into drawn rows, wrapping card text to the card's width.
+    fn rows(&self, outline: &Outline, ctx: &GCtx, measure: &mut TextMeasure) -> Vec<Row> {
+        let text_w = (ctx.cr - ctx.cx - 2.0 * CARD_PAD * ctx.scale).max(1.0);
+        let mut rows = Vec::new();
+        let mut section = None;
+        for (index, &item) in outline.items.iter().enumerate() {
+            let mut push = |h: f32, part: Part| {
+                rows.push(Row {
+                    item: index,
+                    section,
+                    h,
+                    part,
+                });
+            };
+            match item {
+                Item::General => {
+                    section = None;
+                    rows.push(Row {
+                        item: index,
+                        section,
+                        h: LABEL_H,
+                        part: Part::Whole,
+                    });
+                }
+                Item::File(si) => {
+                    section = Some(si);
+                    rows.push(Row {
+                        item: index,
+                        section,
+                        h: FILE_HEAD_H,
+                        part: Part::Whole,
+                    });
+                }
+                Item::Note(_) => push(NOTE_H, Part::Whole),
+                Item::Hunk(..) | Item::Line(..) => push(DIFF_ROW_H, Part::Whole),
+                Item::Thread(t, attached) => {
+                    let thread = &self.threads()[t];
+                    push(CARD_HEAD_H, Part::Head);
+                    if !attached && thread.anchor.is_some() {
+                        push(CARD_TEXT_H, Part::Quote);
+                    }
+                    for (m, message) in thread.messages.iter().enumerate() {
+                        push(CARD_AUTHOR_H, Part::Author(m));
+                        for line in wrap(&message.body, FontRole::Body, text_w, measure) {
+                            push(CARD_TEXT_H, Part::Text(line));
+                        }
+                    }
+                    push(CARD_GAP_H, Part::Gap);
+                }
+                Item::Composer => {
+                    let Some(composer) = self.composer.as_ref() else {
+                        continue;
+                    };
+                    push(CARD_HEAD_H, Part::Head);
+                    let lines = wrap(&composer.text, FontRole::Body, text_w, measure);
+                    let count = lines.len();
+                    for (i, text) in lines.into_iter().enumerate() {
+                        let last = i + 1 == count;
+                        push(CARD_TEXT_H, Part::Draft { text, last });
+                    }
+                    if composer.problem.is_some() {
+                        push(CARD_TEXT_H, Part::Problem);
+                    }
+                    push(CARD_FOOT_H, Part::Foot);
+                    push(CARD_GAP_H, Part::Gap);
+                }
+            }
+        }
+        rows
+    }
+
+    /// Settle the scroll for this build: follow the rows it was on across a reload, settle
+    /// the cursor when its row went away, bring the cursor or composer into view when asked,
+    /// clamp to the content, and remember the rows it now stands on.
+    fn settle(&mut self, outline: &Outline, rows: &[Row], body_h: f32, scale: f32) {
+        let spots: Vec<Option<Spot>> = outline
+            .items
+            .iter()
+            .map(|&item| self.item_spot(outline, item))
+            .collect();
+        let first_row = |spot: &Spot| {
+            rows.iter()
+                .position(|r| spots[r.item].as_ref() == Some(spot))
+        };
+        if std::mem::take(&mut self.reanchor) {
+            if let Some(at) = self
+                .anchors
+                .iter()
+                .find_map(|(spot, offset)| first_row(spot).map(|r| r + offset))
+            {
+                self.scroll = at;
+            }
+        }
+        let focusable: Vec<&Spot> = spots.iter().flatten().collect();
+        if let Some(at) = self.cursor_index(&focusable) {
+            self.cursor = Some(focusable[at].clone());
+            self.cursor_at = at;
+            self.cursor_before = at.checked_sub(1).map(|b| focusable[b].clone());
+        }
+        let fit = |last: usize| top_for(outline, rows, last, body_h, scale);
+        let span = match self.reveal.take() {
+            Some(Reveal::Cursor) => self.cursor.as_ref().and_then(first_row).map(|r| (r, r)),
+            Some(Reveal::Composer) => {
+                let mut on = rows
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, r)| outline.items[r.item] == Item::Composer && r.part != Part::Gap)
+                    .map(|(i, _)| i);
+                on.next()
+                    .map(|first| (first, on.next_back().unwrap_or(first)))
+            }
+            None => None,
+        };
+        if let Some((first, last)) = span {
+            self.scroll = self.scroll.max(fit(last).min(first)).min(first);
+        }
+        self.scroll = self.scroll.min(fit(rows.len().saturating_sub(1)));
+        self.anchors = self.anchors_at(outline, rows, &spots);
+    }
+
+    /// Where the scroll stands, by identity: the nearest focusable row at or above the top,
+    /// and the header of the file the top is in, each with how many rows below it the top is.
+    fn anchors_at(
+        &self,
+        outline: &Outline,
+        rows: &[Row],
+        spots: &[Option<Spot>],
+    ) -> Vec<(Spot, usize)> {
+        let Some(top) = rows.get(self.scroll) else {
+            return Vec::new();
+        };
+        // Offsets count from an item's first row, which is where a reload finds it again.
+        let mut anchors: Vec<(Spot, usize)> = (0..=self.scroll)
+            .rev()
+            .find(|&r| spots[rows[r].item].is_some())
+            .and_then(|r| {
+                let item = rows[r].item;
+                let first = (0..=r).rev().take_while(|&f| rows[f].item == item).last()?;
+                Some((spots[item].clone()?, self.scroll - first))
+            })
+            .into_iter()
+            .collect();
+        if let Some(si) = top.section {
+            let head = (0..=self.scroll)
+                .rev()
+                .find(|&r| outline.items[rows[r].item] == Item::File(si));
+            if let Some(head) = head {
+                let path = outline.sections[si].path.clone();
+                anchors.push((Spot::File(path), self.scroll - head));
+            }
+        }
+        anchors
+    }
+
+    /// Paint the rows from the scroll down that fit in `body` (top, bottom), under the
+    /// header of the file the top row is in when that header has scrolled away.
+    fn paint_rows(
+        &mut self,
+        outline: &Outline,
+        rows: &[Row],
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        body: (f32, f32),
+        out: &mut Out,
+    ) {
+        let scale = ctx.scale;
+        let mut y = body.0;
+        if let Some(si) = sticky_section(outline, rows, self.scroll) {
+            self.paint_file_head(out, ctx, measure, &outline.sections[si], y);
+            y += FILE_HEAD_H * scale;
+        }
+        let mut shown = 0;
+        for row in rows.iter().skip(self.scroll) {
+            let h = row.h * scale;
+            if y + h > body.1 + 0.5 {
+                break;
+            }
+            self.paint_row(outline, row, ctx, measure, y, out);
+            y += h;
+            shown += 1;
+        }
+        self.page = shown;
+    }
+
+    /// Paint one row at `y`.
+    fn paint_row(
+        &self,
+        outline: &Outline,
+        row: &Row,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        y: f32,
+        out: &mut Out,
+    ) {
+        match outline.items[row.item] {
+            Item::General => push_row(
+                &mut out.labels,
+                measure,
+                "ON THE WHOLE CHANGE",
+                FontRole::Micro,
+                ctx.theme.fg_muted,
+                ctx.cx,
+                y,
+                LABEL_H,
+                ctx.scale,
+            ),
+            Item::File(si) => self.paint_file_head(out, ctx, measure, &outline.sections[si], y),
+            Item::Note(si) => self.paint_note(out, ctx, measure, &outline.sections[si], y),
+            Item::Hunk(si, hi) => self.paint_hunk(out, ctx, measure, outline, (si, hi), y),
+            Item::Line(si, hi, li) => {
+                if let Some(line) = self.diff_line(outline, si, hi, li) {
+                    let path = &outline.sections[si].path;
+                    self.paint_line(out, ctx, measure, path, line, y);
+                }
+            }
+            Item::Thread(t, attached) => {
+                let card = Card {
+                    y,
+                    h: row.h * ctx.scale,
+                };
+                self.paint_thread_row(out, ctx, measure, (t, attached), &row.part, card);
+            }
+            Item::Composer => {
+                let card = Card {
+                    y,
+                    h: row.h * ctx.scale,
+                };
+                self.paint_composer_row(out, ctx, measure, &row.part, card);
+            }
+        }
+    }
+
+    /// A file header: the stage checkbox, the fold caret, the status letter and path, then
+    /// right-anchored the Viewed checkbox, the `+add -del` counts, and the comment count.
+    fn paint_file_head(
+        &self,
+        out: &mut Out,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        section: &Section,
+        y: f32,
+    ) {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let h = FILE_HEAD_H * scale;
+        let full = PxRect {
+            x: ctx.panel.x,
+            y,
+            w: ctx.panel.w,
+            h,
+        };
+        let cursor = self.cursor == Some(Spot::File(section.path.clone()));
+        let surface = if cursor {
+            theme.accent_subtle_on(theme.bg_surface)
+        } else {
+            theme.bg_surface
+        };
+        out.quads.push(ChromeQuad::fill(full, surface));
+        out.quads.push(ChromeQuad::fill(
+            PxRect {
+                h: scale.max(1.0),
+                ..full
+            },
+            theme.border_subtle,
+        ));
+        if cursor {
+            push_cursor_bar(out, ctx, y, h);
+        }
+        // The whole header folds; the checkboxes on it are pushed after, so they are on top.
+        out.targets.push((full, Target::Fold(section.path.clone())));
+        let change = section.change.map(|i| &self.data.changes[i]);
+        let mut x = ctx.cx;
+        if change.is_some() {
+            let staged = self.status_of(&section.path).is_some_and(|f| f.staged);
+            let (check, color) = if staged {
+                ("[x]", theme.diff_add)
+            } else {
+                ("[ ]", theme.fg_muted)
+            };
+            push_row(
+                &mut out.labels,
+                measure,
+                check,
+                FontRole::Mono,
+                color,
+                x,
+                y,
+                FILE_HEAD_H,
+                scale,
+            );
+            let w = measure.width("[x]", FontRole::Mono, None);
+            let target = Target::Stage(section.path.clone());
+            let rect = PxRect {
+                x: x - 3.0 * scale,
+                y,
+                w: w + 6.0 * scale,
+                h,
+            };
+            out.targets.push((rect, target));
+            x += measure.width("[x] ", FontRole::Mono, None);
+        }
+        let caret = if section.folded {
+            CHEVRON_RIGHT
+        } else {
+            CHEVRON_DOWN
+        };
+        push_row(
+            &mut out.labels,
+            measure,
+            caret,
+            FontRole::Icon,
+            theme.fg_muted,
+            x,
+            y,
+            FILE_HEAD_H,
+            scale,
+        );
+        x += measure.width(CHEVRON_RIGHT, FontRole::Icon, None) + 6.0 * scale;
+        if let Some(change) = change {
+            let code = change.status.code().to_string();
+            push_row(
+                &mut out.labels,
+                measure,
+                &code,
+                FontRole::Mono,
+                status_color(theme, change.status),
+                x,
+                y,
+                FILE_HEAD_H,
+                scale,
+            );
+            x += measure.width("M ", FontRole::Mono, None);
+        }
+        let right = self.paint_file_controls(out, ctx, measure, section, change, y);
+        let role = FontRole::Label;
+        out.labels.push(ProseLabel {
+            text: section.path.clone(),
+            x,
+            y: y + (h - measure.line_height(role)) * 0.5,
+            role,
+            color: theme.fg_primary,
+            weight: None,
+            max_w: (right - 8.0 * scale - x).max(1.0),
+        });
+    }
+
+    /// A file header's right-anchored controls; returns where they start, for the path to
+    /// stop before.
+    fn paint_file_controls(
+        &self,
+        out: &mut Out,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        section: &Section,
+        change: Option<&FileChange>,
+        y: f32,
+    ) -> f32 {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let mut right = ctx.cr;
+        if let Some(change) = change {
+            let bx = self.push_viewed(out, ctx, measure, section, change, y);
+            right = bx - 12.0 * scale;
+            if change.skipped.is_none() {
+                right = push_counts(
+                    &mut out.labels,
+                    measure,
+                    ctx,
+                    change.diff.stats(),
+                    right,
+                    y,
+                    FILE_HEAD_H,
+                ) - 10.0 * scale;
+            }
+        }
+        let on = self
+            .threads()
+            .iter()
+            .filter(|t| t.anchor.as_ref().is_some_and(|a| a.path == section.path));
+        let (count, open) = on.fold((0, 0), |(n, o), t| {
+            (n + 1, o + usize::from(t.status == Open::Open))
+        });
+        if count > 0 {
+            let color = if open > 0 {
+                theme.accent
+            } else {
+                theme.fg_muted
+            };
+            let left = push_right(
+                &mut out.labels,
+                measure,
+                &count.to_string(),
+                FontRole::Caption,
+                color,
+                right,
+                y,
+                FILE_HEAD_H,
+                scale,
+            );
+            right = push_right(
+                &mut out.labels,
+                measure,
+                COMMENT_ICON,
+                FontRole::Icon,
+                color,
+                left - 4.0 * scale,
+                y,
+                FILE_HEAD_H,
+                scale,
+            ) - 10.0 * scale;
+        }
+        right
+    }
+
+    /// A file header's Viewed checkbox and label, right-anchored; returns the box's left edge.
+    fn push_viewed(
+        &self,
+        out: &mut Out,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        section: &Section,
+        change: &FileChange,
+        y: f32,
+    ) -> f32 {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let viewed = self.viewed(change);
+        let target = Target::Viewed(section.path.clone());
+        let hover = self.hover.as_ref() == Some(&target);
+        let color = if viewed || hover {
+            theme.fg_primary
+        } else {
+            theme.fg_secondary
+        };
+        let text_x = push_right(
+            &mut out.labels,
+            measure,
+            "Viewed",
+            FontRole::Caption,
+            color,
+            ctx.cr,
+            y,
+            FILE_HEAD_H,
+            scale,
+        );
+        let side = CHECK * scale;
+        let rect = PxRect {
+            x: text_x - 6.0 * scale - side,
+            y: y + (FILE_HEAD_H * scale - side) * 0.5,
+            w: side,
+            h: side,
+        };
+        if viewed {
+            out.quads
+                .push(ChromeQuad::rounded(rect, theme.accent, 3.0 * scale));
+            let tick = "\u{2713}";
+            let tw = measure.width(tick, FontRole::Mono, None);
+            out.labels.push(ProseLabel {
+                text: tick.to_owned(),
+                x: rect.x + (side - tw) * 0.5,
+                y: rect.y + (side - measure.line_height(FontRole::Mono)) * 0.5,
+                role: FontRole::Mono,
+                color: theme.bg_base.to_srgb(),
+                weight: None,
+                max_w: f32::MAX,
+            });
+        } else {
+            let ring = if hover {
+                theme.border_strong
+            } else {
+                theme.border
+            };
+            push_ringed(
+                &mut out.quads,
+                rect,
+                ring,
+                theme.bg_surface,
+                3.0 * scale,
+                scale,
+            );
+        }
+        let hit = PxRect {
+            x: rect.x - 4.0 * scale,
+            y,
+            w: ctx.cr - rect.x + 4.0 * scale,
+            h: FILE_HEAD_H * scale,
+        };
+        out.targets.push((hit, target));
+        rect.x
+    }
+
+    /// The line under a file header saying why its lines are not shown.
+    fn paint_note(
+        &self,
+        out: &mut Out,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        section: &Section,
+        y: f32,
+    ) {
+        let change = section.change.map(|i| &self.data.changes[i]);
+        let note = match change {
+            None => "Not changed - comments on the file as it is",
+            Some(c) => match c.skipped {
+                Some(Skipped::Binary) => "Binary file - not shown",
+                Some(Skipped::TooLarge) => "Large file - not shown",
+                Some(Skipped::Unreadable) => "The file could not be read",
+                None if matches!(c.status, FileStatus::Added | FileStatus::Untracked) => {
+                    "Empty file"
+                }
+                None if c.status == FileStatus::Renamed => "Renamed without changes",
+                None => "No line changes",
+            },
+        };
+        push_row(
+            &mut out.labels,
+            measure,
+            note,
+            FontRole::Caption,
+            ctx.theme.fg_muted,
+            ctx.cx + ADD_W * ctx.scale,
+            y,
+            NOTE_H,
             ctx.scale,
         );
     }
 
-    /// The changed-file list (windowed to keep the selection visible): each row's stage
-    /// checkbox, status letter, path (Plex, clipped before the counts), and `+add`/`-del`
-    /// counts, the selected row behind an `accent.subtle` fill. Returns the y below the list.
-    fn push_file_list(
+    /// A hunk's `@@` header: a `diff.hunk` wash, the header text, and - when hovered or the
+    /// cursor is in it - its stage / unstage button.
+    fn paint_hunk(
         &self,
-        quads: &mut Vec<ChromeQuad>,
-        labels: &mut Vec<ProseLabel>,
+        out: &mut Out,
         ctx: &GCtx,
         measure: &mut TextMeasure,
-        top: f32,
-        bottom: f32,
-    ) -> f32 {
+        outline: &Outline,
+        (si, hi): (usize, usize),
+        y: f32,
+    ) {
         let (scale, theme) = (ctx.scale, ctx.theme);
-        let row_h = FILE_ROW_H * scale;
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            reason = "small non-negative count"
-        )]
-        let capacity =
-            (((bottom - top) * 0.45 / row_h).floor().max(1.0) as usize).min(FILE_ROWS_MAX);
-        let visible = self.status.files.len().min(capacity);
-        let offset = scroll_window(self.status.files.len(), visible, self.selected);
-        let mut y = top;
-        for slot in 0..visible {
-            let index = offset + slot;
-            let Some(file) = self.status.files.get(index) else {
-                break;
-            };
-            let selected = index == self.selected;
-            if selected {
-                // accent.subtle selected-row band, sRGB-composited over the dock's bg.base
-                // backing so it reads at the guide's weight (not the brighter linear blend).
-                quads.push(ChromeQuad::fill(
-                    PxRect {
-                        x: ctx.panel.x,
-                        y,
-                        w: ctx.panel.w,
-                        h: row_h,
-                    },
-                    theme.accent_subtle_on(theme.bg_base.to_srgb()),
-                ));
-            }
-            push_file_row(labels, measure, ctx, file, selected, y);
-            y += row_h;
+        let section = &outline.sections[si];
+        let Some(hunk) = section
+            .change
+            .and_then(|i| self.data.changes[i].diff.hunks.get(hi))
+        else {
+            return;
+        };
+        let h = DIFF_ROW_H * scale;
+        let full = PxRect {
+            x: ctx.panel.x,
+            y,
+            w: ctx.panel.w,
+            h,
+        };
+        let base = theme.bg_base.to_srgb();
+        out.quads.push(ChromeQuad::fill(
+            full,
+            theme.diff_hunk.over(base, HUNK_BG_ALPHA),
+        ));
+        let (old_count, new_count) = hunk.counts();
+        let mut header = format!(
+            "@@ -{},{} +{},{} @@",
+            hunk.old_start, old_count, hunk.new_start, new_count
+        );
+        if !hunk.heading.is_empty() {
+            header.push(' ');
+            header.push_str(&hunk.heading);
         }
-        y
-    }
-
-    /// The selected file's diff: a header (path + counts), then the flattened body scrolled
-    /// into the space above the commit band, with add/del/hunk backgrounds, the focused-hunk
-    /// fill + stage hint, and `mono` code. Returns the clamped scroll used.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        reason = "the visible-row count + slot index are small, non-negative values"
-    )]
-    fn push_diff(
-        &self,
-        quads: &mut Vec<ChromeQuad>,
-        labels: &mut Vec<ProseLabel>,
-        ctx: &GCtx,
-        measure: &mut TextMeasure,
-        top: f32,
-        bottom: f32,
-    ) -> usize {
-        let (scale, theme) = (ctx.scale, ctx.theme);
-        let mut y = top + 6.0 * scale;
-        if let Some(file) = self.selected_file() {
-            let (added, removed) = self.diff.stats();
+        let target = Target::Hunk {
+            path: section.path.clone(),
+            hunk: hi,
+        };
+        let here = self.hover.as_ref() == Some(&target)
+            || self.cursor_hunk() == Some((section.path.clone(), hi));
+        let staged = self
+            .status_of(&section.path)
+            .is_some_and(|f| f.staged && !f.unstaged);
+        let hint = if staged {
+            "unstage \u{2318}\u{21a9}"
+        } else {
+            "stage \u{2318}\u{21a9}"
+        };
+        let hint_w = measure.width(hint, FontRole::Micro, None);
+        let hint_x = ctx.cr - hint_w;
+        out.labels.push(ProseLabel {
+            text: header,
+            x: ctx.cx,
+            y: y + (h - measure.line_height(FontRole::Mono)) * 0.5,
+            role: FontRole::Mono,
+            color: theme.diff_hunk,
+            weight: None,
+            max_w: (if here { hint_x - 8.0 * scale } else { ctx.cr } - ctx.cx).max(1.0),
+        });
+        if here {
             push_row(
-                labels,
+                &mut out.labels,
                 measure,
-                &file.path.to_string_lossy(),
-                FontRole::Label,
-                theme.fg_secondary,
-                ctx.cx,
+                hint,
+                FontRole::Micro,
+                theme.accent,
+                hint_x,
                 y,
-                DIFF_HEADER_H,
-                scale,
-            );
-            push_counts(labels, measure, ctx, added, removed, y, DIFF_HEADER_H);
-        }
-        y += DIFF_HEADER_H * scale;
-        let body_top = y;
-        let row_h = DIFF_ROW_H * scale;
-        let body_rows = ((bottom - body_top) / row_h).floor().max(0.0) as usize;
-        if body_rows == 0 {
-            return 0;
-        }
-        let lines = self.flatten_diff();
-        if lines.is_empty() {
-            let note = match self.selected_file().map(|f| f.status) {
-                Some(FileStatus::Untracked) => "Untracked file",
-                _ => "No textual changes",
-            };
-            push_row(
-                labels,
-                measure,
-                note,
-                FontRole::Caption,
-                theme.fg_muted,
-                ctx.cx,
-                body_top,
                 DIFF_ROW_H,
                 scale,
             );
-            return 0;
         }
-        let scroll = self.diff_scroll.min(lines.len().saturating_sub(body_rows));
+        let rect = PxRect {
+            x: hint_x - 6.0 * scale,
+            y,
+            w: ctx.cr - hint_x + 6.0 * scale,
+            h,
+        };
+        out.targets.push((rect, target));
+    }
+
+    /// One diff line: its add/del background, the `+` comment button when hovered or under
+    /// the cursor, the right-aligned gutter number, and the code.
+    fn paint_line(
+        &self,
+        out: &mut Out,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        path: &str,
+        line: &DiffLine,
+        y: f32,
+    ) {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let h = DIFF_ROW_H * scale;
+        let full = PxRect {
+            x: ctx.panel.x,
+            y,
+            w: ctx.panel.w,
+            h,
+        };
+        // Diff-row backgrounds pre-composite their translucent hue over the dock's bg.base
+        // backing in sRGB space (the guide's CSS weight), not the brighter linear-space blend.
+        let base = theme.bg_base.to_srgb();
+        let (fg, sign, bg) = match line.kind {
+            LineKind::Add => (theme.diff_add, '+', Some(theme.diff_add)),
+            LineKind::Del => (theme.diff_del, '-', Some(theme.diff_del)),
+            LineKind::Context => (theme.fg_secondary, ' ', None),
+        };
+        if let Some(bg) = bg {
+            out.quads
+                .push(ChromeQuad::fill(full, bg.over(base, DIFF_BG_ALPHA)));
+        }
+        let spot = line_spot(line).map(|(side, number)| Spot::Line {
+            path: path.to_owned(),
+            side,
+            line: number,
+        });
+        let cursor = spot.is_some() && self.cursor == spot;
+        if cursor {
+            push_cursor_bar(out, ctx, y, h);
+        }
+        let gutter_x = ctx.cx + ADD_W * scale;
         let gutter_w = measure.width(&"0".repeat(GUTTER_CHARS), FontRole::Mono, None);
-        for (i, line) in lines.iter().skip(scroll).take(body_rows).enumerate() {
-            let ry = body_top + i as f32 * row_h;
-            push_diff_line(
-                quads,
-                labels,
+        let number = match line.kind {
+            LineKind::Del => line.old_no,
+            LineKind::Add | LineKind::Context => line.new_no,
+        };
+        if let Some(number) = number {
+            let color = if sign == ' ' { theme.fg_muted } else { fg };
+            push_right(
+                &mut out.labels,
                 measure,
-                ctx,
-                line,
-                ry,
-                row_h,
-                gutter_w,
-                self.diff_is_staged,
-                line.hunk_index == Some(self.focused_hunk),
+                &number.to_string(),
+                FontRole::Mono,
+                color,
+                gutter_x + gutter_w,
+                y,
+                DIFF_ROW_H,
+                scale,
             );
         }
-        scroll
+        let code_x = gutter_x + gutter_w + measure.width("  ", FontRole::Mono, None);
+        out.labels.push(ProseLabel {
+            text: format!("{sign} {}", line.text),
+            x: code_x,
+            y: y + (h - measure.line_height(FontRole::Mono)) * 0.5,
+            role: FontRole::Mono,
+            color: fg,
+            weight: None,
+            max_w: (ctx.cr - code_x).max(1.0),
+        });
+        let Some(spot) = spot else {
+            return;
+        };
+        out.targets.push((full, Target::Row(spot.clone())));
+        if !self.can_comment() {
+            return;
+        }
+        let add = Target::Comment(spot.clone());
+        let hovered =
+            matches!(&self.hover, Some(Target::Row(s) | Target::Comment(s)) if *s == spot);
+        if hovered || cursor {
+            let side = (ADD_W - 2.0) * scale;
+            let rect = PxRect {
+                x: ctx.cx,
+                y: y + (h - side) * 0.5,
+                w: side,
+                h: side,
+            };
+            let button = if self.hover.as_ref() == Some(&add) {
+                theme.accent_hover
+            } else {
+                theme.accent
+            };
+            out.quads
+                .push(ChromeQuad::rounded(rect, button, 4.0 * scale));
+            let pw = measure.width("+", FontRole::Mono, None);
+            out.labels.push(ProseLabel {
+                text: "+".to_owned(),
+                x: rect.x + (side - pw) * 0.5,
+                y: rect.y + (side - measure.line_height(FontRole::Mono)) * 0.5,
+                role: FontRole::Mono,
+                color: theme.bg_base.to_srgb(),
+                weight: Some(700),
+                max_w: f32::MAX,
+            });
+        }
+        let hit = PxRect {
+            x: ctx.panel.x,
+            y,
+            w: gutter_x - ctx.panel.x,
+            h,
+        };
+        out.targets.push((hit, add));
+    }
+
+    /// One row of a thread card.
+    fn paint_thread_row(
+        &self,
+        out: &mut Out,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        (t, attached): (usize, bool),
+        part: &Part,
+        card: Card,
+    ) {
+        let theme = ctx.theme;
+        let thread = &self.threads()[t];
+        let resolved = thread.status == Open::Resolved;
+        if *part == Part::Gap {
+            return;
+        }
+        let cursor = *part == Part::Head && self.cursor == Some(Spot::Thread(thread.id));
+        let fill = if cursor {
+            theme.accent_subtle_on(theme.bg_surface)
+        } else {
+            theme.bg_surface
+        };
+        let bar = if resolved { theme.border } else { theme.accent };
+        push_card(out, ctx, card, fill, bar);
+        let x = ctx.cx + CARD_PAD * ctx.scale;
+        match part {
+            Part::Head => self.paint_thread_head(out, ctx, measure, (t, attached), card),
+            Part::Quote => {
+                let text = thread
+                    .anchor
+                    .as_ref()
+                    .map_or_else(String::new, |a| format!("> {}", a.text));
+                push_clipped(
+                    out,
+                    measure,
+                    &text,
+                    FontRole::Mono,
+                    theme.fg_muted,
+                    x,
+                    ctx.cr - CARD_PAD * ctx.scale,
+                    card,
+                );
+            }
+            Part::Author(m) => {
+                let author = thread.messages.get(*m).map_or(Author::Human, |m| m.author);
+                let (name, color) = match author {
+                    Author::Human => ("You", theme.fg_secondary),
+                    Author::Agent => ("Agent", theme.accent),
+                };
+                let line_h = measure.line_height(FontRole::Caption);
+                out.labels.push(ProseLabel {
+                    text: name.to_owned(),
+                    x,
+                    y: card.y + card.h - line_h,
+                    role: FontRole::Caption,
+                    color,
+                    weight: Some(600),
+                    max_w: f32::MAX,
+                });
+            }
+            Part::Text(text) => {
+                let color = if resolved {
+                    theme.fg_secondary
+                } else {
+                    theme.fg_primary
+                };
+                push_clipped(
+                    out,
+                    measure,
+                    text,
+                    FontRole::Body,
+                    color,
+                    x,
+                    ctx.cr - CARD_PAD * ctx.scale,
+                    card,
+                );
+            }
+            Part::Draft { .. } | Part::Problem | Part::Foot | Part::Gap | Part::Whole => {}
+        }
+    }
+
+    /// A thread card's header: its number, where it is, whether it is resolved, and its
+    /// Reply / Resolve-or-Reopen / Delete buttons.
+    fn paint_thread_head(
+        &self,
+        out: &mut Out,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        (t, attached): (usize, bool),
+        card: Card,
+    ) {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let thread = &self.threads()[t];
+        let id = thread.id;
+        // The header takes the cursor; its buttons are pushed after, so they are on top.
+        let row = PxRect {
+            x: ctx.cx,
+            y: card.y,
+            w: ctx.cr - ctx.cx,
+            h: card.h,
+        };
+        out.targets.push((row, Target::Row(Spot::Thread(id))));
+        let buttons = if self.can_comment() {
+            let toggle = if thread.status == Open::Open {
+                ("Resolve", Target::Resolve(id), ButtonStyle::Plain)
+            } else {
+                ("Reopen", Target::Reopen(id), ButtonStyle::Plain)
+            };
+            vec![
+                ("Reply", Target::Reply(id), ButtonStyle::Plain),
+                toggle,
+                ("Delete", Target::Delete(id), ButtonStyle::Danger),
+            ]
+        } else {
+            Vec::new()
+        };
+        let mut right = ctx.cr - CARD_PAD * scale * 0.5;
+        for (text, target, style) in buttons.into_iter().rev() {
+            right = self.push_button(out, ctx, measure, (text, target, style), right, card)
+                - BUTTON_GAP * scale;
+        }
+        let mut x = ctx.cx + CARD_PAD * scale;
+        let number = format!("#{id}");
+        push_row(
+            &mut out.labels,
+            measure,
+            &number,
+            FontRole::Mono,
+            theme.fg_muted,
+            x,
+            card.y,
+            CARD_HEAD_H,
+            scale,
+        );
+        x += measure.width(&number, FontRole::Mono, None) + 8.0 * scale;
+        let place = match (&thread.anchor, self.location(t)) {
+            // Under the "on the whole change" heading, which already says where it is.
+            (None, _) => String::new(),
+            (Some(_), Location::Outdated) => "Outdated - the line has changed".to_owned(),
+            (Some(a), location) => {
+                let line = match location {
+                    Location::At(line) => line,
+                    Location::Whole | Location::Outdated => a.line,
+                };
+                let side = if a.side == Side::Old {
+                    "old line"
+                } else {
+                    "line"
+                };
+                if attached {
+                    format!("{side} {line}")
+                } else {
+                    format!("{side} {line}, outside the diff")
+                }
+            }
+        };
+        let place = if thread.status == Open::Resolved {
+            format!("{place} \u{b7} Resolved")
+        } else {
+            place
+        };
+        let color = if thread.status == Open::Resolved {
+            theme.diff_add
+        } else {
+            theme.fg_secondary
+        };
+        let role = FontRole::Caption;
+        out.labels.push(ProseLabel {
+            text: place,
+            x,
+            y: card.y + (card.h - measure.line_height(role)) * 0.5,
+            role,
+            color,
+            weight: None,
+            max_w: (right - x).max(1.0),
+        });
+    }
+
+    /// One row of the composer card.
+    fn paint_composer_row(
+        &self,
+        out: &mut Out,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        part: &Part,
+        card: Card,
+    ) {
+        let Some(composer) = self.composer.as_ref() else {
+            return;
+        };
+        if *part == Part::Gap {
+            return;
+        }
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let focused = self.focus == Focus::Composer;
+        push_card(
+            out,
+            ctx,
+            card,
+            theme.bg_inset,
+            if focused {
+                theme.accent
+            } else {
+                theme.border_strong
+            },
+        );
+        let x = ctx.cx + CARD_PAD * scale;
+        let right = ctx.cr - CARD_PAD * scale;
+        match part {
+            Part::Head => {
+                let head = match &composer.target {
+                    Compose::Comment(a) if a.side == Side::Old => {
+                        format!("Comment on old line {}", a.line)
+                    }
+                    Compose::Comment(a) => format!("Comment on line {}", a.line),
+                    Compose::Reply(id) => format!("Reply to #{id}"),
+                };
+                push_row(
+                    &mut out.labels,
+                    measure,
+                    &head,
+                    FontRole::Caption,
+                    theme.fg_secondary,
+                    x,
+                    card.y,
+                    CARD_HEAD_H,
+                    scale,
+                );
+                push_right(
+                    &mut out.labels,
+                    measure,
+                    "for the agent",
+                    FontRole::Caption,
+                    theme.fg_muted,
+                    right,
+                    card.y,
+                    CARD_HEAD_H,
+                    scale,
+                );
+            }
+            Part::Draft { text, last } => {
+                self.paint_draft(out, ctx, measure, (text, *last), card);
+            }
+            Part::Problem => {
+                let problem = composer.problem.as_deref().unwrap_or_default();
+                push_clipped(
+                    out,
+                    measure,
+                    problem,
+                    FontRole::Caption,
+                    theme.diff_del,
+                    x,
+                    right,
+                    card,
+                );
+            }
+            Part::Foot => self.paint_composer_foot(out, ctx, measure, card),
+            Part::Quote | Part::Author(_) | Part::Text(_) | Part::Gap | Part::Whole => {}
+        }
+    }
+
+    /// One line of the composer's draft (or its placeholder), with the caret after the last
+    /// line while it has focus.
+    fn paint_draft(
+        &self,
+        out: &mut Out,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        (text, last): (&str, bool),
+        card: Card,
+    ) {
+        let Some(composer) = self.composer.as_ref() else {
+            return;
+        };
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let focused = self.focus == Focus::Composer;
+        let x = ctx.cx + CARD_PAD * scale;
+        let right = ctx.cr - CARD_PAD * scale;
+        if composer.text.is_empty() {
+            let hint = match composer.target {
+                Compose::Comment(_) => "Ask the agent for a change",
+                Compose::Reply(_) => "Write a reply",
+            };
+            push_clipped(
+                out,
+                measure,
+                hint,
+                FontRole::Body,
+                theme.fg_muted,
+                x,
+                right,
+                card,
+            );
+        } else {
+            push_clipped(
+                out,
+                measure,
+                text,
+                FontRole::Body,
+                theme.fg_primary,
+                x,
+                right,
+                card,
+            );
+        }
+        if focused && last {
+            let line_h = measure.line_height(FontRole::Body);
+            let caret_x = x + measure.width(text, FontRole::Body, None);
+            out.quads.push(ChromeQuad::fill(
+                PxRect {
+                    x: caret_x.min(right),
+                    y: card.y + (card.h - line_h) * 0.5,
+                    w: (2.0 * scale).max(1.0),
+                    h: line_h,
+                },
+                theme.accent,
+            ));
+        }
+        out.targets.push((
+            PxRect {
+                x: ctx.cx,
+                y: card.y,
+                w: ctx.cr - ctx.cx,
+                h: card.h,
+            },
+            Target::Compose,
+        ));
+    }
+
+    /// The composer's foot: the new-line hint, and its send and Cancel buttons.
+    fn paint_composer_foot(
+        &self,
+        out: &mut Out,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        card: Card,
+    ) {
+        let Some(composer) = self.composer.as_ref() else {
+            return;
+        };
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let x = ctx.cx + CARD_PAD * scale;
+        let right = ctx.cr - CARD_PAD * scale;
+        push_row(
+            &mut out.labels,
+            measure,
+            "\u{21a9} send  \u{21e7}\u{21a9} new line",
+            FontRole::Micro,
+            theme.fg_muted,
+            x,
+            card.y,
+            CARD_FOOT_H,
+            scale,
+        );
+        let send = match composer.target {
+            Compose::Comment(_) => "Comment",
+            Compose::Reply(_) => "Reply",
+        };
+        let style = if composer.text.trim().is_empty() {
+            ButtonStyle::Disabled
+        } else {
+            ButtonStyle::Primary
+        };
+        let left = self.push_button(
+            out,
+            ctx,
+            measure,
+            (send, Target::Send, style),
+            right + CARD_PAD * scale * 0.5,
+            card,
+        );
+        self.push_button(
+            out,
+            ctx,
+            measure,
+            ("Cancel", Target::Cancel, ButtonStyle::Plain),
+            left - BUTTON_GAP * scale,
+            card,
+        );
+    }
+
+    /// A small button ending at `right`, vertically centered in `card`; returns its left
+    /// edge.
+    fn push_button(
+        &self,
+        out: &mut Out,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        (text, target, style): (&str, Target, ButtonStyle),
+        right: f32,
+        card: Card,
+    ) -> f32 {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let role = FontRole::Caption;
+        let w = measure.width(text, role, None) + 2.0 * BUTTON_PAD_X * scale;
+        let rect = PxRect {
+            x: right - w,
+            y: card.y + (card.h - BUTTON_H * scale) * 0.5,
+            w,
+            h: BUTTON_H * scale,
+        };
+        let hover = self.hover.as_ref() == Some(&target);
+        let radius = BUTTON_RADIUS * scale;
+        let color = match style {
+            ButtonStyle::Primary => {
+                let fill = if hover {
+                    theme.accent_hover
+                } else {
+                    theme.accent
+                };
+                out.quads.push(ChromeQuad::rounded(rect, fill, radius));
+                theme.bg_base.to_srgb()
+            }
+            ButtonStyle::Disabled => {
+                push_ringed(
+                    &mut out.quads,
+                    rect,
+                    theme.border_subtle,
+                    theme.bg_inset,
+                    radius,
+                    scale,
+                );
+                theme.fg_faint
+            }
+            ButtonStyle::Plain | ButtonStyle::Danger => {
+                let fill = if hover {
+                    theme.bg_elevated
+                } else {
+                    theme.bg_surface
+                };
+                push_ringed(
+                    &mut out.quads,
+                    rect,
+                    theme.border_subtle,
+                    fill,
+                    radius,
+                    scale,
+                );
+                match (style, hover) {
+                    (ButtonStyle::Danger, _) => theme.diff_del,
+                    (_, true) => theme.fg_primary,
+                    _ => theme.fg_secondary,
+                }
+            }
+        };
+        out.labels.push(ProseLabel {
+            text: text.to_owned(),
+            x: rect.x + BUTTON_PAD_X * scale,
+            y: rect.y + (rect.h - measure.line_height(role)) * 0.5,
+            role,
+            color,
+            weight: None,
+            max_w: f32::MAX,
+        });
+        if style != ButtonStyle::Disabled {
+            out.targets.push((rect, target));
+        }
+        rect.x
     }
 
     /// The commit box at the foot: a divider, the `> message` input (with an accent caret when
     /// focused), and a status line (the just-committed Undo hint, or the staged count + hint).
-    fn push_commit(
-        &self,
-        quads: &mut Vec<ChromeQuad>,
-        labels: &mut Vec<ProseLabel>,
-        ctx: &GCtx,
-        measure: &mut TextMeasure,
-        top: f32,
-    ) {
+    fn push_commit(&self, out: &mut Out, ctx: &GCtx, measure: &mut TextMeasure, top: f32) {
         let (scale, theme) = (ctx.scale, ctx.theme);
         let focused = self.focus == Focus::Commit;
-        quads.push(ChromeQuad::fill(
+        out.quads.push(ChromeQuad::fill(
             PxRect {
                 x: ctx.panel.x,
                 y: top,
@@ -738,7 +2417,7 @@ impl GitDock {
             theme.fg_muted
         };
         push_row(
-            labels,
+            &mut out.labels,
             measure,
             "\u{203a}",
             FontRole::Mono,
@@ -749,35 +2428,26 @@ impl GitDock {
             scale,
         );
         let msg_x = ctx.cx + measure.width("\u{203a} ", FontRole::Mono, None);
-        if self.message.is_empty() && !focused {
-            push_row(
-                labels,
-                measure,
-                "commit message",
-                FontRole::Body,
-                theme.fg_muted,
-                msg_x,
-                iy,
-                COMMIT_ROW_H,
-                scale,
-            );
+        let (text, color) = if self.message.is_empty() && !focused {
+            ("commit message", theme.fg_muted)
         } else {
-            push_row(
-                labels,
-                measure,
-                &self.message,
-                FontRole::Body,
-                theme.fg_primary,
-                msg_x,
-                iy,
-                COMMIT_ROW_H,
-                scale,
-            );
-        }
+            (self.message.as_str(), theme.fg_primary)
+        };
+        push_row(
+            &mut out.labels,
+            measure,
+            text,
+            FontRole::Body,
+            color,
+            msg_x,
+            iy,
+            COMMIT_ROW_H,
+            scale,
+        );
         if focused {
             let caret_x = msg_x + measure.width(&self.message, FontRole::Body, None);
             let line_h = measure.line_height(FontRole::Body);
-            quads.push(ChromeQuad::fill(
+            out.quads.push(ChromeQuad::fill(
                 PxRect {
                     x: caret_x,
                     y: iy + (COMMIT_ROW_H * scale - line_h) * 0.5,
@@ -787,20 +2457,30 @@ impl GitDock {
                 theme.accent,
             ));
         }
-        self.push_commit_status(labels, ctx, measure, iy + COMMIT_ROW_H * scale, focused);
+        out.targets.push((
+            PxRect {
+                x: ctx.panel.x,
+                y: iy,
+                w: ctx.panel.w,
+                h: COMMIT_ROW_H * scale,
+            },
+            Target::Message,
+        ));
+        self.push_commit_status(out, ctx, measure, iy + COMMIT_ROW_H * scale, focused);
     }
 
     /// The commit box's status line: the just-committed Undo hint, or the staged count + a
     /// context hint.
     fn push_commit_status(
         &self,
-        labels: &mut Vec<ProseLabel>,
+        out: &mut Out,
         ctx: &GCtx,
         measure: &mut TextMeasure,
         sy: f32,
         focused: bool,
     ) {
         let (scale, theme) = (ctx.scale, ctx.theme);
+        let labels = &mut out.labels;
         if let Some(sha) = &self.last_commit {
             push_row(
                 labels,
@@ -824,78 +2504,35 @@ impl GitDock {
                 COMMIT_ROW_H,
                 scale,
             );
-        } else {
-            push_row(
-                labels,
-                measure,
-                &format!("{} staged", self.staged_count()),
-                FontRole::Caption,
-                theme.fg_muted,
-                ctx.cx,
-                sy,
-                COMMIT_ROW_H,
-                scale,
-            );
-            let hint = if focused {
-                if self.can_commit() {
-                    "enter commit  esc back"
-                } else {
-                    "esc back"
-                }
-            } else {
-                "tab to write a message"
-            };
-            push_right(
-                labels,
-                measure,
-                hint,
-                FontRole::Caption,
-                theme.fg_muted,
-                ctx.cr,
-                sy,
-                COMMIT_ROW_H,
-                scale,
-            );
+            return;
         }
-    }
-
-    /// Flatten the selected file's [`FileDiff`] into display lines (a header line per
-    /// hunk, then its context/add/del lines with the right gutter number and sign).
-    fn flatten_diff(&self) -> Vec<DiffRow> {
-        let mut lines = Vec::new();
-        for (index, hunk) in self.diff.hunks.iter().enumerate() {
-            let (old_count, new_count) = hunk.counts();
-            let mut header = format!(
-                "@@ -{},{} +{},{} @@",
-                hunk.old_start, old_count, hunk.new_start, new_count
-            );
-            if !hunk.heading.is_empty() {
-                header.push(' ');
-                header.push_str(&hunk.heading);
-            }
-            lines.push(DiffRow {
-                kind: DiffRowKind::Hunk,
-                gutter: None,
-                sign: ' ',
-                text: header,
-                hunk_index: Some(index),
-            });
-            for line in &hunk.lines {
-                let (kind, sign, gutter) = match line.kind {
-                    LineKind::Context => (DiffRowKind::Context, ' ', line.new_no),
-                    LineKind::Add => (DiffRowKind::Add, '+', line.new_no),
-                    LineKind::Del => (DiffRowKind::Del, '-', line.old_no),
-                };
-                lines.push(DiffRow {
-                    kind,
-                    gutter,
-                    sign,
-                    text: line.text.clone(),
-                    hunk_index: None,
-                });
-            }
-        }
-        lines
+        push_row(
+            labels,
+            measure,
+            &format!("{} staged", self.staged_count()),
+            FontRole::Caption,
+            theme.fg_muted,
+            ctx.cx,
+            sy,
+            COMMIT_ROW_H,
+            scale,
+        );
+        let hint = match (focused, self.can_commit()) {
+            (true, true) => "enter commit  esc back",
+            (true, false) => "esc back",
+            (false, _) => "tab to write a message",
+        };
+        push_right(
+            labels,
+            measure,
+            hint,
+            FontRole::Caption,
+            theme.fg_muted,
+            ctx.cr,
+            sy,
+            COMMIT_ROW_H,
+            scale,
+        );
     }
 }
 
@@ -905,15 +2542,20 @@ impl Default for GitDock {
     }
 }
 
-/// The dock's proportional display list: the content quads (diff backgrounds, selection /
-/// hunk fills, commit caret) + the positioned labels, and the clamped diff scroll used.
+/// The dock's proportional display list: the content quads + the positioned labels.
 pub(crate) struct Paint {
     /// The content quads over the dock frame.
     pub(crate) quads: Vec<ChromeQuad>,
     /// The positioned proportional text labels.
     pub(crate) labels: Vec<ProseLabel>,
-    /// The clamped diff scroll actually used (the binary writes it back).
-    pub(crate) diff_scroll: usize,
+}
+
+/// What a build collects: quads, labels, and hit targets.
+#[derive(Default)]
+struct Out {
+    quads: Vec<ChromeQuad>,
+    labels: Vec<ProseLabel>,
+    targets: Vec<(PxRect, Target)>,
 }
 
 /// Shared geometry for the dock builders: the panel, the content left/right x, scale, theme.
@@ -925,241 +2567,314 @@ struct GCtx<'a> {
     theme: &'a Theme,
 }
 
-/// One flattened diff display line.
-struct DiffRow {
-    kind: DiffRowKind,
-    /// The gutter line number (`None` for a hunk header).
-    gutter: Option<u32>,
-    /// The leading `+`/`-`/` ` sign (unused for a hunk header).
-    sign: char,
-    /// The code text (or the whole `@@ ... @@` header line).
-    text: String,
-    /// The hunk this row belongs to, for a hunk header (`None` for a body line).
-    hunk_index: Option<usize>,
+/// One file's part of the scroll.
+struct Section {
+    /// The file, as a review anchor names it.
+    path: String,
+    /// Its change, as an index into the reading's changes; `None` for a file that is only
+    /// here because an open thread is on it.
+    change: Option<usize>,
+    /// Whether its lines are hidden.
+    folded: bool,
 }
 
-/// The role of a flattened diff line.
+/// The scroll's structure, before any text is wrapped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Item {
+    /// The heading over comments on the change as a whole.
+    General,
+    /// A file's header.
+    File(usize),
+    /// The line saying why a file's lines are not shown.
+    Note(usize),
+    /// A hunk's `@@` header: section, hunk.
+    Hunk(usize, usize),
+    /// A diff line: section, hunk, line.
+    Line(usize, usize, usize),
+    /// A thread card, and whether it sits under the line it is on.
+    Thread(usize, bool),
+    /// The composer card.
+    Composer,
+}
+
+/// A section list and the items in scroll order.
+struct Outline {
+    sections: Vec<Section>,
+    items: Vec<Item>,
+}
+
+/// One drawn row of the scroll.
+struct Row {
+    /// The outline item it draws (part of).
+    item: usize,
+    /// The section it is in (`None` above the first file).
+    section: Option<usize>,
+    /// Its height, logical px.
+    h: f32,
+    /// Which part of the item.
+    part: Part,
+}
+
+/// Which part of an item a row draws.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Part {
+    /// All of it (a header, note, hunk header, or diff line).
+    Whole,
+    /// A card's header.
+    Head,
+    /// The line an off-diff thread is about, quoted.
+    Quote,
+    /// Who wrote message `n`.
+    Author(usize),
+    /// One wrapped line of a message.
+    Text(String),
+    /// One wrapped line of the composer's draft, and whether the caret ends it.
+    Draft {
+        /// The line.
+        text: String,
+        /// Whether it is the draft's last line.
+        last: bool,
+    },
+    /// Why the composer's last send failed.
+    Problem,
+    /// The composer's buttons.
+    Foot,
+    /// The space under a card.
+    Gap,
+}
+
+/// A card row's vertical extent, physical px.
+#[derive(Clone, Copy)]
+struct Card {
+    y: f32,
+    h: f32,
+}
+
+/// How a button draws.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum DiffRowKind {
-    Context,
-    Add,
-    Del,
-    Hunk,
+enum ButtonStyle {
+    Plain,
+    Danger,
+    Primary,
+    Disabled,
 }
 
-/// The scroll offset that keeps `anchor` visible in a `visible`-row window over `len`
-/// items (centered on the anchor, clamped to the ends).
-fn scroll_window(len: usize, visible: usize, anchor: usize) -> usize {
-    if len <= visible {
-        return 0;
+/// The side and number a comment on `line` anchors to: the old side for a removed line, the
+/// new side otherwise - one gutter number per line, as in AI Team.
+fn line_spot(line: &DiffLine) -> Option<(Side, u32)> {
+    match line.kind {
+        LineKind::Del => line.old_no.map(|n| (Side::Old, n)),
+        LineKind::Add | LineKind::Context => line.new_no.map(|n| (Side::New, n)),
     }
-    anchor.saturating_sub(visible / 2).min(len - visible)
 }
 
-/// Push one file row: the stage checkbox (mono), status letter (mono, colored by kind), the
-/// path (Plex, clipped before the counts), and its `+add`/`-del` counts (mono).
-fn push_file_row(
-    labels: &mut Vec<ProseLabel>,
-    measure: &mut TextMeasure,
-    ctx: &GCtx,
-    file: &ChangedFile,
-    selected: bool,
-    top: f32,
-) {
-    let (scale, theme) = (ctx.scale, ctx.theme);
-    let mut x = ctx.cx;
-    let check = if file.staged { "[x]" } else { "[ ]" };
-    let check_fg = if file.staged {
-        theme.diff_add
-    } else {
-        theme.fg_muted
-    };
-    push_row(
-        labels,
-        measure,
-        check,
-        FontRole::Mono,
-        check_fg,
-        x,
-        top,
-        FILE_ROW_H,
-        scale,
-    );
-    x += measure.width("[x] ", FontRole::Mono, None);
-    let letter_fg = match file.status {
+/// The longest line in a change's diff, in bytes.
+fn longest_line(change: &FileChange) -> usize {
+    change
+        .diff
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .map(|l| l.text.len())
+        .max()
+        .unwrap_or(0)
+}
+
+/// The section whose header pins over the scroll when row `from` is at the top: the one it
+/// is in, unless it is that section's own header.
+fn sticky_section(outline: &Outline, rows: &[Row], from: usize) -> Option<usize> {
+    let row = rows.get(from)?;
+    let si = row.section?;
+    (outline.items[row.item] != Item::File(si)).then_some(si)
+}
+
+/// The first row the scroll can start at with every row through `last` in `body_h`
+/// (physical px), counting the file header pinned over them; `last` itself when not even it
+/// fits. Walks up from `last` only as far as a page.
+fn top_for(outline: &Outline, rows: &[Row], last: usize, body_h: f32, scale: f32) -> usize {
+    let mut top = last;
+    let mut sum = 0.0;
+    for from in (0..=last.min(rows.len().saturating_sub(1))).rev() {
+        sum += rows[from].h;
+        let pinned = if sticky_section(outline, rows, from).is_some() {
+            FILE_HEAD_H
+        } else {
+            0.0
+        };
+        if (sum + pinned) * scale > body_h + 0.5 {
+            break;
+        }
+        top = from;
+    }
+    top
+}
+
+/// The color a status letter draws in.
+fn status_color(theme: &Theme, status: FileStatus) -> Srgb {
+    match status {
         FileStatus::Added | FileStatus::Untracked => theme.diff_add,
         FileStatus::Deleted => theme.diff_del,
         FileStatus::Modified | FileStatus::Renamed | FileStatus::Copied => theme.diff_hunk,
         FileStatus::TypeChange | FileStatus::Unmerged => theme.fg_secondary,
-    };
-    push_row(
-        labels,
-        measure,
-        &file.status.code().to_string(),
-        FontRole::Mono,
-        letter_fg,
-        x,
-        top,
-        FILE_ROW_H,
-        scale,
-    );
-    x += measure.width("M  ", FontRole::Mono, None);
-    // Counts right-anchored; the path clips before them.
-    let counts_left = push_counts(
-        labels,
-        measure,
-        ctx,
-        file.added,
-        file.removed,
-        top,
-        FILE_ROW_H,
-    );
-    let name_fg = if selected {
-        theme.fg_primary
-    } else {
-        theme.fg_secondary
-    };
-    labels.push(ProseLabel {
-        text: file.path.to_string_lossy().into_owned(),
-        x,
-        y: top + (FILE_ROW_H * scale - measure.line_height(FontRole::Body)) * 0.5,
-        role: FontRole::Body,
-        color: name_fg,
-        weight: None,
-        max_w: (counts_left - 8.0 * scale - x).max(1.0),
-    });
-}
-
-/// Push one diff body line: the add/del/hunk background (+ focused-hunk fill), then the
-/// content - a hunk header (mono, `diff.hunk`, with a stage/unstage hint when focused) or a
-/// body line (right-aligned mono gutter + mono code, colored by kind).
-#[allow(clippy::too_many_arguments, reason = "one focused diff-line builder")]
-fn push_diff_line(
-    quads: &mut Vec<ChromeQuad>,
-    labels: &mut Vec<ProseLabel>,
-    measure: &mut TextMeasure,
-    ctx: &GCtx,
-    line: &DiffRow,
-    top: f32,
-    row_h: f32,
-    gutter_w: f32,
-    staged: bool,
-    focused_hunk: bool,
-) {
-    let (scale, theme, panel) = (ctx.scale, ctx.theme, ctx.panel);
-    let full = PxRect {
-        x: panel.x,
-        y: top,
-        w: panel.w,
-        h: row_h,
-    };
-    // Diff-row backgrounds pre-composite their translucent hue over the dock's bg.base backing
-    // in sRGB space (the guide's CSS weight), not the brighter linear-space GPU blend.
-    let base = theme.bg_base.to_srgb();
-    if line.kind == DiffRowKind::Hunk {
-        // The `@@` hunk header: a diff.hunk wash, deepened to an accent wash when it is focused.
-        let hunk_bg = theme.diff_hunk.over(base, HUNK_BG_ALPHA);
-        let row_bg = if focused_hunk {
-            theme.accent.over(hunk_bg, DIFF_BG_ALPHA)
-        } else {
-            hunk_bg
-        };
-        quads.push(ChromeQuad::fill(full, row_bg));
-        let role_h = DIFF_ROW_H;
-        push_row(
-            labels,
-            measure,
-            &line.text,
-            FontRole::Mono,
-            theme.diff_hunk,
-            ctx.cx,
-            top,
-            role_h,
-            scale,
-        );
-        if focused_hunk {
-            let hint = if staged {
-                "unstage \u{2318}\u{21a9}"
-            } else {
-                "stage \u{2318}\u{21a9}"
-            };
-            push_right(
-                labels,
-                measure,
-                hint,
-                FontRole::Micro,
-                theme.accent,
-                ctx.cr,
-                top,
-                role_h,
-                scale,
-            );
-        }
-    } else {
-        let fg = match line.kind {
-            DiffRowKind::Add => theme.diff_add,
-            DiffRowKind::Del => theme.diff_del,
-            _ => theme.fg_secondary,
-        };
-        let alpha_token = match line.kind {
-            DiffRowKind::Add => Some(theme.diff_add),
-            DiffRowKind::Del => Some(theme.diff_del),
-            _ => None,
-        };
-        if let Some(bg) = alpha_token {
-            quads.push(ChromeQuad::fill(full, bg.over(base, DIFF_BG_ALPHA)));
-        }
-        if let Some(number) = line.gutter {
-            let gutter_fg = if line.sign == ' ' { theme.fg_muted } else { fg };
-            push_right(
-                labels,
-                measure,
-                &number.to_string(),
-                FontRole::Mono,
-                gutter_fg,
-                ctx.cx + gutter_w,
-                top,
-                DIFF_ROW_H,
-                scale,
-            );
-        }
-        let code_x = ctx.cx + gutter_w + measure.width("  ", FontRole::Mono, None);
-        let code = format!("{} {}", line.sign, line.text);
-        labels.push(ProseLabel {
-            text: code,
-            x: code_x,
-            y: top + (row_h - measure.line_height(FontRole::Mono)) * 0.5,
-            role: FontRole::Mono,
-            color: fg,
-            weight: None,
-            max_w: (ctx.cr - code_x).max(1.0),
-        });
     }
 }
 
-/// Push a right-anchored `+add -del` count pair (add in `diff.add`, del in `diff.del`);
-/// returns the left edge of the pair (so a path can clip before it).
+/// `at` moved by `delta`, clamped to `0..len`.
+fn step(at: usize, delta: i32, len: usize) -> usize {
+    step_unclamped(at, delta).min(len.saturating_sub(1))
+}
+
+/// `at` moved by `delta`, floored at zero.
+fn step_unclamped(at: usize, delta: i32) -> usize {
+    let magnitude = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
+    if delta < 0 {
+        at.saturating_sub(magnitude)
+    } else {
+        at.saturating_add(magnitude)
+    }
+}
+
+/// `text` broken into lines no wider than `width` in `role`: at its newlines, then between
+/// words, and inside a word too long for a line of its own. Spaces are kept, so a caret after
+/// the last line lands where the text ends. Always at least one line.
+fn wrap(text: &str, role: FontRole, width: f32, measure: &mut TextMeasure) -> Vec<String> {
+    let space = measure.width(" ", role, None);
+    let mut lines = Vec::new();
+    for paragraph in text.split('\n') {
+        let mut line = String::new();
+        let mut line_w = 0.0;
+        for (i, word) in paragraph.split(' ').enumerate() {
+            let word_w = measure.width(word, role, None);
+            let gap = if i == 0 { 0.0 } else { space };
+            if i > 0 && line_w + gap + word_w > width && !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+                line_w = 0.0;
+            } else if i > 0 {
+                line.push(' ');
+                line_w += gap;
+            }
+            if word_w <= width {
+                line.push_str(word);
+                line_w += word_w;
+                continue;
+            }
+            // A word wider than a line: break it wherever it runs out of room.
+            for c in word.chars() {
+                let c_w = measure.width(c.encode_utf8(&mut [0; 4]), role, None);
+                if line_w + c_w > width && !line.is_empty() {
+                    lines.push(std::mem::take(&mut line));
+                    line_w = 0.0;
+                }
+                line.push(c);
+                line_w += c_w;
+            }
+        }
+        lines.push(line);
+    }
+    lines
+}
+
+/// A card row's slice of its card: the fill across the content width and the status bar
+/// down its left edge.
+fn push_card(out: &mut Out, ctx: &GCtx, card: Card, fill: Srgb, bar: Srgb) {
+    let rect = PxRect {
+        x: ctx.cx,
+        y: card.y,
+        w: ctx.cr - ctx.cx,
+        h: card.h,
+    };
+    out.quads.push(ChromeQuad::fill(rect, fill));
+    out.quads.push(ChromeQuad::fill(
+        PxRect {
+            w: CARD_BAR * ctx.scale,
+            ..rect
+        },
+        bar,
+    ));
+}
+
+/// The keyboard cursor's accent bar down the dock's left edge.
+fn push_cursor_bar(out: &mut Out, ctx: &GCtx, y: f32, h: f32) {
+    out.quads.push(ChromeQuad::fill(
+        PxRect {
+            x: ctx.panel.x,
+            y,
+            w: 2.0 * ctx.scale,
+            h,
+        },
+        ctx.theme.accent,
+    ));
+}
+
+/// A label vertically centered in `card`, clipped at `right`.
+#[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
+fn push_clipped(
+    out: &mut Out,
+    measure: &mut TextMeasure,
+    text: &str,
+    role: FontRole,
+    color: Srgb,
+    x: f32,
+    right: f32,
+    card: Card,
+) {
+    out.labels.push(ProseLabel {
+        text: text.to_owned(),
+        x,
+        y: card.y + (card.h - measure.line_height(role)) * 0.5,
+        role,
+        color,
+        weight: None,
+        max_w: (right - x).max(1.0),
+    });
+}
+
+/// A rounded rect with a 1px ring: the ring color filled, then the fill inset by a stroke.
+fn push_ringed(
+    quads: &mut Vec<ChromeQuad>,
+    rect: PxRect,
+    ring: Srgb,
+    fill: Srgb,
+    radius: f32,
+    scale: f32,
+) {
+    let stroke = scale.max(1.0);
+    quads.push(ChromeQuad::rounded(rect, ring, radius));
+    quads.push(ChromeQuad::rounded(
+        PxRect {
+            x: rect.x + stroke,
+            y: rect.y + stroke,
+            w: (rect.w - 2.0 * stroke).max(0.0),
+            h: (rect.h - 2.0 * stroke).max(0.0),
+        },
+        fill,
+        (radius - stroke).max(0.0),
+    ));
+}
+
+/// Push a right-anchored `+add -del` count pair ending at `right` (add in `diff.add`, del in
+/// `diff.del`); returns the left edge of the pair.
 fn push_counts(
     labels: &mut Vec<ProseLabel>,
     measure: &mut TextMeasure,
     ctx: &GCtx,
-    added: u32,
-    removed: u32,
+    (added, removed): (u32, u32),
+    right: f32,
     top: f32,
     row_h: f32,
 ) -> f32 {
-    let mut end = push_right(
+    let end = push_right(
         labels,
         measure,
         &format!("-{removed}"),
         FontRole::Mono,
         ctx.theme.diff_del,
-        ctx.cr,
+        right,
         top,
         row_h,
         ctx.scale,
     );
-    end = push_right(
+    push_right(
         labels,
         measure,
         &format!("+{added}"),
@@ -1169,8 +2884,7 @@ fn push_counts(
         top,
         row_h,
         ctx.scale,
-    );
-    end
+    )
 }
 
 /// Push one left-anchored label vertically centered in a row of `row_h` logical px.
@@ -1238,469 +2952,7 @@ fn push_centered(
     });
 }
 
+// Spelled out so the module resolves the same when the capture example includes this file.
 #[cfg(test)]
-mod tests {
-    use super::{GitDock, Paint};
-    use skelly_render::{PxRect, TextMeasure, Theme};
-    use skelly_session::{ChangedFile, DiffLine, FileDiff, FileStatus, Hunk, LineKind, Status};
-
-    fn changed(path: &str, status: FileStatus, added: u32, removed: u32) -> ChangedFile {
-        ChangedFile {
-            path: path.into(),
-            orig_path: None,
-            status,
-            staged: false,
-            unstaged: true,
-            added,
-            removed,
-        }
-    }
-
-    fn sample_status() -> Status {
-        Status {
-            branch: Some("main".to_owned()),
-            ahead: 2,
-            behind: 1,
-            files: vec![
-                changed("src/pane/tree.rs", FileStatus::Modified, 42, 11),
-                changed("src/session/timeline.rs", FileStatus::Added, 80, 0),
-                changed("old/legacy.rs", FileStatus::Deleted, 0, 34),
-            ],
-        }
-    }
-
-    fn sample_diff() -> FileDiff {
-        FileDiff {
-            hunks: vec![Hunk {
-                old_start: 18,
-                new_start: 18,
-                heading: "impl PaneTree".to_owned(),
-                lines: vec![
-                    DiffLine {
-                        kind: LineKind::Context,
-                        old_no: Some(18),
-                        new_no: Some(18),
-                        text: "fn split(&mut self) {".to_owned(),
-                    },
-                    DiffLine {
-                        kind: LineKind::Del,
-                        old_no: Some(19),
-                        new_no: None,
-                        text: "    node.grow(dir);".to_owned(),
-                    },
-                    DiffLine {
-                        kind: LineKind::Add,
-                        old_no: None,
-                        new_no: Some(19),
-                        text: "    guard();".to_owned(),
-                    },
-                ],
-            }],
-        }
-    }
-
-    fn long_diff() -> FileDiff {
-        FileDiff {
-            hunks: vec![Hunk {
-                old_start: 1,
-                new_start: 1,
-                heading: "large change".to_owned(),
-                lines: (0..100)
-                    .map(|i| DiffLine {
-                        kind: LineKind::Context,
-                        old_no: Some(i + 1),
-                        new_no: Some(i + 1),
-                        text: format!("large diff line {i}"),
-                    })
-                    .collect(),
-            }],
-        }
-    }
-
-    /// A tall dock panel (the 420px dock) at 2x DPI.
-    fn panel() -> PxRect {
-        PxRect {
-            x: 0.0,
-            y: 0.0,
-            w: 420.0 * 2.0,
-            h: 900.0 * 2.0,
-        }
-    }
-
-    /// Build the dock's paint at a representative panel.
-    fn built(dock: &GitDock) -> Paint {
-        let theme = Theme::resolve("ossein-dark");
-        let mut m = TextMeasure::new(2.0);
-        dock.build(panel(), 2.0, &theme, &mut m)
-    }
-
-    /// The joined text of every label the dock builds (for content assertions).
-    fn texts(paint: &Paint) -> String {
-        paint
-            .labels
-            .iter()
-            .map(|l| l.text.clone())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-
-    /// A dock loaded with one file, staged iff `staged`.
-    fn dock_with_one(staged: bool) -> GitDock {
-        let mut file = changed("s.rs", FileStatus::Modified, 1, 0);
-        file.staged = staged;
-        file.unstaged = !staged;
-        let mut dock = GitDock::new();
-        dock.load(Status {
-            branch: Some("main".to_owned()),
-            files: vec![file],
-            ..Status::default()
-        });
-        dock
-    }
-
-    #[test]
-    fn commit_box_edits_the_message_and_gates_on_a_staged_file() {
-        let mut dock = dock_with_one(true);
-        assert!(!dock.can_commit(), "a staged file but no message yet");
-        dock.focus_commit();
-        assert!(dock.commit_focused());
-        for c in "fix".chars() {
-            dock.push_char(c);
-        }
-        assert_eq!(dock.message(), "fix");
-        assert!(dock.can_commit(), "staged file + non-blank message");
-        dock.backspace();
-        assert_eq!(dock.message(), "fi");
-
-        dock.set_committed("abc1234".to_owned());
-        assert_eq!(dock.message(), "");
-        assert!(!dock.commit_focused());
-        assert_eq!(dock.last_commit(), Some("abc1234"));
-        dock.clear_last_commit();
-        assert_eq!(dock.last_commit(), None);
-    }
-
-    #[test]
-    fn commit_is_blocked_without_a_staged_file() {
-        let mut dock = dock_with_one(false);
-        dock.focus_commit();
-        for c in "msg".chars() {
-            dock.push_char(c);
-        }
-        assert!(!dock.can_commit(), "nothing is staged");
-    }
-
-    #[test]
-    fn build_renders_the_commit_band_with_a_caret_when_focused() {
-        let theme = Theme::resolve("ossein-dark");
-        let mut dock = dock_with_one(true);
-        dock.focus_commit();
-        for c in "hi".chars() {
-            dock.push_char(c);
-        }
-        let paint = built(&dock);
-        let joined = texts(&paint);
-        assert!(joined.contains("hi"), "the message input line");
-        assert!(joined.contains("1 staged"), "the staged-count status line");
-        // The caret (a thin accent bar) shows when the box has focus.
-        assert!(
-            paint
-                .quads
-                .iter()
-                .any(|q| (q.alpha - 1.0).abs() < 1e-6 && q.color == theme.accent),
-            "the commit caret"
-        );
-    }
-
-    #[test]
-    fn no_repo_shows_the_empty_state_with_an_init_button() {
-        let dock = GitDock::new(); // repo_present is false until loaded
-        assert!(dock.no_repo());
-        let paint = built(&dock);
-        let joined = texts(&paint);
-        assert!(joined.contains("No repository here"));
-        assert!(joined.contains("Init repo"));
-        // The Init button has an accent highlight (so Enter has a visible target).
-        assert!(!paint.quads.is_empty(), "init button highlight");
-    }
-
-    #[test]
-    fn a_live_refresh_keeps_the_selected_file_and_its_scroll() {
-        // The dock re-loads itself from the git poll while it is open (design §10.4), so a refresh
-        // must not move the reader: it follows the selected path, not its index.
-        let mut dock = GitDock::new();
-        dock.load(sample_status());
-        assert!(dock.move_selection(1), "select the second file");
-        let selected = dock.selected_file().expect("a selection").path.clone();
-        dock.set_diff(long_diff(), false);
-        dock.scroll_diff(30);
-
-        // A poll where a *new* file appeared first in git's order, and the file after ours went
-        // clean - both of which would shift a plain index.
-        let mut refreshed = sample_status();
-        refreshed.files.remove(2);
-        refreshed
-            .files
-            .insert(0, changed("fresh.rs", FileStatus::Added, 3, 0));
-        dock.load(refreshed);
-        dock.set_diff(long_diff(), false);
-
-        assert_eq!(
-            dock.selected_file().expect("still selected").path,
-            selected,
-            "the selection follows the file, not the row"
-        );
-        assert_eq!(
-            dock.diff_scroll, 30,
-            "and stays scrolled where the reader was"
-        );
-    }
-
-    #[test]
-    fn selecting_another_file_resets_the_diff_scroll() {
-        let mut dock = GitDock::new();
-        dock.load(sample_status());
-        dock.set_diff(long_diff(), false);
-        dock.scroll_diff(30);
-        assert!(dock.move_selection(1));
-        dock.set_diff(long_diff(), false);
-        assert_eq!(dock.diff_scroll, 0, "a different file starts at the top");
-    }
-
-    #[test]
-    fn matches_reports_whether_a_polled_status_is_already_on_screen() {
-        let mut dock = GitDock::new();
-        assert!(
-            !dock.matches(&sample_status()),
-            "nothing is loaded yet, so there is always work to do"
-        );
-        dock.load(sample_status());
-        assert!(
-            dock.matches(&sample_status()),
-            "an idle poll changes nothing"
-        );
-
-        let mut edited = sample_status();
-        edited.files[0].added += 1;
-        assert!(!dock.matches(&edited), "a line count moved");
-
-        dock.set_error("git exploded".to_owned());
-        assert!(
-            !dock.matches(&sample_status()),
-            "an errored dock always reloads, so a transient failure clears itself"
-        );
-    }
-
-    #[test]
-    fn clean_tree_shows_the_branch_and_a_clean_note() {
-        let mut dock = GitDock::new();
-        dock.load(Status {
-            branch: Some("main".to_owned()),
-            ..Status::default()
-        });
-        let joined = texts(&built(&dock));
-        assert!(joined.contains("main"));
-        assert!(joined.contains("Working tree clean"));
-    }
-
-    #[test]
-    fn status_bar_shows_branch_ahead_behind_and_totals() {
-        let mut dock = GitDock::new();
-        dock.load(sample_status());
-        let joined = texts(&built(&dock));
-        assert!(joined.contains("main"));
-        assert!(joined.contains("\u{2191}2 \u{2193}1"), "ahead/behind");
-        // Totals: 42+80+0 added, 11+0+34 removed.
-        assert!(joined.contains("+122"));
-        assert!(joined.contains("-45"));
-        assert!(joined.contains("esc"));
-    }
-
-    #[test]
-    fn file_list_marks_the_selected_file_and_lists_every_file() {
-        let theme = Theme::resolve("ossein-dark");
-        let mut dock = GitDock::new();
-        dock.load(sample_status());
-        let paint = built(&dock);
-        let joined = texts(&paint);
-        assert!(joined.contains("src/pane/tree.rs"));
-        assert!(joined.contains("src/session/timeline.rs"));
-        assert!(joined.contains("old/legacy.rs"));
-        assert!(joined.contains("CHANGED - 3"));
-        // The selected file sits behind an accent.subtle fill, pre-composited opaque over bg.base.
-        let selected_fill = theme.accent_subtle_on(theme.bg_base.to_srgb());
-        assert!(
-            paint
-                .quads
-                .iter()
-                .any(|q| q.color == selected_fill && (q.alpha - 1.0).abs() < 1e-6),
-            "selected-file fill"
-        );
-    }
-
-    #[test]
-    fn file_rows_show_a_stage_checkbox_reflecting_the_staged_flag() {
-        let mut dock = GitDock::new();
-        let mut staged = changed("staged.rs", FileStatus::Modified, 1, 0);
-        staged.staged = true;
-        staged.unstaged = false;
-        dock.load(Status {
-            branch: Some("main".to_owned()),
-            files: vec![staged, changed("unstaged.rs", FileStatus::Modified, 1, 0)],
-            ..Status::default()
-        });
-        let joined = texts(&built(&dock));
-        assert!(joined.contains("[x]"), "a staged file's ticked checkbox");
-        assert!(joined.contains("[ ]"), "an unstaged file's empty checkbox");
-    }
-
-    #[test]
-    fn diff_body_classifies_hunk_add_del_context_rows() {
-        let theme = Theme::resolve("ossein-dark");
-        let mut dock = GitDock::new();
-        dock.load(sample_status());
-        dock.set_diff(sample_diff(), false);
-        let paint = built(&dock);
-        // Diff-row backgrounds are now opaque, pre-composited over bg.base in sRGB space.
-        let base = theme.bg_base.to_srgb();
-        let count = |color| {
-            paint
-                .quads
-                .iter()
-                .filter(|q| q.color == color && (q.alpha - 1.0).abs() < 1e-6)
-                .count()
-        };
-        // The (focused) hunk header is an accent wash over a diff.hunk wash over bg.base.
-        let hunk_bg = theme.accent.over(theme.diff_hunk.over(base, 0.08), 0.14);
-        assert_eq!(count(hunk_bg), 1, "one focused hunk-header background");
-        assert_eq!(
-            count(theme.diff_add.over(base, 0.14)),
-            1,
-            "one addition background"
-        );
-        assert_eq!(
-            count(theme.diff_del.over(base, 0.14)),
-            1,
-            "one deletion background"
-        );
-        let joined = texts(&paint);
-        // The hunk header reconstructs its counts (1 context + 1 del = 2 old; 1+1 = 2 new).
-        assert!(joined.contains("@@ -18,2 +18,2 @@ impl PaneTree"));
-        // The first (only) hunk is focused, and its header shows the stage affordance.
-        assert!(joined.contains("stage"));
-    }
-
-    #[test]
-    fn focus_hunk_moves_between_hunks_and_reports_the_target() {
-        let mut two = sample_diff();
-        two.hunks.push(Hunk {
-            old_start: 40,
-            new_start: 41,
-            heading: String::new(),
-            lines: vec![DiffLine {
-                kind: LineKind::Add,
-                old_no: None,
-                new_no: Some(41),
-                text: "added tail".to_owned(),
-            }],
-        });
-        let mut dock = GitDock::new();
-        dock.load(sample_status());
-        dock.set_diff(two, false);
-        assert_eq!(
-            dock.focused_hunk().unwrap().old_start,
-            18,
-            "starts on hunk 0"
-        );
-        dock.focus_hunk(1);
-        assert_eq!(
-            dock.focused_hunk().unwrap().old_start,
-            40,
-            "moved to hunk 1"
-        );
-        dock.focus_hunk(5);
-        assert_eq!(dock.focused_hunk().unwrap().old_start, 40);
-        dock.focus_hunk(-5);
-        assert_eq!(dock.focused_hunk().unwrap().old_start, 18);
-    }
-
-    #[test]
-    fn untracked_selection_shows_a_placeholder_not_an_empty_diff() {
-        let mut dock = GitDock::new();
-        dock.load(Status {
-            branch: Some("main".to_owned()),
-            files: vec![changed("new.txt", FileStatus::Untracked, 0, 0)],
-            ..Status::default()
-        });
-        assert!(texts(&built(&dock)).contains("Untracked file"));
-    }
-
-    #[test]
-    fn move_selection_clamps_and_reports_change() {
-        let mut dock = GitDock::new();
-        dock.load(sample_status());
-        assert!(!dock.move_selection(-1), "already at the top: no change");
-        assert!(dock.move_selection(1));
-        assert_eq!(
-            dock.selected_file().unwrap().path.to_string_lossy(),
-            "src/session/timeline.rs"
-        );
-        assert!(dock.move_selection(100));
-        assert_eq!(
-            dock.selected_file().unwrap().path.to_string_lossy(),
-            "old/legacy.rs"
-        );
-        assert!(!dock.move_selection(5), "already at the bottom: no change");
-    }
-
-    #[test]
-    fn diff_scroll_moves_through_large_files_and_clamps_to_content() {
-        let mut dock = GitDock::new();
-        dock.load(sample_status());
-        dock.set_diff(long_diff(), false);
-
-        dock.scroll_diff(10);
-        let scrolled = built(&dock);
-        assert_eq!(scrolled.diff_scroll, 10);
-        let visible = texts(&scrolled);
-        assert!(visible.contains("large diff line 9"));
-        assert!(!visible.contains("large diff line 0"));
-
-        dock.set_scroll(scrolled.diff_scroll);
-        dock.scroll_diff(1000); // far past the end
-        let end = built(&dock).diff_scroll;
-        assert!(end > 10, "a large diff has a real scroll range");
-        assert!(end < 1000, "the scroll clamps to the content height");
-    }
-
-    #[test]
-    fn long_file_list_keeps_the_selection_visible() {
-        let theme = Theme::resolve("ossein-dark");
-        let mut dock = GitDock::new();
-        let files: Vec<ChangedFile> = (0..40)
-            .map(|i| changed(&format!("file{i}.rs"), FileStatus::Modified, 1, 0))
-            .collect();
-        dock.load(Status {
-            branch: Some("main".to_owned()),
-            files,
-            ..Status::default()
-        });
-        for _ in 0..30 {
-            dock.move_selection(1);
-        }
-        let paint = built(&dock);
-        // The selected file (file30.rs) must appear and be highlighted.
-        assert!(
-            texts(&paint).contains("file30.rs"),
-            "selected file scrolled into view"
-        );
-        let selected_fill = theme.accent_subtle_on(theme.bg_base.to_srgb());
-        assert!(
-            paint
-                .quads
-                .iter()
-                .any(|q| q.color == selected_fill && (q.alpha - 1.0).abs() < 1e-6),
-            "selection fill"
-        );
-    }
-}
+#[path = "gitdock/tests.rs"]
+mod tests;
