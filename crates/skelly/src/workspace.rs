@@ -117,7 +117,7 @@ const TILE: f32 = 30.0;
 const TILE_GAP: f32 = 6.0;
 const TILES_PER_ROW: usize = 12;
 /// Height of an overflow line (`↑ N more` / `↓ N more`), as in the sidebar.
-const IND_H: f32 = 16.0;
+pub(crate) const IND_H: f32 = 16.0;
 /// How many lines the picker's tile grid takes.
 const PICKER_LINES: usize = ICONS.len().div_ceil(TILES_PER_ROW);
 
@@ -224,10 +224,36 @@ fn picker_height(scale: f32) -> f32 {
     (PICKER_GAP + PICKER_LABEL_H + lines * (TILE + TILE_GAP) - TILE_GAP) * scale
 }
 
+/// Push the overflow lines of a scrolled list at `x`: `↑ N more` at `at.0` for the rows
+/// scrolled off above and `↓ N more` at `at.1` for those below, each only when rows are hidden.
+pub(crate) fn push_more(
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    hidden: (usize, usize),
+    x: f32,
+    at: (f32, f32),
+    scale: f32,
+    theme: &Theme,
+) {
+    for (count, arrow, y) in [(hidden.0, '\u{2191}', at.0), (hidden.1, '\u{2193}', at.1)] {
+        if count > 0 {
+            let text = format!("{arrow} {count} more");
+            let (role, color) = (FontRole::Caption, theme.fg_muted);
+            push_row(labels, measure, &text, role, color, x, y, IND_H, scale);
+        }
+    }
+}
+
 /// The first row to draw for rows of `heights` in a `viewport` that tall: `first` clamped so
 /// the list never scrolls past its end, then, when `reveal`, moved just enough to show
 /// `selected`.
-fn first_row(heights: &[f32], viewport: f32, first: usize, selected: usize, reveal: bool) -> usize {
+pub(crate) fn first_row(
+    heights: &[f32],
+    viewport: f32,
+    first: usize,
+    selected: usize,
+    reveal: bool,
+) -> usize {
     let mut max_first = heights.len();
     let mut tail = 0.0;
     while max_first > 0 && tail + heights[max_first - 1] <= viewport {
@@ -316,16 +342,16 @@ impl Page<'_> {
             y += row_h * scale;
         }
         if overflow {
-            let below = rows.len() - 1 - last;
-            for (hidden, arrow, at) in [(first, '\u{2191}', area.top), (below, '\u{2193}', y)] {
-                if hidden > 0 {
-                    let text = format!("{arrow} {hidden} more");
-                    let (role, color) = (FontRole::Caption, theme.fg_muted);
-                    push_row(
-                        out.labels, measure, &text, role, color, area.x, at, IND_H, scale,
-                    );
-                }
-            }
+            let hidden = (first, rows.len() - 1 - last);
+            push_more(
+                out.labels,
+                measure,
+                hidden,
+                area.x,
+                (area.top, y),
+                scale,
+                theme,
+            );
             y += indicator;
         }
         if let Some(w) = rows[selected].workspace() {

@@ -691,7 +691,7 @@ pub(crate) struct Paint {
     /// Every clickable rect drawn this frame (physical px), in draw order: a widget's own
     /// target follows its row's, so [`target_at`] (which searches last-first) prefers it.
     pub(crate) targets: Vec<(PxRect, Target)>,
-    /// The Workspaces page's first drawn row, to keep as its scroll ([`Settings::settle_rows`]).
+    /// The active page's first drawn row, to keep as its scroll ([`Settings::settle_rows`]).
     pub(crate) rows_first: usize,
 }
 
@@ -771,9 +771,9 @@ pub(crate) struct Settings {
     pub(crate) hover: Option<Target>,
     /// The slider being dragged (its control index + track), between press and release.
     pub(crate) drag: Option<Target>,
-    /// The Workspaces page's scroll: its first drawn row.
+    /// The active page's scroll: its first drawn row.
     rows_first: usize,
-    /// Whether the next paint scrolls the focused Workspaces-page row into view.
+    /// Whether the next paint scrolls the focused row into view.
     reveal_row: bool,
 }
 
@@ -798,6 +798,7 @@ impl Settings {
         self.open = true;
         self.category = 0;
         self.selected = 0;
+        self.rows_first = 0;
     }
 
     /// Jump from a pane's voice controls to their existing config-backed setup.
@@ -929,7 +930,7 @@ impl Settings {
         self.reveal_row = true;
     }
 
-    /// Scroll the Workspaces-page rows by wheel `lines` (positive = up), leaving focus put.
+    /// Scroll the active page's rows by wheel `lines` (positive = up), leaving focus put.
     pub(crate) fn scroll_rows(&mut self, lines: i32) {
         let by = usize::try_from(lines.unsigned_abs()).unwrap_or(usize::MAX);
         self.rows_first = if lines > 0 {
@@ -940,7 +941,7 @@ impl Settings {
         self.reveal_row = false;
     }
 
-    /// Keep the Workspaces-page scroll the last paint settled on (see [`Paint::rows_first`]).
+    /// Keep the scroll the last paint settled on (see [`Paint::rows_first`]).
     pub(crate) fn settle_rows(&mut self, first: usize) {
         self.rows_first = first;
         self.reveal_row = false;
@@ -1075,6 +1076,7 @@ impl Settings {
         let last = i32::try_from(count - 1).unwrap_or(0);
         let cur = i32::try_from(self.selected).unwrap_or(0);
         self.selected = usize::try_from((cur + delta).clamp(0, last)).unwrap_or(0);
+        self.reveal_row = true;
     }
 
     /// Change the focused control's value by a `←/→` nudge, returning the config key it
@@ -1137,11 +1139,10 @@ impl Settings {
             scale,
             theme,
         );
-        // The footer sits at the panel's foot; the Workspaces rows scroll above it.
+        // The footer sits at the panel's foot; the page's rows scroll above it.
         let fy = panel.y + panel.h - PAD * scale - FontRole::Caption.line_height_px(scale);
-        let mut rows_first = 0;
-        if self.on_workspaces_page() {
-            rows_first = self.push_workspaces(
+        let rows_first = if self.on_workspaces_page() {
+            self.push_workspaces(
                 &mut quads,
                 &mut labels,
                 &mut targets,
@@ -1151,7 +1152,7 @@ impl Settings {
                 (body_top, fy - PAD * scale),
                 scale,
                 theme,
-            );
+            )
         } else {
             self.push_controls(
                 &mut quads,
@@ -1160,11 +1161,11 @@ impl Settings {
                 measure,
                 config,
                 (content_x, content_right, nav_divider_x),
-                body_top,
+                (body_top, fy - PAD * scale),
                 scale,
                 theme,
-            );
-        }
+            )
+        };
         push_row(
             &mut labels,
             measure,
@@ -1414,7 +1415,9 @@ impl Settings {
     }
 
     /// Draw the active category's control rows: each label + value, the focused one behind an
-    /// `accent.subtle` fill. `x = (content_x, content_right, nav_divider_x)`.
+    /// `accent.subtle` fill. Rows that do not fit in `y = (top, bottom)` scroll, as on the
+    /// Workspaces page; returns the first row drawn, the scroll to keep.
+    /// `x = (content_x, content_right, nav_divider_x)`.
     #[allow(
         clippy::too_many_arguments,
         reason = "one focused control-list builder"
@@ -1427,21 +1430,43 @@ impl Settings {
         measure: &mut TextMeasure,
         config: &Config,
         x: (f32, f32, f32),
-        body_top: f32,
+        y: (f32, f32),
         scale: f32,
         theme: &Theme,
-    ) {
+    ) -> usize {
         let (content_x, content_right, nav_divider_x) = x;
-        let mut y = body_top;
+        let controls = self.controls();
+        let row_h = CTRL_ROW_H * scale;
+        let heights = vec![row_h; controls.len()];
+        // A category taller than its room scrolls between `↑ N more` / `↓ N more` lines.
+        let (mut top, mut bottom) = y;
+        let overflow = heights.iter().sum::<f32>() > bottom - top;
+        if overflow {
+            top += workspace::IND_H * scale;
+            bottom -= workspace::IND_H * scale;
+        }
+        let first = workspace::first_row(
+            &heights,
+            bottom - top,
+            self.rows_first,
+            self.selected,
+            self.reveal_row,
+        );
+        let mut y = top;
+        let mut last = first;
         let hovered = self.hover.and_then(Target::control);
         // One readout column for every slider in the category, sized to the widest value any
         // of them can show, so the tracks line up and never shift while a value changes.
-        let readout_w = self
-            .controls()
+        let readout_w = controls
             .iter()
             .filter_map(|c| c.kind.readout_width(measure))
             .fold(0.0, f32::max);
-        for (index, control) in self.controls().iter().enumerate() {
+        for (index, control) in controls.iter().enumerate().skip(first) {
+            // Rows past the viewport are scrolled out; the first one always draws.
+            if index > first && y + row_h > bottom {
+                break;
+            }
+            last = index;
             let focused = index == self.selected;
             let row = PxRect {
                 x: nav_divider_x,
@@ -1475,8 +1500,14 @@ impl Settings {
                 scale,
                 theme,
             );
-            y += CTRL_ROW_H * scale;
+            y += row_h;
         }
+        if overflow {
+            let hidden = (first, controls.len().saturating_sub(last + 1));
+            let above = top - workspace::IND_H * scale;
+            workspace::push_more(labels, measure, hidden, content_x, (above, y), scale, theme);
+        }
+        first
     }
 }
 
@@ -2099,6 +2130,52 @@ mod tests {
         );
         assert_eq!(target_at(t, -10.0, -10.0), None);
         assert!(t.iter().any(|(_, t)| *t == Target::Close));
+    }
+
+    #[test]
+    fn config_rows_scroll_above_the_footer_in_a_minimum_size_window() {
+        let config = Config::default();
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(1.0);
+        // The guide's 720 x 480 minimum window, below the 38px title strip.
+        let short = PxRect {
+            x: 0.0,
+            y: 38.0,
+            w: 720.0,
+            h: 442.0,
+        };
+        let footer_top = short.y + short.h - PAD - m.line_height(skelly_render::FontRole::Caption);
+        let rows = |paint: &super::Paint| -> Vec<(PxRect, usize)> {
+            paint
+                .targets
+                .iter()
+                .filter_map(|(r, t)| match t {
+                    Target::Row(i) => Some((*r, *i)),
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut settings = Settings::new(); // Appearance: more rows than fit
+        let count = settings.controls().len();
+        let paint = settings.build(short, 1.0, &config, &[], &theme, &mut m);
+        let drawn = rows(&paint);
+        assert!(drawn.len() < count, "not every Appearance row fits");
+        assert!(drawn.iter().all(|(r, _)| r.y + r.h <= footer_top));
+        assert!(paint.labels.iter().any(|l| l.text.starts_with('\u{2193}')));
+
+        // Moving focus to the last row scrolls it into view, still above the footer.
+        settings.move_selection(i32::try_from(count).unwrap());
+        let paint = settings.build(short, 1.0, &config, &[], &theme, &mut m);
+        settings.settle_rows(paint.rows_first);
+        let drawn = rows(&paint);
+        assert_eq!(drawn.last().map(|(_, i)| *i), Some(count - 1));
+        assert!(drawn.iter().all(|(r, _)| r.y + r.h <= footer_top));
+        assert!(paint.labels.iter().any(|l| l.text.starts_with('\u{2191}')));
+
+        // A wheel scroll up brings the first row back.
+        settings.scroll_rows(i32::try_from(count).unwrap());
+        let paint = settings.build(short, 1.0, &config, &[], &theme, &mut m);
+        assert_eq!(rows(&paint).first().map(|(_, i)| *i), Some(0));
     }
 
     #[test]

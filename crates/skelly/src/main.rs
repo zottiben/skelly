@@ -6400,9 +6400,9 @@ impl App {
             MouseScrollDelta::PixelDelta(pos) => wheel_lines(pos.y / 20.0),
         };
         // The settings view covers the panes; a wheel over it must not scroll a hidden terminal.
-        // It scrolls the Workspaces page's rows, the one settings list that can overflow.
+        // It scrolls the active page's rows, which overflow in a short window.
         if self.settings.open {
-            if lines != 0 && self.settings.on_workspaces_page() {
+            if lines != 0 {
                 self.settings.scroll_rows(lines);
                 self.request_redraw();
             }
