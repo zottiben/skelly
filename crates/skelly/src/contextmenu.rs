@@ -9,10 +9,12 @@
 //! The same overlay also hosts the pane voice footer's overflow menu, with a captured Pi
 //! target and state validation before dispatch. Unavailable voice actions are not menu items.
 //! It also hosts the workspace-chip menu (rename, icon, add, remove) and the group-header menu
-//! (rename, collapse, remove - the tabs stay).
+//! (rename, collapse, move to another workspace, remove - the tabs stay).
 //!
 //! The guide's "Move to group ›" submenu is realized as flat rows (the overlay is a single card):
-//! a `Move to <group>` per other group, "New group", and "Remove from group" when grouped.
+//! a `Move to <group>` per other group, "New group", and "Remove from group" when grouped. Moving
+//! to another workspace follows the same shape: a `Move to workspace <name>` row per other
+//! workspace, on both the tab menu and the group-header menu.
 
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, TextMeasure, Theme};
 
@@ -29,6 +31,8 @@ const DIV_H: f32 = 1.0;
 const DIV_MARGIN: f32 = 5.0;
 /// Horizontal inset of the divider rule from the card edge.
 const DIV_INSET: f32 = 8.0;
+/// How much of `border.strong` the divider rule takes over the card.
+const DIV_ALPHA: f32 = 0.3;
 /// Minimum gap between an item label and its right-aligned key hint.
 const HINT_GAP: f32 = 18.0;
 /// The menu's minimum width (the mockup's `width:190px`).
@@ -50,6 +54,8 @@ pub(crate) enum MenuAction {
     MoveToGroup(usize),
     /// Remove the tab from its group (back to the ungrouped list).
     RemoveFromGroup,
+    /// Move the tab to the workspace at this index (its shells keep running).
+    MoveToWorkspace(usize),
     /// Close the tab (`⌘W`).
     Close,
     /// A pane-local voice control; never a terminal write or an implicit Pi abort.
@@ -68,6 +74,13 @@ pub(crate) enum MenuAction {
     ToggleGroup(usize),
     /// Remove the group at this index; its tabs move back to the ungrouped list.
     RemoveGroup(usize),
+    /// Move the group, with every tab in it, to another workspace.
+    MoveGroupToWorkspace {
+        /// The group's index in the active workspace.
+        group: usize,
+        /// The target workspace's index.
+        workspace: usize,
+    },
 }
 
 /// One laid-out menu entry: an actionable item or a divider rule.
@@ -92,7 +105,27 @@ fn item(label: &str, action: MenuAction) -> Entry {
     }
 }
 
-/// The inputs the menu is built from: the target tab's state + the other groups it could move to.
+/// A divider, then a `Move to workspace <name>` row per `(index, name)` in `workspaces`; nothing
+/// when there is no other workspace to move to.
+fn push_workspace_moves(
+    entries: &mut Vec<Entry>,
+    workspaces: &[(usize, String)],
+    action: impl Fn(usize) -> MenuAction,
+) {
+    if workspaces.is_empty() {
+        return;
+    }
+    entries.push(Entry::Divider);
+    for (w, name) in workspaces {
+        entries.push(item(
+            &format!("Move to workspace \u{201c}{name}\u{201d}"),
+            action(*w),
+        ));
+    }
+}
+
+/// The inputs the menu is built from: the target tab's state + the other groups and workspaces
+/// it could move to.
 pub(crate) struct MenuContext {
     /// Whether the target tab is currently pinned (drives Pin vs Unpin).
     pub(crate) pinned: bool,
@@ -100,6 +133,8 @@ pub(crate) struct MenuContext {
     pub(crate) group: Option<usize>,
     /// The `(index, name)` of every group the tab could move into (excludes its own group).
     pub(crate) other_groups: Vec<(usize, String)>,
+    /// The `(index, name)` of every workspace the tab could move to (excludes its own).
+    pub(crate) other_workspaces: Vec<(usize, String)>,
 }
 
 /// An open right-click tab menu: its entries, the highlighted item, and the anchor it opens at.
@@ -159,6 +194,11 @@ impl ContextMenu {
                 danger: false,
             });
         }
+        push_workspace_moves(
+            &mut entries,
+            &ctx.other_workspaces,
+            MenuAction::MoveToWorkspace,
+        );
         entries.push(Entry::Divider);
         entries.push(Entry::Item {
             label: "Close".to_owned(),
@@ -199,18 +239,31 @@ impl ContextMenu {
         }
     }
 
-    /// Build the menu for the group header at `index`.
-    pub(crate) fn for_group(anchor: (f32, f32), index: usize, collapsed: bool) -> Self {
+    /// Build the menu for the group header at `index`; `workspaces` are the `(index, name)` of
+    /// the other workspaces the group could move to.
+    pub(crate) fn for_group(
+        anchor: (f32, f32),
+        index: usize,
+        collapsed: bool,
+        workspaces: &[(usize, String)],
+    ) -> Self {
+        let mut entries = vec![
+            item("Rename\u{2026}", MenuAction::RenameGroup(index)),
+            item(
+                if collapsed { "Expand" } else { "Collapse" },
+                MenuAction::ToggleGroup(index),
+            ),
+        ];
+        push_workspace_moves(&mut entries, workspaces, |workspace| {
+            MenuAction::MoveGroupToWorkspace {
+                group: index,
+                workspace,
+            }
+        });
+        entries.push(Entry::Divider);
+        entries.push(item("Remove group", MenuAction::RemoveGroup(index)));
         Self {
-            entries: vec![
-                item("Rename\u{2026}", MenuAction::RenameGroup(index)),
-                item(
-                    if collapsed { "Expand" } else { "Collapse" },
-                    MenuAction::ToggleGroup(index),
-                ),
-                Entry::Divider,
-                item("Remove group", MenuAction::RemoveGroup(index)),
-            ],
+            entries,
             selected: 0,
             anchor,
             voice_context: None,
@@ -445,6 +498,9 @@ impl ContextMenu {
             }
         }
         // Divider rules, centered in their reserved band (`DIV_MARGIN` above the 1px rule).
+        // `border` is all but the card's own `bg.elevated`, so the rule is `border.strong`
+        // softened over the card - the guide's `#44445E` in Ossein Dark.
+        let rule = theme.border_strong.over(theme.bg_elevated, DIV_ALPHA);
         for top in dividers(&self.entries) {
             quads.push(ChromeQuad::fill(
                 PxRect {
@@ -453,7 +509,7 @@ impl ContextMenu {
                     w: panel.w - 2.0 * DIV_INSET * scale,
                     h: scale.max(1.0),
                 },
-                theme.border,
+                rule,
             ));
         }
         (quads, labels)
@@ -489,6 +545,7 @@ mod tests {
                 pinned,
                 group,
                 other_groups: others,
+                other_workspaces: Vec::new(),
             },
         )
     }
@@ -553,7 +610,7 @@ mod tests {
     fn the_group_menu_renames_toggles_and_removes_its_group() {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(1.0);
-        let mut menu = ContextMenu::for_group((0.0, 0.0), 1, true);
+        let mut menu = ContextMenu::for_group((0.0, 0.0), 1, true, &[]);
         assert_eq!(
             actions(&mut menu),
             vec![
@@ -578,6 +635,56 @@ mod tests {
             labels.iter().any(|l| l.text == "Expand"),
             "a collapsed group expands"
         );
+    }
+
+    #[test]
+    fn tabs_and_groups_offer_a_move_to_every_other_workspace() {
+        let others = vec![(0, "Personal".to_owned()), (2, "Work".to_owned())];
+        let mut tab = ContextMenu::new(
+            (0.0, 0.0),
+            &MenuContext {
+                pinned: false,
+                group: None,
+                other_groups: Vec::new(),
+                other_workspaces: others.clone(),
+            },
+        );
+        let tab_actions = actions(&mut tab);
+        assert!(tab_actions.contains(&MenuAction::MoveToWorkspace(0)));
+        assert!(tab_actions.contains(&MenuAction::MoveToWorkspace(2)));
+        assert_eq!(tab_actions.last(), Some(&MenuAction::Close));
+
+        let mut group = ContextMenu::for_group((0.0, 0.0), 3, false, &others);
+        assert_eq!(
+            actions(&mut group),
+            vec![
+                MenuAction::RenameGroup(3),
+                MenuAction::ToggleGroup(3),
+                MenuAction::MoveGroupToWorkspace {
+                    group: 3,
+                    workspace: 0
+                },
+                MenuAction::MoveGroupToWorkspace {
+                    group: 3,
+                    workspace: 2
+                },
+                MenuAction::RemoveGroup(3),
+            ]
+        );
+
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(1.0);
+        let (w, h) = group.natural_size(1.0, &mut m);
+        let panel = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w,
+            h,
+        };
+        let (_, labels) = group.build(panel, 1.0, &theme, &mut m);
+        assert!(labels
+            .iter()
+            .any(|l| l.text == "Move to workspace \u{201c}Work\u{201d}"));
     }
 
     #[test]

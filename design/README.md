@@ -82,6 +82,19 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-02 - **Tabs and groups move to another workspace from their right-click menus.**
+  User request: move items into a different workspace, not only into a different group. The
+  tab menu and the group-header menu list a `Move to workspace <name>` row for each other
+  workspace, after the group rows, in the same flat-row shape as "Move to group". A moved tab
+  goes to the end of that workspace's list, ungrouped, and keeps its pinned state. A moved
+  group takes all its tabs. They join a group of the same name in that workspace, or a new
+  group, which keeps the collapsed state. The shells keep running, the view stays in the
+  current workspace, and a toast names the target. Moving the only tab, or a group that holds
+  every tab, leaves a fresh tab behind, as closing it would. The menu divider rules are now
+  `border.strong` at 0.3 over the card. This matches the guide's `#44445E`; `border` was the
+  same color as `bg.elevated`, so the rules did not show.
+  _(was: tabs moved only between groups of their own workspace)_
+
 - 2026-10-30 - **The git dock is one review scroll of every change, with comment threads
   under their lines.** User request: review an agent's changes the way AI Team does. The
   dock lists every change in the working tree against `HEAD` (staged and unstaged together;

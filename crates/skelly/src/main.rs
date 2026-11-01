@@ -3951,7 +3951,12 @@ impl App {
             }
             Some(sidebar::Hit::GroupHeader(gi)) => {
                 if let Some(group) = self.groups.get(gi) {
-                    let menu = ContextMenu::for_group(anchor, gi, group.collapsed);
+                    let menu = ContextMenu::for_group(
+                        anchor,
+                        gi,
+                        group.collapsed,
+                        &self.other_workspaces(),
+                    );
                     self.context_menu = Some(menu);
                     self.request_redraw();
                 }
@@ -3976,9 +3981,20 @@ impl App {
                 .filter(|(gi, _)| Some(*gi) != group)
                 .map(|(gi, g)| (gi, g.name.clone()))
                 .collect(),
+            other_workspaces: self.other_workspaces(),
         };
         self.context_menu = Some(ContextMenu::new(point_f32(self.pointer), &ctx));
         self.request_redraw();
+    }
+
+    /// The `(index, name)` of every workspace but the active one: where a tab or group can move.
+    fn other_workspaces(&self) -> Vec<(usize, String)> {
+        self.workspaces
+            .iter()
+            .enumerate()
+            .filter(|(w, _)| *w != self.active_workspace)
+            .map(|(w, ws)| (w, ws.name.clone()))
+            .collect()
     }
 
     /// Dismiss the right-click menu.
@@ -4120,6 +4136,7 @@ impl App {
             MenuAction::NewGroup => self.new_group(),
             MenuAction::MoveToGroup(gi) => self.move_active_tab_to_group(Some(gi)),
             MenuAction::RemoveFromGroup => self.move_active_tab_to_group(None),
+            MenuAction::MoveToWorkspace(w) => self.move_active_tab_to_workspace(w),
             MenuAction::Close => self.request_close_tab(),
             MenuAction::Voice(action) => {
                 if let Some(menu) = menu {
@@ -4133,6 +4150,9 @@ impl App {
             MenuAction::RenameGroup(gi) => self.start_group_rename(gi),
             MenuAction::ToggleGroup(gi) => self.toggle_group(gi),
             MenuAction::RemoveGroup(gi) => self.remove_group(self.active_workspace, gi),
+            MenuAction::MoveGroupToWorkspace { group, workspace } => {
+                self.move_group_to_workspace(group, workspace);
+            }
         }
         self.request_redraw();
     }
@@ -4145,6 +4165,46 @@ impl App {
         }
         self.prune_empty_groups();
         self.request_redraw();
+    }
+
+    /// Move the active tab to workspace `w` (context menu), ungrouped at the end of its tab list.
+    /// The tab keeps its shells running and the view stays here.
+    fn move_active_tab_to_workspace(&mut self, w: usize) {
+        if w == self.active_workspace || w >= self.workspaces.len() {
+            return;
+        }
+        self.renaming = None;
+        let mut tab = take_tab(&mut self.tabs, &mut self.active);
+        tab.group = None;
+        self.prune_empty_groups();
+        self.adopt_tabs(w, vec![tab], None);
+    }
+
+    /// Move group `gi` and every tab in it to workspace `w` (group-header menu); the view stays
+    /// here.
+    fn move_group_to_workspace(&mut self, gi: usize, w: usize) {
+        if w == self.active_workspace || w >= self.workspaces.len() || gi >= self.groups.len() {
+            return;
+        }
+        self.renaming = None;
+        let (group, tabs) = take_group(&mut self.tabs, &mut self.active, &mut self.groups, gi);
+        self.adopt_tabs(w, tabs, Some(group));
+    }
+
+    /// Hand `tabs` to the stashed workspace `w` (see [`adopt`]), then re-fit the tabs left on
+    /// screen and say where they went.
+    fn adopt_tabs(&mut self, w: usize, tabs: Vec<Tab>, group: Option<TabGroup>) {
+        let Some(workspace) = self.workspaces.get_mut(w) else {
+            return;
+        };
+        let (stash, _, groups) = workspace
+            .stash
+            .get_or_insert_with(|| (Vec::new(), 0, Vec::new()));
+        adopt(stash, groups, tabs, group);
+        let message = format!("Moved to \u{201c}{}\u{201d}", workspace.name);
+        self.selecting = false;
+        self.sync_layout();
+        self.show_toast(message, ToastKind::Info);
     }
 
     /// Duplicate the active tab (context menu): insert a fresh tab right after it, inheriting its
@@ -7427,6 +7487,77 @@ fn ungroup(tabs: &mut [Tab], groups: &mut Vec<TabGroup>, gi: usize) {
     }
 }
 
+/// Take the tab at `active` out of a workspace's `tabs`, moving `active` to its neighbour. The
+/// only tab leaves a fresh one behind, as closing it would.
+fn take_tab(tabs: &mut Vec<Tab>, active: &mut usize) -> Tab {
+    let count = tabs.len();
+    if count > 1 {
+        let tab = tabs.remove(*active);
+        *active = index_after_close(*active, count);
+        tab
+    } else {
+        *active = 0;
+        std::mem::replace(&mut tabs[0], Tab::new())
+    }
+}
+
+/// Take group `gi` and every tab in it out of a workspace's `tabs` + `groups`, keeping `active`
+/// on its tab - or on the nearest one left when that tab went too. A workspace left without a
+/// tab gets a fresh one.
+fn take_group(
+    tabs: &mut Vec<Tab>,
+    active: &mut usize,
+    groups: &mut Vec<TabGroup>,
+    gi: usize,
+) -> (TabGroup, Vec<Tab>) {
+    let active_moves = tabs.get(*active).and_then(|t| t.group) == Some(gi);
+    let before = tabs[..(*active).min(tabs.len())]
+        .iter()
+        .filter(|t| t.group != Some(gi))
+        .count();
+    let (moved, kept): (Vec<Tab>, Vec<Tab>) = std::mem::take(tabs)
+        .into_iter()
+        .partition(|t| t.group == Some(gi));
+    *tabs = kept;
+    let group = TabGroup {
+        name: groups[gi].name.clone(),
+        collapsed: groups[gi].collapsed,
+    };
+    ungroup(tabs, groups, gi);
+    if tabs.is_empty() {
+        tabs.push(Tab::new());
+    }
+    *active = if active_moves {
+        before.min(tabs.len() - 1)
+    } else {
+        before
+    };
+    (group, moved)
+}
+
+/// Append `moved` to a workspace's `tabs`: into its group named like `group` (added when it has
+/// none), or ungrouped when `group` is `None`.
+fn adopt(
+    tabs: &mut Vec<Tab>,
+    groups: &mut Vec<TabGroup>,
+    mut moved: Vec<Tab>,
+    group: Option<TabGroup>,
+) {
+    let gi = group.map(|group| {
+        groups
+            .iter()
+            .position(|g| g.name == group.name)
+            .unwrap_or_else(|| {
+                groups.push(group);
+                groups.len() - 1
+            })
+    });
+    for tab in &mut moved {
+        tab.group = gi;
+    }
+    tabs.append(&mut moved);
+}
+
 /// The new active-tab index after closing the tab at `active`, where `count` is the
 /// tab count *before* removal (always >= 2 when a tab is actually closed). Clamps into
 /// the surviving range so focus lands on a real tab.
@@ -7924,13 +8055,14 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        changed_since, clipboard_action, csi_edit, cursor_key, cursor_navigation_shortcut,
+        adopt, changed_since, clipboard_action, csi_edit, cursor_key, cursor_navigation_shortcut,
         cycle_index, dim, dirty_stats, edit_text, editor_filetype, editor_mode, enter_bytes,
         index_after_close, interval_ms, kitty_csi, kitty_modifier_code, order, overlay_panel_top,
         overlay_rise_offset, pane_action, pane_dims, panic_message, parse_chord, pointer_cell_in,
         poll_wait, process_name, resolve_cell, selection_cells, selection_text, shell_escape_path,
-        super_chord, tab_action, ungroup, xterm_modifier_code, ClipboardAction, Duration, Instant,
-        PaneAction, Selection, SuperChord, Tab, TabAction, TabGroup,
+        super_chord, tab_action, take_group, take_tab, ungroup, xterm_modifier_code,
+        ClipboardAction, Duration, Instant, PaneAction, Selection, SuperChord, Tab, TabAction,
+        TabGroup,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -8745,5 +8877,114 @@ mod tests {
         // An index past the end is a no-op.
         ungroup(&mut tabs, &mut groups, 5);
         assert_eq!(groups.len(), 2);
+    }
+
+    /// Tabs in the given groups, each titled by its position so a test can follow it.
+    fn titled_tabs(groups: &[Option<usize>]) -> Vec<Tab> {
+        groups
+            .iter()
+            .enumerate()
+            .map(|(i, &g)| {
+                let mut tab = Tab::new();
+                tab.group = g;
+                tab.custom_title = Some(format!("t{i}"));
+                tab
+            })
+            .collect()
+    }
+
+    fn titles(tabs: &[Tab]) -> Vec<String> {
+        tabs.iter()
+            .map(|t| t.custom_title.clone().unwrap_or_default())
+            .collect()
+    }
+
+    fn named(name: &str) -> TabGroup {
+        TabGroup {
+            name: name.to_owned(),
+            collapsed: false,
+        }
+    }
+
+    #[test]
+    fn taking_a_tab_focuses_its_neighbour_and_never_empties_the_workspace() {
+        let mut tabs = titled_tabs(&[None, None, None]);
+        let mut active = 2;
+        let tab = take_tab(&mut tabs, &mut active);
+        assert_eq!(tab.custom_title.as_deref(), Some("t2"));
+        assert_eq!((titles(&tabs), active), (vec!["t0".into(), "t1".into()], 1));
+
+        let mut only = titled_tabs(&[None]);
+        let mut active = 0;
+        let tab = take_tab(&mut only, &mut active);
+        assert_eq!(tab.custom_title.as_deref(), Some("t0"));
+        assert_eq!(only.len(), 1, "a fresh tab stays behind");
+        assert!(only[0].custom_title.is_none() && only[0].is_empty_state());
+    }
+
+    #[test]
+    fn taking_a_group_takes_its_tabs_and_keeps_focus_on_the_tab_left() {
+        let mut groups = vec![named("a"), named("b"), named("c")];
+        let mut tabs = titled_tabs(&[Some(1), None, Some(2), Some(1), Some(0)]);
+        // Focus on t2 (group c), which stays: it ends up at index 1.
+        let mut active = 2;
+        let (group, moved) = take_group(&mut tabs, &mut active, &mut groups, 1);
+        assert_eq!(group.name, "b");
+        assert_eq!(titles(&moved), ["t0", "t3"]);
+        assert_eq!(titles(&tabs), ["t1", "t2", "t4"]);
+        assert_eq!(active, 1);
+        // The groups after it shift down, and the tabs follow them.
+        let names: Vec<&str> = groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["a", "c"]);
+        let members: Vec<Option<usize>> = tabs.iter().map(|t| t.group).collect();
+        assert_eq!(members, [None, Some(1), Some(0)]);
+
+        // Focus inside the moved group lands on the nearest tab left.
+        let mut groups = vec![named("a")];
+        let mut tabs = titled_tabs(&[None, Some(0), Some(0)]);
+        let mut active = 2;
+        take_group(&mut tabs, &mut active, &mut groups, 0);
+        assert_eq!((titles(&tabs), active), (vec!["t0".into()], 0));
+
+        // A workspace that was only this group keeps a fresh tab.
+        let mut groups = vec![named("a")];
+        let mut tabs = titled_tabs(&[Some(0), Some(0)]);
+        let mut active = 1;
+        let (_, moved) = take_group(&mut tabs, &mut active, &mut groups, 0);
+        assert_eq!(moved.len(), 2);
+        assert!(groups.is_empty());
+        assert_eq!((tabs.len(), active), (1, 0));
+        assert!(tabs[0].group.is_none());
+    }
+
+    #[test]
+    fn adopted_tabs_join_a_group_of_the_same_name_or_a_new_one() {
+        let mut groups = vec![named("a"), named("b")];
+        let mut tabs = titled_tabs(&[Some(0), Some(1)]);
+        adopt(
+            &mut tabs,
+            &mut groups,
+            titled_tabs(&[Some(7)]),
+            Some(named("b")),
+        );
+        assert_eq!(groups.len(), 2, "joined the existing group");
+        assert_eq!(tabs[2].group, Some(1));
+
+        let mut collapsed = named("c");
+        collapsed.collapsed = true;
+        adopt(
+            &mut tabs,
+            &mut groups,
+            titled_tabs(&[Some(0), Some(0)]),
+            Some(collapsed),
+        );
+        assert_eq!(groups.len(), 3);
+        assert!(groups[2].collapsed);
+        assert_eq!(tabs[3].group, Some(2));
+        assert_eq!(tabs[4].group, Some(2));
+
+        adopt(&mut tabs, &mut groups, titled_tabs(&[Some(1)]), None);
+        assert_eq!(tabs.len(), 6);
+        assert_eq!(tabs[5].group, None);
     }
 }
