@@ -37,6 +37,15 @@ const NAV_PAD: f32 = 16.0;
 const CONTENT_PAD: f32 = 24.0;
 /// Header-row height (the category heading).
 const HEADER_H: f32 = 44.0;
+/// The header close button: a square of this side, vertically centered in the header.
+const CLOSE_SIDE: f32 = 28.0;
+/// The close button's corner radius.
+const CLOSE_RADIUS: f32 = 6.0;
+/// Gap between the esc hint and the close button.
+const CLOSE_GAP: f32 = 8.0;
+/// The close button's glyph: the guide's `close` icon (`✕`), as the bundled Nerd Font's codicon
+/// so it reads at icon size (the mono face's `✕` is too small to fill the button).
+const CLOSE_ICON: &str = "\u{ea76}";
 /// Category nav row height.
 const NAV_ROW_H: f32 = 32.0;
 /// Control row height (tall enough to seat the §09 widgets).
@@ -690,7 +699,7 @@ pub(crate) struct Paint {
 /// controls (or the nav's categories).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub(crate) enum Target {
-    /// The `esc to close` hint: close the view.
+    /// The header close button (or the `esc to close` hint beside it): close the view.
     Close,
     /// A nav row: switch to this category.
     Category(usize),
@@ -1107,6 +1116,7 @@ impl Settings {
 
         let hy = panel.y + PAD * scale;
         self.push_header(
+            &mut quads,
             &mut labels,
             &mut targets,
             measure,
@@ -1180,11 +1190,14 @@ impl Settings {
         }
     }
 
-    /// Draw the header at `hy`: the active category name (heading) + an esc hint, which is
-    /// also the close button unless a text edit is open. `x = (content_x, content_right)`.
+    /// Draw the header at `hy`: the active category name (heading), the `✕` close button at the
+    /// right, and an esc hint before it, which also closes unless a text edit is open. The
+    /// button stays live during an edit: the click commits the draft first, as any click does.
+    /// `x = (content_x, content_right)`.
     #[allow(clippy::too_many_arguments, reason = "one focused header builder")]
     fn push_header(
         &self,
+        quads: &mut Vec<ChromeQuad>,
         labels: &mut Vec<ProseLabel>,
         targets: &mut Vec<(PxRect, Target)>,
         measure: &mut TextMeasure,
@@ -1207,19 +1220,52 @@ impl Settings {
             HEADER_H,
             scale,
         );
+        let side = CLOSE_SIDE * scale;
+        let button = PxRect {
+            x: content_right - side,
+            y: hy + (HEADER_H - CLOSE_SIDE) * 0.5 * scale,
+            w: side,
+            h: side,
+        };
+        let hovered = self.hover == Some(Target::Close);
+        if hovered {
+            quads.push(ChromeQuad::rounded(
+                button,
+                hover_fill(theme, theme.bg_elevated),
+                CLOSE_RADIUS * scale,
+            ));
+        }
+        let icon_w = measure.width(CLOSE_ICON, FontRole::Icon, None);
+        push_row(
+            labels,
+            measure,
+            CLOSE_ICON,
+            FontRole::Icon,
+            if hovered {
+                theme.fg_primary
+            } else {
+                theme.fg_muted
+            },
+            button.x + (side - icon_w) * 0.5,
+            button.y,
+            CLOSE_SIDE,
+            scale,
+        );
+        targets.push((button, Target::Close));
         let editing = self.editing.is_some();
         let hint = if editing {
             "enter save · esc cancel"
         } else {
             "esc to close"
         };
+        let hint_right = button.x - CLOSE_GAP * scale;
         push_right(
             labels,
             measure,
             hint,
             FontRole::Caption,
             theme.fg_muted,
-            content_right,
+            hint_right,
             hy,
             HEADER_H,
             scale,
@@ -1228,7 +1274,7 @@ impl Settings {
             let w = measure.width(hint, FontRole::Caption, None);
             targets.push((
                 PxRect {
-                    x: content_right - w,
+                    x: hint_right - w,
                     y: hy,
                     w,
                     h: HEADER_H * scale,
@@ -1916,7 +1962,7 @@ fn push_right(
 
 #[cfg(test)]
 mod tests {
-    use super::{target_at, Kind, Settings, Target, CATEGORIES};
+    use super::{target_at, Kind, Settings, Target, CATEGORIES, CLOSE_ICON, HEADER_H, PAD};
     use skelly_config::Config;
     use skelly_render::{PxRect, TextMeasure, Theme};
 
@@ -2056,6 +2102,38 @@ mod tests {
     }
 
     #[test]
+    fn the_close_button_sits_top_right_and_stays_live_while_editing() {
+        let config = Config::default();
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
+        let mut settings = Settings::new();
+        let paint = settings.build(panel(), 2.0, &config, &[], &theme, &mut m);
+        let button = paint
+            .targets
+            .iter()
+            .find(|(_, t)| *t == Target::Close)
+            .map(|(r, _)| *r)
+            .expect("a close button");
+        let p = panel();
+        assert!((button.x + button.w - (p.x + p.w - PAD * 2.0)).abs() < 0.5);
+        assert!(button.y < p.y + (PAD + HEADER_H) * 2.0);
+        assert!(paint.labels.iter().any(|l| l.text == CLOSE_ICON));
+        let (x, y) = (button.x + button.w * 0.5, button.y + button.h * 0.5);
+        assert_eq!(target_at(&paint.targets, x, y), Some(Target::Close));
+
+        // While a text edit is open the hint turns into "enter save", but the button stays.
+        settings.editing = Some(String::new());
+        let paint = settings.build(panel(), 2.0, &config, &[], &theme, &mut m);
+        let closes: Vec<_> = paint
+            .targets
+            .iter()
+            .filter(|(_, t)| *t == Target::Close)
+            .collect();
+        assert_eq!(closes.len(), 1);
+        assert_eq!(closes[0].0, button);
+    }
+
+    #[test]
     fn segment_cycle_and_slider_clicks_write_their_one_key() {
         let mut config = Config::default();
         let mut settings = Settings::new();
@@ -2150,6 +2228,14 @@ mod tests {
             plain + 1
         );
         settings.hover = Some(Target::Category(2));
+        assert_eq!(
+            settings
+                .build(panel(), 1.0, &config, &[], &theme, &mut m)
+                .quads
+                .len(),
+            plain + 1
+        );
+        settings.hover = Some(Target::Close);
         assert_eq!(
             settings
                 .build(panel(), 1.0, &config, &[], &theme, &mut m)

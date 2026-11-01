@@ -82,6 +82,15 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-02 - **Settings has a close button.** User request: close settings with a click,
+  not only with Esc. A 28px square button with the guide's `close` icon sits at the right end
+  of the settings header, and the `esc to close` hint moves to its left. The icon is drawn as
+  the bundled Nerd Font's codicon `close`, because the mono face's `✕` is too small for the
+  button. The icon is `fg.muted`; on hover it is `fg.primary` over the row hover wash. The
+  button also shows while a text edit is open; a click commits the draft first, as any click
+  outside the draft does, and then closes.
+  _(was: only Esc, or a click on the `esc to close` hint, closed settings)_
+
 - 2026-11-02 - **Tabs and groups move to another workspace from their right-click menus.**
   User request: move items into a different workspace, not only into a different group. The
   tab menu and the group-header menu list a `Move to workspace <name>` row for each other
