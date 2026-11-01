@@ -34,6 +34,11 @@ const CHIP_SIZE: f32 = 26.0;
 const CHIP_GAP: f32 = 7.0;
 const CHIP_RADIUS: f32 = 7.0;
 const CHIP_INSET: f32 = 13.0;
+/// One chip's advance along the row (its tile plus the gap): the row scrolls by whole tiles.
+pub(crate) const CHIP_STEP: f32 = CHIP_SIZE + CHIP_GAP;
+/// The cues in the row's side gutters that more chips are scrolled off that way.
+const CHIP_MORE_LEFT: &str = "\u{2039}";
+const CHIP_MORE_RIGHT: &str = "\u{203a}";
 /// Gap below the workspace-chip row before the command well (the guide's `padding: … 10px`).
 const CHIP_BLOCK_GAP: f32 = 10.0;
 /// Height of the command-input well (design §08 #3), matching the guide's 30px search field.
@@ -106,6 +111,9 @@ pub(crate) enum Hit {
     Workspace(usize),
     /// Add a new workspace (the `+` chip).
     AddWorkspace,
+    /// The workspace-chip row outside a chip (its gutters and gaps): no click action, but a
+    /// wheel over it scrolls the row like one over a chip.
+    Chips,
     /// Switch to the pinned tab at this 0-based grid position (design §08 #4).
     Pinned(usize),
     /// Open the command palette (the command-input well, design §08 #3).
@@ -132,6 +140,10 @@ pub(crate) struct View<'a> {
     pub(crate) chips: &'a [char],
     /// Index of the active workspace (highlighted chip).
     pub(crate) active_chip: usize,
+    /// The chip row's scroll: the first tile shown when the chips and `+` overflow the row.
+    pub(crate) chip_first: usize,
+    /// Whether to scroll the row just enough to show the active chip.
+    pub(crate) reveal_chip: bool,
     /// One glyph per pinned tab for the 3-up pinned grid (design §08 #4); empty when nothing is
     /// pinned (the grid is then hidden).
     pub(crate) pinned: &'a [char],
@@ -427,15 +439,17 @@ fn rows_layout(
 /// [`utility_slots`] + [`chip_slots`] with [`build`] so a click lands on exactly what is drawn.
 pub(crate) fn hit(view: &View, panel: PxRect, scale: f32, px: f32, py: f32) -> Option<Hit> {
     // Workspace chips (full panel only).
-    if !view.rail {
-        for (i, slot) in chip_slots(view, panel, scale).into_iter().enumerate() {
-            if px >= slot.x && px < slot.x + slot.w && py >= slot.y && py < slot.y + slot.h {
-                return Some(if i < view.chips.len() {
-                    Hit::Workspace(i)
-                } else {
-                    Hit::AddWorkspace
-                });
-            }
+    let inside = |r: &PxRect| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h;
+    if let Some(row) = chip_row(view, panel, scale) {
+        if let Some((i, _)) = row.tiles.iter().find(|(_, slot)| inside(slot)) {
+            return Some(if *i < view.chips.len() {
+                Hit::Workspace(*i)
+            } else {
+                Hit::AddWorkspace
+            });
+        }
+        if inside(&row.band) {
+            return Some(Hit::Chips);
         }
     }
     // The utility bar occupies the bottom `UTIL_H` band (full panel only).
@@ -517,6 +531,8 @@ pub(crate) struct Paint {
     pub(crate) quads: Vec<ChromeQuad>,
     /// The positioned proportional text labels.
     pub(crate) labels: Vec<ProseLabel>,
+    /// The chip row's scroll this build settled on, to keep; `None` when no chips were drawn.
+    pub(crate) chip_first: Option<usize>,
 }
 
 /// Build the sidebar's display list for `view`, filling `panel` (physical px) at DPI `scale`,
@@ -559,9 +575,19 @@ pub(crate) fn build(
 
     // The workspace chips sit below the control strip; the tab flow starts below them.
     let chips_block = chips_block_h(view);
-    if !view.rail {
-        push_chips(&mut quads, &mut labels, view, panel, scale, theme, measure);
-    }
+    let chip_first = chip_row(view, panel, scale).map(|row| {
+        push_chips(
+            &mut quads,
+            &mut labels,
+            view,
+            &row,
+            panel,
+            scale,
+            theme,
+            measure,
+        );
+        row.first
+    });
 
     let ctx = RowCtx {
         panel,
@@ -610,6 +636,7 @@ pub(crate) fn build(
         panel,
         quads,
         labels,
+        chip_first,
     }
 }
 
@@ -897,47 +924,124 @@ fn chips_block_h(view: &View) -> f32 {
     }
 }
 
-/// The workspace chips' hit/draw rectangles (physical px): one 26px tile per workspace plus a
-/// trailing `+` tile, left-clustered from `CHIP_INSET` with a `CHIP_GAP` between them, just
-/// below the control strip. Shared by [`hit`] and [`push_chips`].
+/// The workspace-chip row as laid out: the tiles shown, the row's band, and its scroll.
+struct ChipRow {
+    /// The row's band across the panel (physical px), gutters included.
+    band: PxRect,
+    /// Each tile shown with its 0-based index (the last index is the `+`), left to right.
+    tiles: Vec<(usize, PxRect)>,
+    /// The first tile shown: the row's scroll.
+    first: usize,
+    /// Whether tiles are scrolled off to the left / to the right.
+    hidden: (bool, bool),
+}
+
+/// How many chip tiles fit across a panel `width` logical px wide, inset `CHIP_INSET` each
+/// side; at least one.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a small, non-negative tile count"
+)]
+fn chips_fit(width: f32) -> usize {
+    let room = width - 2.0 * CHIP_INSET + CHIP_GAP;
+    ((room / CHIP_STEP).floor().max(1.0)) as usize
+}
+
+/// The first of `tiles` chip tiles to show when `fit` fit the row: `first` clamped so the row
+/// never scrolls past its end, then moved just enough to show tile `reveal`.
+fn first_chip(tiles: usize, fit: usize, first: usize, reveal: Option<usize>) -> usize {
+    let first = first.min(tiles.saturating_sub(fit));
+    reveal.map_or(first, |i| first.min(i).max((i + 1).saturating_sub(fit)))
+}
+
+/// Lay out the workspace chips (full panel only): one 26px tile per workspace plus a trailing
+/// `+` tile, left-clustered from `CHIP_INSET` with a `CHIP_GAP` between them, just below the
+/// control strip. Tiles that do not fit scroll by whole tiles from `view.chip_first`. Shared by
+/// [`hit`] and [`build`] so a click lands on exactly what is drawn.
 #[allow(
     clippy::cast_precision_loss,
     reason = "the chip index is a tiny count (workspaces are few)"
 )]
-fn chip_slots(view: &View, panel: PxRect, scale: f32) -> Vec<PxRect> {
-    if view.chips.is_empty() {
-        return Vec::new();
+fn chip_row(view: &View, panel: PxRect, scale: f32) -> Option<ChipRow> {
+    if view.rail || view.chips.is_empty() {
+        return None;
     }
+    let count = view.chips.len() + 1;
+    let fit = chips_fit(panel.w / scale);
+    let reveal = view.reveal_chip.then_some(view.active_chip);
+    let first = first_chip(count, fit, view.chip_first, reveal);
+    let shown = fit.min(count);
     let y = panel.y + (view.top_inset + brand_block_h(view) + PAD_TOP) * scale;
     let size = CHIP_SIZE * scale;
-    let step = (CHIP_SIZE + CHIP_GAP) * scale;
     let x0 = panel.x + CHIP_INSET * scale;
-    (0..=view.chips.len())
-        .map(|i| PxRect {
-            x: x0 + i as f32 * step,
-            y,
-            w: size,
-            h: size,
+    let tiles = (first..first + shown)
+        .enumerate()
+        .map(|(k, i)| {
+            let x = x0 + k as f32 * CHIP_STEP * scale;
+            let slot = PxRect {
+                x,
+                y,
+                w: size,
+                h: size,
+            };
+            (i, slot)
         })
-        .collect()
+        .collect();
+    Some(ChipRow {
+        band: PxRect {
+            x: panel.x,
+            y,
+            w: panel.w,
+            h: size,
+        },
+        tiles,
+        first,
+        hidden: (first > 0, first + shown < count),
+    })
 }
 
 /// The workspace-switcher chips (design §08 #2): a rounded tile per workspace (the active one
 /// `accent`@0.16 filled + `accent`@0.4 bordered, its glyph in `accent`; the rest `bg.surface`
-/// with a `fg.muted` glyph) plus a trailing `+` tile. Full panel only.
+/// with a `fg.muted` glyph) plus a trailing `+` tile, as `row` lays them out. A `‹` / `›` in
+/// `fg.faint` marks a gutter with tiles scrolled off past it. Full panel only.
+#[allow(clippy::too_many_arguments, reason = "one focused chip-row builder")]
 fn push_chips(
     quads: &mut Vec<ChromeQuad>,
     labels: &mut Vec<ProseLabel>,
     view: &View,
+    row: &ChipRow,
     panel: PxRect,
     scale: f32,
     theme: &Theme,
     measure: &mut TextMeasure,
 ) {
-    let slots = chip_slots(view, panel, scale);
     let radius = CHIP_RADIUS * scale;
     let stroke = scale.max(1.0);
-    for (i, slot) in slots.iter().enumerate() {
+    // Each cue centers in a `CHIP_INSET` gutter beside its edge tile, so the two mirror.
+    let (left, right) = row.hidden;
+    let gutter = CHIP_INSET * scale;
+    let first_x = row.tiles.first().map_or(panel.x, |(_, t)| t.x);
+    let last_right = row.tiles.last().map_or(panel.x, |(_, t)| t.x + t.w);
+    for (more, cue, center) in [
+        (left, CHIP_MORE_LEFT, first_x - gutter * 0.5),
+        (right, CHIP_MORE_RIGHT, last_right + gutter * 0.5),
+    ] {
+        if more {
+            let w = measure.width(cue, FontRole::Label, None);
+            let line = measure.line_height(FontRole::Label);
+            labels.push(ProseLabel {
+                text: cue.to_owned(),
+                x: center - w * 0.5,
+                y: row.band.y + (row.band.h - line) * 0.5,
+                role: FontRole::Label,
+                color: theme.fg_faint,
+                weight: None,
+                max_w: f32::MAX,
+            });
+        }
+    }
+    for &(i, slot) in &row.tiles {
         let is_add = i >= view.chips.len();
         let active = !is_add && i == view.active_chip;
         if active {
@@ -945,7 +1049,7 @@ fn push_chips(
             // over the sidebar bg so they read at the guide's weight (not the brighter linear-
             // space GPU blend).
             quads.push(ChromeQuad::rounded(
-                *slot,
+                slot,
                 theme.accent.over(theme.bg_sidebar, 0.4),
                 radius,
             ));
@@ -962,7 +1066,7 @@ fn push_chips(
                 inner_r,
             ));
         } else {
-            quads.push(ChromeQuad::rounded(*slot, theme.bg_surface, radius));
+            quads.push(ChromeQuad::rounded(slot, theme.bg_surface, radius));
         }
         let glyph = if is_add { '+' } else { view.chips[i] };
         let role = crate::workspace::icon_role(glyph);
@@ -1254,6 +1358,8 @@ mod tests {
             active_tab: active,
             chips: &[],
             active_chip: 0,
+            chip_first: 0,
+            reveal_chip: false,
             pinned: &[],
             active_pinned: None,
             groups: &[],
@@ -1390,6 +1496,8 @@ mod tests {
             active_tab: active,
             chips: &[],
             active_chip: 0,
+            chip_first: 0,
+            reveal_chip: false,
             pinned: &[],
             active_pinned: None,
             groups,
@@ -1509,6 +1617,8 @@ mod tests {
             active_tab: 0,
             chips: &chips,
             active_chip: 0,
+            chip_first: 0,
+            reveal_chip: false,
             pinned: &[],
             active_pinned: None,
             groups: &[],
@@ -1536,6 +1646,89 @@ mod tests {
         assert_eq!(
             hit(&v, panel(), 2.0, 92.0 * 2.0, cy),
             Some(Hit::AddWorkspace)
+        );
+    }
+
+    #[test]
+    fn overflowing_chips_scroll_by_whole_tiles_inside_the_panel() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
+        let chips = ['1', '2', '3', '4', '5', '6', '7', '8'];
+        let mut v = View {
+            tab_count: 1,
+            active_tab: 0,
+            chips: &chips,
+            active_chip: 0,
+            chip_first: 0,
+            reveal_chip: false,
+            pinned: &[],
+            active_pinned: None,
+            groups: &[],
+            tab_running: &[],
+            tab_titles: &[],
+            rail: false,
+            top_inset: 0.0,
+        };
+        // A 232px sidebar (as at the 240 default) fits six tiles of the nine (eight chips and
+        // the `+`).
+        let narrow = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: 232.0 * 2.0,
+            h: 800.0 * 2.0,
+        };
+        let row = |v: &View| super::chip_row(v, narrow, 2.0).expect("a chip row");
+        let inset = narrow.w - super::CHIP_INSET * 2.0;
+        let at_start = row(&v);
+        assert_eq!(at_start.tiles.len(), 6);
+        assert!(at_start.tiles.iter().all(|(_, t)| t.x + t.w <= inset));
+        assert_eq!(at_start.hidden, (false, true));
+        let paint = build(&v, narrow, 2.0, &theme, &mut m);
+        assert_eq!(paint.chip_first, Some(0));
+        assert!(paint
+            .labels
+            .iter()
+            .any(|l| l.text == super::CHIP_MORE_RIGHT));
+        assert!(paint.labels.iter().all(|l| l.text != super::CHIP_MORE_LEFT));
+        assert!(paint.labels.iter().all(|l| l.text != "8" && l.text != "+"));
+
+        // Scrolled two tiles: the first tile shown is chip 3, and clicks follow the scroll.
+        v.chip_first = 2;
+        let (i, t) = row(&v).tiles[0];
+        assert_eq!(i, 2);
+        let (cx, cy) = (t.x + t.w * 0.5, t.y + t.h * 0.5);
+        assert_eq!(hit(&v, narrow, 2.0, cx, cy), Some(Hit::Workspace(2)));
+        // The gutters are the row, not a chip.
+        assert_eq!(hit(&v, narrow, 2.0, 4.0, cy), Some(Hit::Chips));
+
+        // Scrolling past the end stops with the `+` as the last tile.
+        v.chip_first = 99;
+        let at_end = row(&v);
+        assert_eq!(at_end.first, 3);
+        assert_eq!(at_end.hidden, (true, false));
+        let (last, t) = *at_end.tiles.last().unwrap();
+        assert_eq!(last, chips.len());
+        let (cx, cy) = (t.x + t.w * 0.5, t.y + t.h * 0.5);
+        assert_eq!(hit(&v, narrow, 2.0, cx, cy), Some(Hit::AddWorkspace));
+
+        // Revealing an active chip off either side scrolls just far enough to show it.
+        v.active_chip = 7;
+        v.chip_first = 0;
+        v.reveal_chip = true;
+        assert_eq!(row(&v).first, 2);
+        v.active_chip = 1;
+        v.chip_first = 3;
+        assert_eq!(row(&v).first, 1);
+        // A row that fits never scrolls.
+        let wide = PxRect {
+            w: 400.0 * 2.0,
+            ..narrow
+        };
+        v.chip_first = 3;
+        let fits = super::chip_row(&v, wide, 2.0).unwrap();
+        assert_eq!(
+            (fits.first, fits.tiles.len(), fits.hidden),
+            (0, 9, (false, false))
         );
     }
 

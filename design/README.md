@@ -82,6 +82,17 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-02 - **The workspace chip row scrolls sideways.** User request: scroll
+  sideways through the workspaces. Chips that do not fit the sidebar are hidden; before this
+  they ran past the panel edge. The default 240px sidebar shows six tiles, the `+` included.
+  The row scrolls by whole tiles, like Skelly's other lists, so no tile is cut in half. A
+  sideways swipe or a mouse wheel over the row steps it: one tile per wheel line, or per
+  tile-width of trackpad travel. A faint `‹` / `›` (`fg.faint`) sits in the gutter on a side
+  with hidden tiles. The `+` stays the last tile, so it can scroll out of view. A workspace
+  that becomes active, however that happens, scrolls into view. The scroll is view state
+  only, like a list's scroll, so it has no config key.
+  _(was: the row did not scroll, and with six or more workspaces the last tiles were cut off)_
+
 - 2026-11-02 - **Settings has a close button.** User request: close settings with a click,
   not only with Esc. A 28px square button with the guide's `close` icon sits at the right end
   of the settings header, and the `esc to close` hint moves to its left. The icon is drawn as

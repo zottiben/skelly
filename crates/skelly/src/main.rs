@@ -718,6 +718,14 @@ struct App {
     workspaces: Vec<Workspace>,
     /// Index of the active workspace in `workspaces`.
     active_workspace: usize,
+    /// The workspace-chip row's scroll: its first tile shown, as the last sidebar build settled
+    /// it.
+    chip_first: usize,
+    /// The active workspace the chip row last scrolled into view; a different one is revealed
+    /// on the next build, however it became active.
+    chip_seen: Option<usize>,
+    /// Sideways trackpad travel over the chip row not yet a whole tile, physical px.
+    chip_swipe: f64,
     /// Current surface size in physical px.
     size: (u32, u32),
     scale: f64,
@@ -868,6 +876,9 @@ impl App {
                 stash: None,
             }],
             active_workspace: 0,
+            chip_first: 0,
+            chip_seen: None,
+            chip_swipe: 0.0,
             size: (0, 0),
             scale: 1.0,
             modifiers: ModifiersState::empty(),
@@ -2297,6 +2308,8 @@ impl App {
                 .unwrap_or(usize::MAX),
             chips: &chips,
             active_chip: self.active_workspace,
+            chip_first: self.chip_first,
+            reveal_chip: self.chip_seen != Some(self.active_workspace),
             pinned: &pinned_glyphs,
             active_pinned: layout.pinned.iter().position(|&i| i == self.active),
             groups: &groups,
@@ -2311,7 +2324,12 @@ impl App {
             w: self.sidebar_width_px(),
             h: dim_f32(self.size.1),
         };
-        sidebar::build(&view, panel, scale, &self.theme, &mut self.measure)
+        let paint = sidebar::build(&view, panel, scale, &self.theme, &mut self.measure);
+        if let Some(first) = paint.chip_first {
+            self.chip_first = first;
+            self.chip_seen = Some(self.active_workspace);
+        }
+        paint
     }
 
     /// Lay out the settings view: a full-window panel, its nav + control grid rendered
@@ -3240,6 +3258,8 @@ impl App {
                 .unwrap_or(usize::MAX),
             chips: &chips,
             active_chip: self.active_workspace,
+            chip_first: self.chip_first,
+            reveal_chip: false,
             pinned: &pinned_glyphs,
             active_pinned: layout.pinned.iter().position(|&i| i == self.active),
             groups: &groups,
@@ -6061,6 +6081,7 @@ impl App {
                     match hit {
                         sidebar::Hit::Workspace(index) => self.switch_workspace(index),
                         sidebar::Hit::AddWorkspace => self.add_workspace(),
+                        sidebar::Hit::Chips => {}
                         sidebar::Hit::CommandInput => self.open_palette(),
                         // `sidebar_hit` maps a pinned-tile hit to `Tab`, so `Pinned` is
                         // unreachable here; both just activate the tab defensively. A press also
@@ -6388,6 +6409,18 @@ impl App {
         }
     }
 
+    /// Step the workspace-chip row sideways by a wheel or trackpad `delta` over it (see
+    /// [`chip_steps`]); the next sidebar build clamps the scroll to the row.
+    fn scroll_chips(&mut self, delta: MouseScrollDelta) {
+        let tile = f64::from(sidebar::CHIP_STEP) * self.scale;
+        let steps = chip_steps(delta, &mut self.chip_swipe, tile);
+        if steps != 0 {
+            let steps = isize::try_from(steps).unwrap_or(0);
+            self.chip_first = self.chip_first.saturating_add_signed(steps);
+            self.request_redraw();
+        }
+    }
+
     /// Scroll the scrollback of the pane under the pointer by a wheel `delta`.
     fn on_mouse_wheel(&mut self, delta: MouseScrollDelta) {
         // A scroll during an overlay's fade-out dismisses it rather than scrolling the pane
@@ -6406,6 +6439,13 @@ impl App {
                 self.settings.scroll_rows(lines);
                 self.request_redraw();
             }
+            return;
+        }
+        if matches!(
+            self.sidebar_hit(),
+            Some(sidebar::Hit::Workspace(_) | sidebar::Hit::AddWorkspace | sidebar::Hit::Chips)
+        ) {
+            self.scroll_chips(delta);
             return;
         }
         if lines == 0 {
@@ -7575,6 +7615,32 @@ fn wheel_lines(delta: f64) -> i32 {
     delta.round() as i32
 }
 
+/// The chip tiles a wheel or trackpad `delta` steps the workspace-chip row, along the gesture's
+/// dominant axis: one per wheel line, or one per `tile` px of trackpad travel, carrying the rest
+/// in `swipe` (dropped when the direction turns). Winit's positive deltas reveal what lies left
+/// (or above), so they step back (negative); the result steps forward through later chips.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a whole number of tiles from a small gesture"
+)]
+fn chip_steps(delta: MouseScrollDelta, swipe: &mut f64, tile: f64) -> i32 {
+    let dominant = |x: f64, y: f64| if x.abs() > y.abs() { x } else { y };
+    let back = match delta {
+        MouseScrollDelta::LineDelta(x, y) => wheel_lines(dominant(f64::from(x), f64::from(y))),
+        MouseScrollDelta::PixelDelta(pos) => {
+            let travel = dominant(pos.x, pos.y);
+            if travel.signum() != swipe.signum() {
+                *swipe = 0.0;
+            }
+            *swipe += travel;
+            let whole = (*swipe / tile).trunc();
+            *swipe -= whole * tile;
+            whole as i32
+        }
+    };
+    -back
+}
+
 /// Cast a DPI scale factor to `f32`. Sub-pixel precision loss is irrelevant here.
 #[allow(
     clippy::cast_possible_truncation,
@@ -8055,14 +8121,14 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt, changed_since, clipboard_action, csi_edit, cursor_key, cursor_navigation_shortcut,
-        cycle_index, dim, dirty_stats, edit_text, editor_filetype, editor_mode, enter_bytes,
-        index_after_close, interval_ms, kitty_csi, kitty_modifier_code, order, overlay_panel_top,
-        overlay_rise_offset, pane_action, pane_dims, panic_message, parse_chord, pointer_cell_in,
-        poll_wait, process_name, resolve_cell, selection_cells, selection_text, shell_escape_path,
-        super_chord, tab_action, take_group, take_tab, ungroup, xterm_modifier_code,
-        ClipboardAction, Duration, Instant, PaneAction, Selection, SuperChord, Tab, TabAction,
-        TabGroup,
+        adopt, changed_since, chip_steps, clipboard_action, csi_edit, cursor_key,
+        cursor_navigation_shortcut, cycle_index, dim, dirty_stats, edit_text, editor_filetype,
+        editor_mode, enter_bytes, index_after_close, interval_ms, kitty_csi, kitty_modifier_code,
+        order, overlay_panel_top, overlay_rise_offset, pane_action, pane_dims, panic_message,
+        parse_chord, pointer_cell_in, poll_wait, process_name, resolve_cell, selection_cells,
+        selection_text, shell_escape_path, super_chord, tab_action, take_group, take_tab, ungroup,
+        xterm_modifier_code, ClipboardAction, Duration, Instant, PaneAction, Selection, SuperChord,
+        Tab, TabAction, TabGroup,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -8986,5 +9052,24 @@ mod tests {
         adopt(&mut tabs, &mut groups, titled_tabs(&[Some(1)]), None);
         assert_eq!(tabs.len(), 6);
         assert_eq!(tabs[5].group, None);
+    }
+
+    #[test]
+    fn chip_steps_follow_the_dominant_axis_and_carry_partial_swipes() {
+        use winit::dpi::PhysicalPosition;
+        use winit::event::MouseScrollDelta::{LineDelta, PixelDelta};
+        let mut swipe = 0.0;
+        // A wheel notch down (or a sideways one revealing the right) steps forward one tile.
+        assert_eq!(chip_steps(LineDelta(0.0, -1.0), &mut swipe, 66.0), 1);
+        assert_eq!(chip_steps(LineDelta(-2.0, 0.4), &mut swipe, 66.0), 2);
+        assert_eq!(chip_steps(LineDelta(0.0, 1.0), &mut swipe, 66.0), -1);
+        // Trackpad travel steps once per tile width, carrying the rest.
+        let px = |x, y| PixelDelta(PhysicalPosition::new(x, y));
+        assert_eq!(chip_steps(px(-40.0, 3.0), &mut swipe, 66.0), 0);
+        assert_eq!(chip_steps(px(-40.0, 0.0), &mut swipe, 66.0), 1);
+        assert!((swipe + 14.0).abs() < 1e-9);
+        // Turning back drops the carried travel instead of cancelling against it.
+        assert_eq!(chip_steps(px(70.0, 0.0), &mut swipe, 66.0), -1);
+        assert!((swipe - 4.0).abs() < 1e-9);
     }
 }
