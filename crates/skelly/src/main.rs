@@ -3290,7 +3290,7 @@ impl App {
         match action {
             sidebar::UtilAction::Settings => self.open_settings(),
             sidebar::UtilAction::Theme => {
-                self.apply_theme(skelly_render::toggled(&self.config.appearance.theme));
+                self.choose_theme(skelly_render::toggled(&self.config.appearance.theme));
             }
             sidebar::UtilAction::Timeline => self.toggle_timeline(),
             sidebar::UtilAction::Git => self.toggle_git_dock(),
@@ -3636,14 +3636,21 @@ impl App {
         self.request_redraw();
     }
 
-    /// Switch the active UI theme by name (the palette theme commands). Writes the
-    /// config (the source of truth, Hard rule 1) then repaints live.
+    /// Switch the active UI theme by name: set it in the in-memory config, then repaint live.
+    /// It does not save the file, so onboarding can preview a theme before the user starts.
     fn apply_theme(&mut self, name: &str) {
         if self.config.appearance.theme == name {
             return;
         }
         name.clone_into(&mut self.config.appearance.theme);
         self.set_theme_live();
+    }
+
+    /// Switch the theme from a command (a palette theme command or the sidebar toggle) and save
+    /// the config, as a settings edit does (the file is the source of truth, Hard rule 1).
+    fn choose_theme(&mut self, name: &str) {
+        self.apply_theme(name);
+        self.persist_config();
     }
 
     /// Open a new tab (its own pane tree + fresh shell) and switch to it.
@@ -5028,7 +5035,7 @@ impl App {
             Action::ShowGitDiff => self.toggle_git_dock(),
             Action::ShowTimeline => self.toggle_timeline(),
             Action::OpenSettings => self.open_settings(),
-            Action::Theme(name) => self.apply_theme(name),
+            Action::Theme(name) => self.choose_theme(name),
             Action::VoiceInsertClipboard => self.voice_insert_clipboard(),
             Action::VoiceDictation => self.toggle_dictation(),
             Action::VoiceCancel => self.cancel_dictation("Dictation cancelled"),
