@@ -359,7 +359,7 @@ fn changes_read_staged_unstaged_and_untracked_work_against_head() {
     std::fs::write(root.join("new/blob"), [0_u8, 159, 146, 150]).expect("write blob");
 
     let repo = Repo::discover(root).expect("discover").expect("in a repo");
-    let changes = repo.changes().expect("changes");
+    let changes = repo.changes(None).expect("changes");
     let paths: Vec<&str> = changes.iter().map(|c| c.path.to_str().unwrap()).collect();
     assert_eq!(paths, ["f.txt", "gone.txt", "new/a b.txt", "new/blob"]);
 
@@ -377,7 +377,7 @@ fn changes_read_staged_unstaged_and_untracked_work_against_head() {
     assert_eq!(changes[3].skipped, Some(Skipped::Binary));
 
     // Reading changes nothing: the same call gives the same fingerprints.
-    let again = repo.changes().expect("changes again");
+    let again = repo.changes(None).expect("changes again");
     assert_eq!(again, changes);
 }
 
@@ -390,7 +390,7 @@ fn changes_in_a_repository_with_no_commits_are_against_nothing() {
     git(root, &["add", "."]);
     std::fs::write(root.join("loose.txt"), "b\n").expect("write");
     let repo = Repo::discover(root).expect("discover").expect("in a repo");
-    let changes = repo.changes().expect("changes");
+    let changes = repo.changes(None).expect("changes");
     let kinds: Vec<(&str, FileStatus)> = changes
         .iter()
         .map(|c| (c.path.to_str().unwrap(), c.status))
@@ -430,7 +430,7 @@ fn toggle_hunk_stages_what_is_unstaged_then_unstages_what_is_staged() {
 
     let repo = Repo::discover(root).expect("discover").expect("in a repo");
     let f = Path::new("f.txt");
-    let against_head = repo.changes().expect("changes").remove(0).diff;
+    let against_head = repo.changes(None).expect("changes").remove(0).diff;
     let (staged_part, unstaged_part) = (&against_head.hunks[0], &against_head.hunks[1]);
 
     // The line-3 hunk is already staged, so toggling it unstages it.
@@ -480,4 +480,119 @@ fn init_creates_a_repository_that_discovers() {
     assert!(Repo::discover(root).expect("discover runs").is_some());
     let status = repo.status().expect("status runs on a fresh repo");
     assert!(status.files.is_empty(), "a fresh repo has no changes");
+}
+
+/// Run `git -C <root> <args>` in a config-isolated environment and return its trimmed stdout.
+fn git_out(root: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("run git");
+    assert!(out.status.success(), "git {args:?} failed");
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+#[test]
+fn a_branch_review_keeps_committed_work_against_where_the_branch_began() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    git(root, &["init", "-b", "main"]);
+    std::fs::write(root.join("a.txt"), numbered(|_| None)).expect("write a");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "init", "--no-gpg-sign"]);
+    let fork = git_out(root, &["rev-parse", "HEAD"]);
+
+    // The branch commits two changes, then leaves a third uncommitted.
+    git(root, &["checkout", "-q", "-b", "feat"]);
+    std::fs::write(
+        root.join("a.txt"),
+        numbered(|n| (n == 3).then_some("line 3 committed")),
+    )
+    .expect("edit a");
+    std::fs::write(root.join("b.txt"), "new\n").expect("write b");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "feat", "--no-gpg-sign"]);
+    std::fs::write(
+        root.join("a.txt"),
+        numbered(|n| match n {
+            3 => Some("line 3 committed"),
+            18 => Some("line 18 uncommitted"),
+            _ => None,
+        }),
+    )
+    .expect("edit a again");
+
+    let repo = Repo::discover(root).expect("discover").expect("in a repo");
+    let before = (
+        git_out(root, &["rev-parse", "HEAD"]),
+        std::fs::read(root.join(".git/index")).expect("index"),
+    );
+    assert_eq!(repo.base_branch().as_deref(), Some("main"));
+    assert_eq!(repo.merge_base("main").expect("merge-base"), fork);
+
+    let uncommitted = repo.changes(None).expect("changes");
+    let paths: Vec<&str> = uncommitted
+        .iter()
+        .map(|c| c.path.to_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["a.txt"], "the commit is gone from HEAD's view");
+    assert_eq!(uncommitted[0].diff.hunks.len(), 1);
+
+    let branch = repo.changes(Some(&fork)).expect("branch changes");
+    let kinds: Vec<(&str, FileStatus)> = branch
+        .iter()
+        .map(|c| (c.path.to_str().unwrap(), c.status))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("a.txt", FileStatus::Modified),
+            ("b.txt", FileStatus::Added)
+        ]
+    );
+    assert_eq!(
+        branch[0].diff.hunks.len(),
+        2,
+        "the committed and the uncommitted edit, together"
+    );
+    assert_ne!(
+        branch[0].fingerprint, uncommitted[0].fingerprint,
+        "a different change reads as a different change"
+    );
+
+    // A remote's default branch wins over the local one.
+    git(root, &["update-ref", "refs/remotes/origin/main", &fork]);
+    assert_eq!(repo.base_branch().as_deref(), Some("origin/main"));
+    git(root, &["update-ref", "refs/remotes/origin/trunk", &fork]);
+    git(
+        root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/trunk",
+        ],
+    );
+    assert_eq!(repo.base_branch().as_deref(), Some("origin/trunk"));
+
+    let after = (
+        git_out(root, &["rev-parse", "HEAD"]),
+        std::fs::read(root.join(".git/index")).expect("index"),
+    );
+    assert_eq!(before, after, "reading a branch review moves nothing");
+}
+
+#[test]
+fn a_repository_without_main_or_master_has_no_base_branch() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    git(root, &["init", "-b", "trunk"]);
+    std::fs::write(root.join("a.txt"), "a\n").expect("write a");
+    git(root, &["add", "."]);
+    git(root, &["commit", "-m", "init", "--no-gpg-sign"]);
+    let repo = Repo::discover(root).expect("discover").expect("in a repo");
+    assert_eq!(repo.base_branch(), None);
 }

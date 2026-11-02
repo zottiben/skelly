@@ -36,6 +36,7 @@ fn anchor(side: Side, line: u32, text: &str) -> Anchor {
         line,
         line_end: line,
         text: text.to_owned(),
+        base: None,
     }
 }
 
@@ -95,7 +96,7 @@ fn comments_are_located_on_both_sides_and_never_touch_the_repository() {
         .unwrap();
 
     let saved = store.load().unwrap();
-    let located = review::locate(&repo, saved.threads());
+    let located = review::locate(&repo, None, saved.threads());
     let at = |id: u64| {
         located
             .iter()
@@ -127,4 +128,68 @@ fn comments_are_located_on_both_sides_and_never_touch_the_repository() {
     );
     assert_eq!(before, after, "the review never touches the repository");
     assert!(store.path().starts_with(dir.path().join("state/reviews")));
+}
+
+#[test]
+fn a_removed_line_from_a_branch_review_is_located_where_the_branch_began() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path().join("app");
+    std::fs::create_dir_all(root.join("src")).expect("mkdir");
+    git(&root, &["init", "-q", "-b", "main"]);
+    std::fs::write(
+        root.join("src/lib.rs"),
+        "fn a() {}\nfn old() {}\nfn c() {}\n",
+    )
+    .unwrap();
+    git(&root, &["add", "."]);
+    git(&root, &["commit", "-q", "-m", "init", "--no-gpg-sign"]);
+    // The branch removes `old` in a commit, so HEAD no longer has it.
+    git(&root, &["checkout", "-q", "-b", "feat"]);
+    std::fs::write(root.join("src/lib.rs"), "fn a() {}\nfn c() {}\n").unwrap();
+    git(&root, &["commit", "-q", "-am", "drop old", "--no-gpg-sign"]);
+    let repo = Repo::discover(&root).unwrap().expect("a repo");
+    let fork = repo.merge_base("main").expect("merge-base");
+
+    let store = ReviewStore::open(&dir.path().join("state/reviews"), repo.root());
+    store
+        .update(|r| {
+            let mut removed = anchor(Side::Old, 2, "fn old() {}");
+            removed.base = Some(fork.clone());
+            r.comment(Some(removed), Author::Human, "why?", 1)?;
+            r.comment(
+                Some(anchor(Side::Old, 2, "fn old() {}")),
+                Author::Human,
+                "and here?",
+                1,
+            )
+        })
+        .unwrap();
+    let saved = store.load().unwrap();
+    let at = |old: Option<&str>| -> Vec<Location> {
+        review::locate(&repo, old, saved.threads())
+            .iter()
+            .map(|l| l.location)
+            .collect()
+    };
+    assert_eq!(
+        at(None),
+        [Location::At(2), Location::Outdated],
+        "each on the revision it was written against"
+    );
+    assert_eq!(
+        at(Some(&fork)),
+        [Location::At(2), Location::At(2)],
+        "the branch review shows both where the branch began"
+    );
+    assert_eq!(at(Some("HEAD")), [Location::Outdated, Location::Outdated]);
+
+    let located = review::locate(&repo, None, saved.threads());
+    let text = review::instructions(&located);
+    assert!(
+        text.contains(&format!(
+            "#1 src/lib.rs:2 in {}, before the change\n",
+            &fork[..12]
+        )),
+        "{text}"
+    );
 }

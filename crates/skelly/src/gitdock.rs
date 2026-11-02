@@ -3,11 +3,13 @@
 //! Opened with `⇧⌘G` and dismissed with `Esc`.
 //!
 //! It is where a person reviews what an agent changed, the way AI Team's review does: every
-//! changed file in one scroll against `HEAD` - staged or not, untracked files as added - each
-//! under a header that folds it, stages it, and marks it viewed; comment threads under the
-//! lines they are about; and a composer that opens under a line from its `+`. The agent reads
-//! the threads through `skelly review` and answers them there, and the dock shows the answers
-//! as they land. Staging by file or hunk and the commit box stay, the commit box at the foot.
+//! changed file in one scroll against `HEAD` - staged or not, untracked files as added - or,
+//! in the branch review, against where the branch left its base branch, so committed work
+//! stays in it. Each file is under a header that folds it, stages it, and marks it viewed;
+//! comment threads sit under the lines they are about; and a composer opens under a line from
+//! its `+`. The agent reads the threads through `skelly review` and answers them there, and the
+//! dock shows the answers as they land. Staging by file or hunk and the commit box stay, the
+//! commit box at the foot.
 //!
 //! This module is pure state + layout: it holds a [`Reading`] of the repository and builds a
 //! *proportional* display list (quads + positioned labels - chrome in IBM Plex Sans, code and
@@ -18,7 +20,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
-use skelly_session::review::{Anchor, Author, Location, Review, Side, Status as Open, Thread};
+use skelly_session::review::{
+    Anchor, Author, Location, Review, Scope, Side, Status as Open, Thread,
+};
 use skelly_session::{
     ChangedFile, DiffLine, FileChange, FileStatus, Hunk, LineKind, Skipped, Status,
 };
@@ -31,6 +35,15 @@ const PAD_X: f32 = 12.0;
 const PAD_TOP: f32 = 12.0;
 /// Status-bar row height.
 const STATUS_H: f32 = 26.0;
+/// The height of the row that picks what the review is against.
+const SCOPE_H: f32 = 30.0;
+/// That row's segmented control: the container's inner padding, a segment's height and
+/// horizontal padding, and the container's and a segment's radius (§09's control, compact).
+const SEG_PAD: f32 = 2.0;
+const SEG_H: f32 = 20.0;
+const SEG_PAD_X: f32 = 9.0;
+const SEG_RADIUS: f32 = 6.0;
+const SEG_ITEM_RADIUS: f32 = 4.0;
 /// Section-label (`CHANGED - N`) row height.
 const LABEL_H: f32 = 24.0;
 /// A file header's height.
@@ -92,15 +105,48 @@ enum Focus {
     Composer,
 }
 
+/// What a reading's changes are against.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Base {
+    /// The review it was read for.
+    pub(crate) scope: Scope,
+    /// The base branch a branch review is against; `None` against `HEAD`, which a branch
+    /// review falls back to when the repository has no base branch.
+    pub(crate) branch: Option<BaseBranch>,
+}
+
+impl Base {
+    /// The commit the changes are against, when it is not `HEAD`.
+    pub(crate) fn commit(&self) -> Option<&str> {
+        self.branch.as_ref().map(|b| b.commit.as_str())
+    }
+
+    /// The revision the old side of every change is.
+    pub(crate) fn old(&self) -> &str {
+        self.commit().unwrap_or("HEAD")
+    }
+}
+
+/// The branch a branch review is against, and where `HEAD` left it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BaseBranch {
+    /// Its name, as git shortens it (`origin/main`).
+    pub(crate) name: String,
+    /// The commit where `HEAD` left it: the old side of every change.
+    pub(crate) commit: String,
+}
+
 /// Everything the dock shows about a repository, read together so it is one consistent
-/// view: the status, every change against `HEAD`, and the review with where each thread is.
+/// view: the status, every change against the base, and the review with where each thread is.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct Reading {
     /// The repository's root.
     pub(crate) root: PathBuf,
     /// The working status (branch, ahead/behind, and what is staged).
     pub(crate) status: Status,
-    /// Every changed file against `HEAD`, untracked files included.
+    /// What the changes are against.
+    pub(crate) base: Base,
+    /// Every changed file against the base, untracked files included.
     pub(crate) changes: Vec<FileChange>,
     /// The review's threads and viewed marks, when the review could be read.
     pub(crate) review: Option<Review>,
@@ -133,6 +179,8 @@ pub(crate) enum Spot {
 pub(crate) enum Target {
     /// The empty state's "Init repo" button.
     Init,
+    /// A segment of the control that picks what the review is against.
+    Scope(Scope),
     /// A file's stage checkbox.
     Stage(String),
     /// A file header, which folds or unfolds it.
@@ -405,6 +453,11 @@ impl GitDock {
         self.error = Some(message);
     }
 
+    /// The review the dock shows: the uncommitted change, or the whole branch.
+    pub(crate) fn scope(&self) -> Scope {
+        self.data.base.scope
+    }
+
     /// The review's threads (none when it could not be read).
     fn threads(&self) -> &[Thread] {
         self.data.review.as_ref().map_or(&[], Review::threads)
@@ -445,10 +498,13 @@ impl GitDock {
 
     /// Whether `change` is marked viewed as it is now.
     fn viewed(&self, change: &FileChange) -> bool {
-        self.data
-            .review
-            .as_ref()
-            .is_some_and(|r| r.is_viewed(&change.path.to_string_lossy(), &change.fingerprint))
+        self.data.review.as_ref().is_some_and(|r| {
+            r.is_viewed(
+                self.scope(),
+                &change.path.to_string_lossy(),
+                &change.fingerprint,
+            )
+        })
     }
 
     /// The fingerprint a viewed mark on `path` is kept against.
@@ -644,6 +700,10 @@ impl GitDock {
             line: *line,
             line_end: *line,
             text,
+            base: match side {
+                Side::Old => self.data.base.commit().map(str::to_owned),
+                Side::New => None,
+            },
         };
         self.compose(Compose::Comment(anchor));
         self.cursor = Some(spot.clone());
@@ -969,7 +1029,13 @@ impl GitDock {
         let outline = self.outline();
         if !self.empty_paint(&ctx, measure, &outline, &mut out) {
             self.push_status_bar(&mut out, &ctx, measure, panel.y + PAD_TOP * scale);
-            let top = panel.y + (PAD_TOP + STATUS_H) * scale;
+            self.push_scope_row(
+                &mut out,
+                &ctx,
+                measure,
+                panel.y + (PAD_TOP + STATUS_H) * scale,
+            );
+            let top = panel.y + (PAD_TOP + STATUS_H + SCOPE_H) * scale;
             self.push_label_row(&mut out, &ctx, measure, top);
             let body = (
                 top + LABEL_H * scale,
@@ -988,7 +1054,8 @@ impl GitDock {
     }
 
     /// The empty / error states, each a centered message: no repo (with an Init button), a
-    /// git error, or nothing to review (with the status bar). `true` when it painted one.
+    /// git error, or nothing to review (with the status bar and the scope row, so the other
+    /// review is a click away). `true` when it painted one.
     fn empty_paint(
         &self,
         ctx: &GCtx,
@@ -1069,9 +1136,11 @@ impl GitDock {
             return false;
         }
         self.push_status_bar(out, ctx, measure, panel.y + PAD_TOP * scale);
-        let message = match &self.last_commit {
-            Some(sha) => format!("committed {sha} - press u to undo"),
-            None => "Working tree clean".to_owned(),
+        self.push_scope_row(out, ctx, measure, panel.y + (PAD_TOP + STATUS_H) * scale);
+        let message = match (&self.last_commit, &self.data.base.branch) {
+            (Some(sha), _) => format!("committed {sha} - press u to undo"),
+            (None, Some(branch)) => format!("No changes against {}", branch.name),
+            (None, None) => "Working tree clean".to_owned(),
         };
         push_centered(
             &mut out.labels,
@@ -1138,6 +1207,91 @@ impl GitDock {
             ctx.scale,
         ) - 10.0 * ctx.scale;
         push_counts(labels, measure, ctx, (added, removed), end, top, STATUS_H);
+    }
+
+    /// The row that picks what the review is against: an `Uncommitted` / `Branch` segmented
+    /// control (§09's tokens: a `bg.inset` container with a `border.subtle` ring, the chosen
+    /// segment on `bg.elevated`), and right-anchored what the changes are against.
+    fn push_scope_row(&self, out: &mut Out, ctx: &GCtx, measure: &mut TextMeasure, top: f32) {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let role = FontRole::Caption;
+        let line_h = measure.line_height(role);
+        let (pad, seg_h, seg_pad) = (SEG_PAD * scale, SEG_H * scale, SEG_PAD_X * scale);
+        let segments = [
+            ("Uncommitted", Scope::Uncommitted),
+            ("Branch", Scope::Branch),
+        ];
+        let widths = segments.map(|(text, _)| measure.width(text, role, None) + 2.0 * seg_pad);
+        let control = PxRect {
+            x: ctx.cx,
+            y: top + (SCOPE_H * scale - seg_h - 2.0 * pad) * 0.5,
+            w: widths.iter().sum::<f32>() + 2.0 * pad,
+            h: seg_h + 2.0 * pad,
+        };
+        push_ringed(
+            &mut out.quads,
+            control,
+            theme.border_subtle,
+            theme.bg_inset,
+            SEG_RADIUS * scale,
+            scale,
+        );
+        let mut x = control.x + pad;
+        for ((text, scope), w) in segments.into_iter().zip(widths) {
+            let target = Target::Scope(scope);
+            let chosen = scope == self.scope();
+            if chosen {
+                out.quads.push(ChromeQuad::rounded(
+                    PxRect {
+                        x,
+                        y: control.y + pad,
+                        w,
+                        h: seg_h,
+                    },
+                    theme.bg_elevated,
+                    SEG_ITEM_RADIUS * scale,
+                ));
+            }
+            let color = if chosen || self.hover.as_ref() == Some(&target) {
+                theme.fg_primary
+            } else {
+                theme.fg_secondary
+            };
+            out.labels.push(ProseLabel {
+                text: text.to_owned(),
+                x: x + seg_pad,
+                y: control.y + pad + (seg_h - line_h) * 0.5,
+                role,
+                color,
+                weight: None,
+                max_w: f32::MAX,
+            });
+            let rect = PxRect {
+                x,
+                y: control.y,
+                w,
+                h: control.h,
+            };
+            out.targets.push((rect, target));
+            x += w;
+        }
+        let base = &self.data.base;
+        let against = match (&base.branch, base.scope) {
+            (Some(branch), _) => format!("against {}", branch.name),
+            (None, Scope::Branch) => "no base branch - against HEAD".to_owned(),
+            (None, Scope::Uncommitted) => "against HEAD".to_owned(),
+        };
+        let left = control.x + control.w + 10.0 * scale;
+        let x = (ctx.cr - measure.width(&against, role, None)).max(left);
+        out.labels.push(ProseLabel {
+            text: against,
+            x,
+            y: top + (SCOPE_H * scale - line_h) * 0.5,
+            role,
+            color: theme.fg_muted,
+            weight: None,
+            max_w: (ctx.cr - x).max(1.0),
+        });
     }
 
     /// The label over the scroll: `CHANGED - N` and how many are viewed, with the open
@@ -1441,6 +1595,48 @@ impl GitDock {
         }
     }
 
+    /// A file header's stage checkbox at `x`, when `path` has uncommitted work. A file the
+    /// branch committed and has not changed since has nothing to stage, so it has none; the
+    /// caller keeps its column so the paths line up.
+    fn push_stage_check(
+        &self,
+        out: &mut Out,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        path: &str,
+        x: f32,
+        y: f32,
+    ) {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let Some(file) = self.status_of(path) else {
+            return;
+        };
+        let (check, color) = if file.staged {
+            ("[x]", theme.diff_add)
+        } else {
+            ("[ ]", theme.fg_muted)
+        };
+        push_row(
+            &mut out.labels,
+            measure,
+            check,
+            FontRole::Mono,
+            color,
+            x,
+            y,
+            FILE_HEAD_H,
+            scale,
+        );
+        let w = measure.width("[x]", FontRole::Mono, None);
+        let rect = PxRect {
+            x: x - 3.0 * scale,
+            y,
+            w: w + 6.0 * scale,
+            h: FILE_HEAD_H * scale,
+        };
+        out.targets.push((rect, Target::Stage(path.to_owned())));
+    }
+
     /// A file header: the stage checkbox, the fold caret, the status letter and path, then
     /// right-anchored the Viewed checkbox, the `+add -del` counts, and the comment count.
     fn paint_file_head(
@@ -1481,32 +1677,7 @@ impl GitDock {
         let change = section.change.map(|i| &self.data.changes[i]);
         let mut x = ctx.cx;
         if change.is_some() {
-            let staged = self.status_of(&section.path).is_some_and(|f| f.staged);
-            let (check, color) = if staged {
-                ("[x]", theme.diff_add)
-            } else {
-                ("[ ]", theme.fg_muted)
-            };
-            push_row(
-                &mut out.labels,
-                measure,
-                check,
-                FontRole::Mono,
-                color,
-                x,
-                y,
-                FILE_HEAD_H,
-                scale,
-            );
-            let w = measure.width("[x]", FontRole::Mono, None);
-            let target = Target::Stage(section.path.clone());
-            let rect = PxRect {
-                x: x - 3.0 * scale,
-                y,
-                w: w + 6.0 * scale,
-                h,
-            };
-            out.targets.push((rect, target));
+            self.push_stage_check(out, ctx, measure, &section.path, x, y);
             x += measure.width("[x] ", FontRole::Mono, None);
         }
         let caret = if section.folded {
@@ -1777,8 +1948,12 @@ impl GitDock {
             path: section.path.clone(),
             hunk: hi,
         };
-        let here = self.hover.as_ref() == Some(&target)
-            || self.cursor_hunk() == Some((section.path.clone(), hi));
+        // A branch hunk can mix committed and uncommitted lines, so hunks stage only in the
+        // uncommitted review.
+        let stageable = self.scope() == Scope::Uncommitted;
+        let here = stageable
+            && (self.hover.as_ref() == Some(&target)
+                || self.cursor_hunk() == Some((section.path.clone(), hi)));
         let staged = self
             .status_of(&section.path)
             .is_some_and(|f| f.staged && !f.unstaged);
@@ -1811,13 +1986,15 @@ impl GitDock {
                 scale,
             );
         }
-        let rect = PxRect {
-            x: hint_x - 6.0 * scale,
-            y,
-            w: ctx.cr - hint_x + 6.0 * scale,
-            h,
-        };
-        out.targets.push((rect, target));
+        if stageable {
+            let rect = PxRect {
+                x: hint_x - 6.0 * scale,
+                y,
+                w: ctx.cr - hint_x + 6.0 * scale,
+                h,
+            };
+            out.targets.push((rect, target));
+        }
     }
 
     /// One diff line: its add/del background, the `+` comment button when hovered or under

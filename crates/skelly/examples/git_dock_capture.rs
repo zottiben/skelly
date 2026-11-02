@@ -7,7 +7,8 @@
 //! `Repo::changes`, the threads from a `ReviewStore`, and where each thread is from
 //! `review::locate`. The second arg picks the theme (`ossein-light`), the third the state:
 //! `threads` (the default), `composer`, `scrolled` (a short window scrolled into a file, its
-//! header pinned), or `norepo` (the "Not a git repo" empty state).
+//! header pinned), `norepo` (the "Not a git repo" empty state), or - with the agent's change
+//! committed on a branch - `branch` (the branch review) or `committed` (the uncommitted one).
 //! Run: `cargo run -p skelly --example git_dock_capture -- git-dock.png [theme] [state]`.
 #![allow(
     clippy::cast_precision_loss,
@@ -21,12 +22,12 @@ mod gitdock;
 use std::path::Path;
 use std::process::Command;
 
-use gitdock::{GitDock, Reading, Spot};
+use gitdock::{Base, BaseBranch, GitDock, Reading, Spot};
 use skelly_config::Appearance;
 use skelly_render::{
     CaptureGitDock, CapturePane, Chrome, GridCell, PxRect, Srgb, TextMeasure, Theme,
 };
-use skelly_session::review::{self, Anchor, Author, ReviewStore, Side};
+use skelly_session::review::{self, Anchor, Author, ReviewStore, Scope, Side};
 use skelly_session::Repo;
 
 /// Logical dock width - mirrors the binary's default dock width (420, the guide's default).
@@ -104,7 +105,12 @@ fn main() {
     if state == "norepo" {
         dock.set_no_repo();
     } else {
-        dock.load(read(work.path()));
+        let (committed, scope) = match state.as_str() {
+            "branch" => (true, Scope::Branch),
+            "committed" => (true, Scope::Uncommitted),
+            _ => (false, Scope::Uncommitted),
+        };
+        dock.load(read(work.path(), committed, scope));
         dock.set_cursor(Spot::Line {
             path: "src/pane/tree.rs".to_owned(),
             side: Side::New,
@@ -178,9 +184,10 @@ fn main() {
     println!("wrote {path}");
 }
 
-/// Make a repository in `dir` with a commit and the agent's uncommitted changes, review them,
-/// and read it all the way the binary does.
-fn read(dir: &Path) -> Reading {
+/// Make a repository in `dir` with a commit and the agent's changes - its edit to the pane tree
+/// `committed` on a branch, or not - review them, and read it in `scope`'s review the way the
+/// binary does.
+fn read(dir: &Path, committed: bool, scope: Scope) -> Reading {
     let root = dir.join("repo");
     std::fs::create_dir_all(root.join("src/pane")).expect("repo dir");
     std::fs::create_dir_all(root.join("src/session")).expect("repo dir");
@@ -194,7 +201,14 @@ fn read(dir: &Path) -> Reading {
     std::fs::write(root.join("src/pane/tree.rs"), TREE_BEFORE).expect("write");
     repo.stage_all().expect("stage");
     repo.commit("Pane tree").expect("commit");
+    if committed {
+        git(&root, &["checkout", "-q", "-b", "feat/split-leaf"]);
+    }
     std::fs::write(root.join("src/pane/tree.rs"), TREE_AFTER).expect("write");
+    if committed {
+        repo.stage_all().expect("stage");
+        repo.commit("Split the focused leaf").expect("commit");
+    }
     std::fs::write(
         root.join("src/session/timeline.rs"),
         "/// A session's moments.\npub struct Timeline;\n",
@@ -211,6 +225,7 @@ fn read(dir: &Path) -> Reading {
                 line,
                 line_end: line,
                 text: text.to_owned(),
+                base: None,
             };
             let leaf = on(Side::New, 11, "        let leaf = self.focused_leaf();");
             review.comment(
@@ -243,14 +258,23 @@ fn read(dir: &Path) -> Reading {
         })
         .expect("review");
     let review = store.load().expect("load review");
-    let locations = review::locate(&repo, review.threads())
+    let branch = match scope {
+        Scope::Uncommitted => None,
+        Scope::Branch => repo.base_branch().map(|name| BaseBranch {
+            commit: repo.merge_base(&name).expect("merge-base"),
+            name,
+        }),
+    };
+    let base = Base { scope, branch };
+    let locations = review::locate(&repo, Some(base.old()), review.threads())
         .into_iter()
         .map(|located| located.location)
         .collect();
     Reading {
         root: repo.root().to_path_buf(),
         status: repo.status().expect("status"),
-        changes: repo.changes().expect("changes"),
+        changes: repo.changes(base.commit()).expect("changes"),
+        base,
         review: Some(review),
         locations,
         review_problem: None,

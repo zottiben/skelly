@@ -12,10 +12,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context as _};
 use serde::Serialize;
-use skelly_session::review::{self, Anchor, Author, Location, ReviewStore, Side, Status, Thread};
+use skelly_session::review::{
+    self, Anchor, Author, Location, ReviewStore, Scope, Side, Status, Thread,
+};
 use skelly_session::{GitError, Repo, Status as Working};
 
-use crate::gitdock::Reading;
+use crate::gitdock::{Base, BaseBranch, Reading};
 use crate::session_state;
 
 /// The review store for `repo`, under Skelly's state directory.
@@ -24,21 +26,23 @@ pub(crate) fn store_for(repo: &Repo) -> Option<ReviewStore> {
     Some(ReviewStore::open(&dir, repo.root()))
 }
 
-/// Read everything the git dock shows about `repo`, whose status is `status`: every change
-/// against `HEAD`, and the review with where each thread is now. A review that cannot be read
-/// leaves the changes to read, with why.
+/// Read everything the git dock shows about `repo`, whose status is `status`, in `scope`'s
+/// review: every change against `HEAD`, or against where the branch left its base branch, and
+/// the review with where each thread is now. A review that cannot be read leaves the changes
+/// to read, with why.
 ///
 /// # Errors
 /// [`GitError`] when git cannot list the changes.
-pub(crate) fn read(repo: &Repo, status: Working) -> Result<Reading, GitError> {
-    let changes = repo.changes()?;
+pub(crate) fn read(repo: &Repo, status: Working, scope: Scope) -> Result<Reading, GitError> {
+    let base = base(repo, scope);
+    let changes = repo.changes(base.commit())?;
     let (review, review_problem) = match store_for(repo).map(|store| store.load()) {
         Some(Ok(review)) => (Some(review), None),
         Some(Err(err)) => (None, Some(err.to_string())),
         None => (None, Some(NO_STATE_DIR.to_owned())),
     };
     let locations = review.as_ref().map_or_else(Vec::new, |review| {
-        review::locate(repo, review.threads())
+        review::locate(repo, Some(base.old()), review.threads())
             .into_iter()
             .map(|located| located.location)
             .collect()
@@ -46,11 +50,25 @@ pub(crate) fn read(repo: &Repo, status: Working) -> Result<Reading, GitError> {
     Ok(Reading {
         root: repo.root().to_path_buf(),
         status,
+        base,
         changes,
         review,
         locations,
         review_problem,
     })
+}
+
+/// What `scope`'s review of `repo` is against: in the branch review, where `HEAD` left the base
+/// branch, when the repository has one it shares history with; else `HEAD`.
+fn base(repo: &Repo, scope: Scope) -> Base {
+    let branch = match scope {
+        Scope::Uncommitted => None,
+        Scope::Branch => repo.base_branch().and_then(|name| {
+            let commit = repo.merge_base(&name).ok()?;
+            Some(BaseBranch { name, commit })
+        }),
+    };
+    Base { scope, branch }
 }
 
 /// Why there is nowhere to keep reviews.
@@ -204,7 +222,7 @@ fn list(repo: &Repo, store: &ReviewStore, all: bool, json: bool) -> anyhow::Resu
         .threads()
         .iter()
         .filter(|thread| all || thread.status == Status::Open);
-    let located = review::locate(repo, shown);
+    let located = review::locate(repo, None, shown);
     if json {
         let listed: Vec<Listed<'_>> = located
             .iter()
@@ -237,7 +255,7 @@ fn anchor(repo: &Repo, cwd: &Path, at: &str, side: Side) -> anyhow::Result<Ancho
         bail!("'{at}' is not <path>:<line> or <path>:<line>-<end>");
     };
     let path = repo_path(repo.root(), cwd, path)?;
-    let Some(source) = review::source(repo, &path, side) else {
+    let Some(source) = review::source(repo, &path, side, "HEAD") else {
         let place = match side {
             Side::Old => "at HEAD",
             Side::New => "in the working tree",
@@ -257,6 +275,7 @@ fn anchor(repo: &Repo, cwd: &Path, at: &str, side: Side) -> anyhow::Result<Ancho
         side,
         line,
         line_end,
+        base: None,
     })
 }
 
@@ -317,6 +336,84 @@ mod tests {
 
     fn args(list: &[&str]) -> Vec<String> {
         list.iter().map(ToString::to_string).collect()
+    }
+
+    /// Run git in `dir` with a fixed identity and none of the machine's config, for its output.
+    fn git(dir: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?} failed");
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// A clone of a repository whose default branch is `trunk`, on a branch `feat` with one
+    /// commit of its own, and that commit's parent - where it left `trunk`.
+    fn branched_clone(dir: &Path) -> (PathBuf, String) {
+        let seed = dir.join("seed");
+        std::fs::create_dir_all(&seed).unwrap();
+        git(&seed, &["init", "-q", "-b", "trunk"]);
+        std::fs::write(seed.join("a.txt"), "a\n").unwrap();
+        git(&seed, &["add", "."]);
+        git(&seed, &["commit", "-q", "-m", "init", "--no-gpg-sign"]);
+        let work = dir.join("work");
+        git(
+            dir,
+            &[
+                "clone",
+                "-q",
+                seed.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+        let fork = git(&work, &["rev-parse", "HEAD"]);
+        git(&work, &["checkout", "-q", "-b", "feat"]);
+        std::fs::write(work.join("a.txt"), "b\n").unwrap();
+        git(&work, &["commit", "-q", "-am", "feat", "--no-gpg-sign"]);
+        (work, fork)
+    }
+
+    #[test]
+    fn the_branch_review_is_against_where_the_branch_left_the_remote_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let (work, fork) = branched_clone(dir.path());
+        let repo = Repo::discover(&work).unwrap().unwrap();
+        let branch = base(&repo, Scope::Branch);
+        assert_eq!(
+            branch.branch,
+            Some(BaseBranch {
+                name: "origin/trunk".to_owned(),
+                commit: fork.clone(),
+            }),
+            "origin/HEAD names the base, whatever it is called"
+        );
+        assert_eq!(branch.commit(), Some(fork.as_str()));
+        assert_eq!(branch.old(), fork);
+        let uncommitted = base(&repo, Scope::Uncommitted);
+        assert_eq!(uncommitted.branch, None);
+        assert_eq!((uncommitted.commit(), uncommitted.old()), (None, "HEAD"));
+    }
+
+    #[test]
+    fn a_branch_with_no_history_in_common_with_its_base_reviews_against_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let (work, _) = branched_clone(dir.path());
+        git(&work, &["checkout", "-q", "--orphan", "lonely"]);
+        git(&work, &["commit", "-q", "-m", "alone", "--no-gpg-sign"]);
+        let repo = Repo::discover(&work).unwrap().unwrap();
+        let branch = base(&repo, Scope::Branch);
+        assert_eq!(branch.scope, Scope::Branch);
+        assert_eq!(branch.branch, None);
+        assert_eq!((branch.commit(), branch.old()), (None, "HEAD"));
     }
 
     #[test]

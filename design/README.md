@@ -82,6 +82,26 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-02 - **The git dock also reviews the branch against its base branch.** User
+  request: keep committed work reviewable after the human or an agent commits it. A row under
+  the status bar holds an `Uncommitted` / `Branch` segmented control (a `bg.inset` container
+  with a `border.subtle` ring, the chosen segment on `bg.elevated`) and, right-anchored, what
+  the review is against. `b` or a click switches it, and the choice is `[git] diff_against =
+  "head" | "branch"` (default `head`), also in Settings > Git as "Review". The branch review
+  is the working tree against `git merge-base HEAD <base>`, so it holds the branch's commits
+  and its uncommitted work together. The base is the branch `origin/HEAD` names, else the
+  first of `origin/main`, `main`, `origin/master`, `master` that exists (remote-tracking
+  first, since a local `main` is often stale). There is no per-repository override yet. With
+  no base branch, or no history shared with it, the branch review falls back to `HEAD` and
+  says so (`no base branch - against HEAD`); a clean branch review reads `No changes against
+  <base>`. A comment on a removed line in the branch review keeps the fork commit in its
+  anchor, so it is located in that commit wherever it is read; anchors without one count in
+  `HEAD` as before. Viewed marks are kept per review, since a file's change differs between
+  them. Staging stays in both reviews, but only for files with uncommitted work: a committed
+  file has no checkbox (its column is kept, so paths line up), and hunk staging is only in
+  the Uncommitted review, where a hunk is the change to the index.
+  _(was: the dock reviewed only the working tree against `HEAD`, so committed work left it)_
+
 - 2026-11-02 - **The ai-team palettes are Skelly themes.** User request: copy all the themes
   from the ai-team project. Its six families join Ossein, each with a dark and a light variant:
   Vice City (`vice-city`, `vice-city-light`), Gruvbox (`gruvbox`), Tokyo Night (`tokyonight`),

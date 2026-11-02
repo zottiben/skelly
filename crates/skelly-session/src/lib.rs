@@ -177,14 +177,61 @@ impl Repo {
         Ok(diff::parse_unified_diff(&out))
     }
 
-    /// Every change in the working tree against `HEAD`, one [`FileChange`] per file: tracked
-    /// changes whether staged or not, then each untracked file as a file of added lines. In a
-    /// repository with no commits yet, everything is against the empty tree.
+    /// The branch a branch review measures this one against: the remote's default branch when
+    /// `origin/HEAD` names it, else `main`, else `master`. The remote-tracking branch comes
+    /// before the local one, because a stale local copy would count the commits the branch has
+    /// since taken in from upstream. `None` when the repository has none of them.
+    #[must_use]
+    pub fn base_branch(&self) -> Option<String> {
+        let exists = |name: &str| {
+            self.git_stdout(&[
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{name}^{{commit}}"),
+            ])
+            .is_ok()
+        };
+        if let Ok(target) = self.git_stdout(&[
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ]) {
+            let target = target.trim();
+            if !target.is_empty() && exists(target) {
+                return Some(target.to_owned());
+            }
+        }
+        ["main", "master"]
+            .into_iter()
+            .flat_map(|name| [format!("origin/{name}"), name.to_owned()])
+            .find(|name| exists(name))
+    }
+
+    /// The commit where `HEAD` and `other` last shared history: `git merge-base HEAD <other>`.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git merge-base` cannot be run or fails - including when the two
+    /// have no history in common.
+    pub fn merge_base(&self, other: &str) -> Result<String, GitError> {
+        Ok(self
+            .git_stdout(&["merge-base", "HEAD", other])?
+            .trim()
+            .to_owned())
+    }
+
+    /// Every change in the working tree against `base` (a commit), or against `HEAD` when it
+    /// is `None`, one [`FileChange`] per file: tracked changes whether staged or not, then each
+    /// untracked file as a file of added lines. Against `HEAD` in a repository with no commits
+    /// yet, everything is against the empty tree.
     ///
     /// # Errors
     /// Returns [`GitError`] if `git diff` or `git ls-files` cannot be run or fails.
-    pub fn changes(&self) -> Result<Vec<FileChange>, GitError> {
-        let base = if self
+    pub fn changes(&self, base: Option<&str>) -> Result<Vec<FileChange>, GitError> {
+        let base = if let Some(base) = base {
+            base.to_owned()
+        } else if self
             .git_stdout(&["rev-parse", "--verify", "--quiet", "HEAD"])
             .is_ok()
         {
@@ -208,6 +255,7 @@ impl Repo {
             "--src-prefix=a/",
             "--dst-prefix=b/",
             &base,
+            "--",
         ])?;
         let mut changes = changes::parse_patch(&patch);
         let others = self.git_stdout(&["ls-files", "--others", "--exclude-standard", "-z"])?;

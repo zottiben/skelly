@@ -116,6 +116,7 @@ fn anchor(path: &str, side: Side, line: u32, text: &str) -> Anchor {
         line,
         line_end: line,
         text: text.to_owned(),
+        base: None,
     }
 }
 
@@ -135,6 +136,7 @@ fn reading(changes: Vec<FileChange>, review: Review, locations: Vec<Location>) -
     Reading {
         root: ROOT.into(),
         status: status_for(&changes, &[]),
+        base: Base::default(),
         changes,
         review: Some(review),
         locations,
@@ -317,7 +319,12 @@ fn a_viewed_file_folds_until_it_changes_again_and_a_hand_fold_wins() {
     let dir = tempfile::tempdir().unwrap();
     let timeline = "src/session/timeline.rs";
     let review = review_in(dir.path(), |review| {
-        review.set_viewed(timeline, Some("src/session/timeline.rs@1"), &[timeline]);
+        review.set_viewed(
+            Scope::Uncommitted,
+            timeline,
+            Some("src/session/timeline.rs@1"),
+            &[timeline],
+        );
     });
     let mut dock = GitDock::new();
     dock.load(reading(sample_changes(), review.clone(), Vec::new()));
@@ -801,4 +808,168 @@ fn wrap_breaks_lines_at_newlines_words_and_inside_long_words() {
     assert!(lines
         .iter()
         .all(|l| measure.width(l, FontRole::Body, None) <= width + 0.01));
+}
+
+/// The fork point the branch-review tests read against.
+const FORK: &str = "0123456789abcdef0123456789abcdef01234567";
+
+/// A branch review of the sample changes, against `origin/main`, where only the tree is still
+/// uncommitted: the branch committed the timeline and the logo.
+fn branch_reading(dir: &Path) -> Reading {
+    let changes = sample_changes();
+    let mut status = status_for(&changes, &[]);
+    status
+        .files
+        .retain(|f| f.path == Path::new("src/pane/tree.rs"));
+    Reading {
+        status,
+        base: Base {
+            scope: Scope::Branch,
+            branch: Some(BaseBranch {
+                name: "origin/main".to_owned(),
+                commit: FORK.to_owned(),
+            }),
+        },
+        ..reading(
+            changes,
+            sample_review(dir),
+            vec![Location::At(19), Location::At(19), Location::Whole],
+        )
+    }
+}
+
+#[test]
+fn the_scope_row_picks_the_review_and_says_what_it_is_against() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dock = sample_dock(dir.path());
+    let paint = built(&mut dock);
+    let shown = texts(&paint);
+    for text in ["Uncommitted", "Branch", "against HEAD"] {
+        assert!(shown.contains(&text), "{text} in {shown:?}");
+    }
+    for scope in [Scope::Uncommitted, Scope::Branch] {
+        let (x, y) = center(rect_of(&dock, &Target::Scope(scope)));
+        assert_eq!(dock.target_at(x, y), Some(Target::Scope(scope)));
+    }
+    let uncommitted = rect_of(&dock, &Target::Scope(Scope::Uncommitted));
+    let branch = rect_of(&dock, &Target::Scope(Scope::Branch));
+    assert!(uncommitted.x + uncommitted.w <= branch.x, "side by side");
+
+    dock.load(branch_reading(dir.path()));
+    assert_eq!(dock.scope(), Scope::Branch);
+    assert!(texts(&built(&mut dock)).contains(&"against origin/main"));
+
+    dock.load(Reading {
+        base: Base {
+            scope: Scope::Branch,
+            branch: None,
+        },
+        ..branch_reading(dir.path())
+    });
+    assert!(texts(&built(&mut dock)).contains(&"no base branch - against HEAD"));
+}
+
+#[test]
+fn the_branch_review_stages_no_hunks_and_no_file_with_nothing_uncommitted() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dock = GitDock::new();
+    dock.open();
+    dock.load(branch_reading(dir.path()));
+    dock.set_cursor(line_spot_at("src/pane/tree.rs", Side::New, 19));
+    let paint = built(&mut dock);
+    let stage: Vec<&Target> = dock
+        .targets
+        .iter()
+        .map(|(_, t)| t)
+        .filter(|t| matches!(t, Target::Stage(_)))
+        .collect();
+    assert_eq!(
+        stage,
+        [&Target::Stage("src/pane/tree.rs".to_owned())],
+        "only the file with uncommitted work"
+    );
+    assert!(dock
+        .targets
+        .iter()
+        .all(|(_, t)| !matches!(t, Target::Hunk { .. })));
+    assert!(
+        texts(&paint).iter().all(|t| !t.starts_with("stage ")),
+        "no hunk hint under the cursor"
+    );
+    let path_x = |path: &str| paint.labels.iter().find(|l| l.text == path).unwrap().x;
+    assert!(
+        (path_x("src/pane/tree.rs") - path_x("src/session/timeline.rs")).abs() < 1e-3,
+        "the paths line up with or without a checkbox"
+    );
+}
+
+#[test]
+fn a_removed_line_in_the_branch_review_is_on_the_file_where_the_branch_began() {
+    let dir = tempfile::tempdir().unwrap();
+    let tree = "src/pane/tree.rs";
+    let mut dock = GitDock::new();
+    dock.load(branch_reading(dir.path()));
+    assert!(dock.start_comment(&line_spot_at(tree, Side::Old, 19)));
+    dock.compose_text("why?");
+    let mut expected = anchor(tree, Side::Old, 19, "    self.root.grow(dir);");
+    expected.base = Some(FORK.to_owned());
+    assert_eq!(dock.composed().unwrap().0, Compose::Comment(expected));
+
+    assert!(dock.start_comment(&line_spot_at(tree, Side::New, 19)));
+    let Some((Compose::Comment(added), _)) = dock.composed() else {
+        panic!("a comment");
+    };
+    assert_eq!(
+        added.base, None,
+        "the new side is the file on disk in both reviews"
+    );
+}
+
+#[test]
+fn each_review_keeps_its_own_viewed_marks() {
+    let dir = tempfile::tempdir().unwrap();
+    let timeline = "src/session/timeline.rs";
+    let review = review_in(dir.path(), |review| {
+        review.set_viewed(
+            Scope::Branch,
+            timeline,
+            Some("src/session/timeline.rs@1"),
+            &[timeline],
+        );
+    });
+    let mut dock = GitDock::new();
+    dock.load(Reading {
+        review: Some(review.clone()),
+        ..branch_reading(dir.path())
+    });
+    assert!(dock.is_viewed(timeline));
+    dock.load(reading(sample_changes(), review, Vec::new()));
+    assert!(
+        !dock.is_viewed(timeline),
+        "not read in the uncommitted review"
+    );
+}
+
+#[test]
+fn an_empty_branch_review_names_its_base_and_keeps_the_scope_row() {
+    let (dir, empty) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut dock = GitDock::new();
+    dock.load(Reading {
+        changes: Vec::new(),
+        review: Some(review_in(empty.path(), |_| {})),
+        locations: Vec::new(),
+        ..branch_reading(dir.path())
+    });
+    let paint = built(&mut dock);
+    assert!(texts(&paint).contains(&"No changes against origin/main"));
+    let _ = rect_of(&dock, &Target::Scope(Scope::Uncommitted));
+
+    dock.load(reading(
+        Vec::new(),
+        review_in(empty.path(), |_| {}),
+        Vec::new(),
+    ));
+    let paint = built(&mut dock);
+    assert!(texts(&paint).contains(&"Working tree clean"));
+    let _ = rect_of(&dock, &Target::Scope(Scope::Branch));
 }

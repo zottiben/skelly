@@ -105,10 +105,19 @@ on a line, ask the agent to read your comments, and see its answers appear under
 4. The agent makes the changes, then resolves each comment with a note. The dock updates
    while it works: the note shows under your comment, and the comment is marked resolved.
 
+When you or the agent commit the work, it leaves the **Uncommitted** review. Click
+**Branch** at the top of the dock (or press **b**) to review the branch instead: every
+change since the branch left its base branch, committed or not. The base branch is the
+one `origin/HEAD` names, else `origin/main`, `main`, `origin/master` or `master`, and the
+dock shows it next to the control. A comment on a removed line in this review is on the
+file where the branch began. Skelly remembers the choice as `[git] diff_against` in
+`config.toml`.
+
 In the dock, **↑/↓** move between rows, **⇧↑/⇧↓** between files and **[ / ]** between
 hunks. **↩** folds a file or opens the composer on a line or comment. **v** marks a file
 viewed and folds it until it changes again, **r** resolves or reopens a comment, and
-**⌫** deletes one. **Space** stages a file, **⌘↩** stages one hunk, **a** stages
+**⌫** deletes one. **b** switches between the Uncommitted and Branch reviews. **Space**
+stages a file, **⌘↩** stages one hunk (in the Uncommitted review), **a** stages
 everything, **Tab** moves to the commit message, and **u** undoes the last commit.
 
 The comments are kept outside the repository, one file per repository, and the dock never

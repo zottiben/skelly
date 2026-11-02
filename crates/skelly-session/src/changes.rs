@@ -1,7 +1,8 @@
-//! Every change in the working tree against `HEAD`, file by file - what a review reads.
+//! Every change in the working tree against a base - `HEAD`, or where the branch left its base
+//! branch - file by file: what a review reads.
 //!
 //! The dock's review shows the whole change an agent made in one scroll, staged or not, so
-//! it reads one `git diff` against `HEAD` for every tracked file at once and splits it here
+//! it reads one `git diff` against the base for every tracked file at once and splits it here
 //! ([`parse_patch`]), then adds each untracked file as a file of added lines
 //! ([`untracked`]): to the person reviewing, a file the agent created is part of the change
 //! whether or not anyone has run `git add` on it. Parsing is pure, like [`crate::diff`], so it
@@ -31,7 +32,7 @@ pub enum Skipped {
     Unreadable,
 }
 
-/// One file's change against `HEAD`, as a review shows it.
+/// One file's change against the review's base, as a review shows it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileChange {
     /// The file, relative to the repository root.
@@ -40,7 +41,7 @@ pub struct FileChange {
     pub orig_path: Option<PathBuf>,
     /// The kind of change; [`FileStatus::Untracked`] for a file git does not track yet.
     pub status: FileStatus,
-    /// Its lines against `HEAD`. Empty when they are skipped or only the mode changed.
+    /// Its lines against the base. Empty when they are skipped or only the mode changed.
     pub diff: FileDiff,
     /// Why its lines are not shown, if they are not.
     pub skipped: Option<Skipped>,

@@ -11,8 +11,9 @@
 //! `skelly review` command an agent runs are separate processes changing the same file, so
 //! every change is a read-modify-write under an exclusive lock, landed with an atomic rename.
 //!
-//! A comment is anchored to one side of the change - the file at `HEAD` ([`Side::Old`]) or the
-//! file on disk ([`Side::New`]) - a line range, and the text of its first line. The agent
+//! A comment is anchored to one side of the change - the file before it ([`Side::Old`]: at
+//! `HEAD`, or where the branch began for a comment made in a branch review) or the file on disk
+//! ([`Side::New`]) - a line range, and the text of its first line. The agent
 //! edits the very file the comment is on, so a line number alone goes stale:
 //! [`Anchor::locate`] follows the text when it moved somewhere unambiguous, and reports the
 //! comment outdated when it cannot.
@@ -59,7 +60,8 @@ pub enum ReviewError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
-    /// The file at `HEAD`, before the change: a comment on a removed line.
+    /// The file before the change - at `HEAD`, or at the anchor's [`Anchor::base`]: a comment
+    /// on a removed line.
     Old,
     /// The file on disk now.
     New,
@@ -109,9 +111,19 @@ pub struct Anchor {
     pub line_end: u32,
     /// What the first line read when the comment was written.
     pub text: String,
+    /// The commit the old side counts in, when it is not `HEAD`: a comment on a removed line,
+    /// made while reviewing the whole branch, is on the file where the branch began.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 impl Anchor {
+    /// The revision the old side counts in: [`Self::base`], else `HEAD`.
+    #[must_use]
+    pub fn old(&self) -> &str {
+        self.base.as_deref().unwrap_or("HEAD")
+    }
+
     /// Where the anchored lines start in `source`, the text of the anchor's side now.
     ///
     /// The line it was written on when that still reads the same; otherwise the one line
@@ -186,6 +198,17 @@ impl Thread {
     }
 }
 
+/// Which review a viewed mark is on. A file's change reads differently against `HEAD` and
+/// against where the branch began, so each keeps its own marks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Scope {
+    /// The changes not committed yet, against `HEAD`.
+    #[default]
+    Uncommitted,
+    /// Everything the branch changed, committed or not, against where it left its base branch.
+    Branch,
+}
+
 /// Every thread on one repository, and which changed files the human has read.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Review {
@@ -193,9 +216,13 @@ pub struct Review {
     repo: PathBuf,
     next_id: u64,
     threads: Vec<Thread>,
-    /// The files marked viewed, each with the fingerprint of the change that was read.
+    /// The files marked viewed against `HEAD`, each with the fingerprint of the change that
+    /// was read.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     viewed: BTreeMap<String, String>,
+    /// The files marked viewed in the branch review, the same way.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    viewed_branch: BTreeMap<String, String>,
 }
 
 impl Review {
@@ -206,6 +233,7 @@ impl Review {
             next_id: 1,
             threads: Vec::new(),
             viewed: BTreeMap::new(),
+            viewed_branch: BTreeMap::new(),
         }
     }
 
@@ -314,23 +342,39 @@ impl Review {
         Ok(())
     }
 
-    /// Whether `path` is marked viewed as of the change with `fingerprint`. A mark made
-    /// against an earlier version of the change does not count.
+    /// Whether `path` is marked viewed in `scope`'s review as of the change with
+    /// `fingerprint`. A mark made against an earlier version of the change does not count.
     #[must_use]
-    pub fn is_viewed(&self, path: &str, fingerprint: &str) -> bool {
-        self.viewed
+    pub fn is_viewed(&self, scope: Scope, path: &str, fingerprint: &str) -> bool {
+        self.marks(scope)
             .get(path)
             .is_some_and(|seen| seen == fingerprint)
     }
 
-    /// Mark `path` viewed as of the change with `fingerprint`, or clear its mark (`None`).
-    /// Marks on files outside `changed` are dropped on the way: they describe changes that
-    /// are gone (committed, or undone).
-    pub fn set_viewed(&mut self, path: &str, fingerprint: Option<&str>, changed: &[&str]) {
-        self.viewed
-            .retain(|seen, _| seen != path && changed.contains(&seen.as_str()));
+    /// Mark `path` viewed in `scope`'s review as of the change with `fingerprint`, or clear its
+    /// mark (`None`). That review's marks on files outside `changed` are dropped on the way:
+    /// they describe changes that are gone (committed, or undone).
+    pub fn set_viewed(
+        &mut self,
+        scope: Scope,
+        path: &str,
+        fingerprint: Option<&str>,
+        changed: &[&str],
+    ) {
+        let marks = match scope {
+            Scope::Uncommitted => &mut self.viewed,
+            Scope::Branch => &mut self.viewed_branch,
+        };
+        marks.retain(|seen, _| seen != path && changed.contains(&seen.as_str()));
         if let Some(fingerprint) = fingerprint {
-            self.viewed.insert(path.to_owned(), fingerprint.to_owned());
+            marks.insert(path.to_owned(), fingerprint.to_owned());
+        }
+    }
+
+    fn marks(&self, scope: Scope) -> &BTreeMap<String, String> {
+        match scope {
+            Scope::Uncommitted => &self.viewed,
+            Scope::Branch => &self.viewed_branch,
         }
     }
 
@@ -449,33 +493,47 @@ pub struct Located<'a> {
 }
 
 /// Locate `threads` in the repository as it is now, reading each file once per side: the
-/// file on disk for the new side, and `HEAD`'s copy (a read-only `git show`) for the old.
+/// file on disk for the new side, and for the old a read-only `git show` of revision `old` -
+/// or, when `old` is `None`, of the revision each comment's old side counts in
+/// ([`Anchor::old`]). A review on screen passes the revision it shows the changes against, so
+/// a comment sits on the line it is about there.
 #[must_use]
-pub fn locate<'a>(repo: &Repo, threads: impl IntoIterator<Item = &'a Thread>) -> Vec<Located<'a>> {
-    let mut sources: HashMap<(&str, Side), Option<String>> = HashMap::new();
+pub fn locate<'a>(
+    repo: &Repo,
+    old: Option<&str>,
+    threads: impl IntoIterator<Item = &'a Thread>,
+) -> Vec<Located<'a>> {
+    let mut sources: HashMap<(&str, Side, &str), Option<String>> = HashMap::new();
     threads
         .into_iter()
         .map(|thread| {
             let location = match &thread.anchor {
                 None => Location::Whole,
-                Some(anchor) => thread.locate(
-                    sources
-                        .entry((anchor.path.as_str(), anchor.side))
-                        .or_insert_with(|| source(repo, &anchor.path, anchor.side))
-                        .as_deref(),
-                ),
+                Some(anchor) => {
+                    let rev = match anchor.side {
+                        Side::New => "",
+                        Side::Old => old.unwrap_or_else(|| anchor.old()),
+                    };
+                    thread.locate(
+                        sources
+                            .entry((anchor.path.as_str(), anchor.side, rev))
+                            .or_insert_with(|| source(repo, &anchor.path, anchor.side, rev))
+                            .as_deref(),
+                    )
+                }
             };
             Located { thread, location }
         })
         .collect()
 }
 
-/// The text of `path` on `side` now, or `None` when it does not exist there.
+/// The text of `path` on `side` now, or `None` when it does not exist there: the file on disk
+/// for the new side, and revision `old`'s copy for the old one.
 #[must_use]
-pub fn source(repo: &Repo, path: &str, side: Side) -> Option<String> {
+pub fn source(repo: &Repo, path: &str, side: Side, old: &str) -> Option<String> {
     match side {
         Side::New => std::fs::read_to_string(repo.root().join(path)).ok(),
-        Side::Old => repo.git_stdout(&["show", &format!("HEAD:{path}")]).ok(),
+        Side::Old => repo.git_stdout(&["show", &format!("{old}:{path}")]).ok(),
     }
 }
 
@@ -525,7 +583,12 @@ fn write_thread(out: &mut String, located: &Located<'_>) {
                 let _ = write!(out, "-{end}");
             }
             if anchor.side == Side::Old {
-                out.push_str(" in HEAD, before the change");
+                let base = anchor.old();
+                let _ = write!(
+                    out,
+                    " in {}, before the change",
+                    base.get(..12).unwrap_or(base)
+                );
             }
             if located.location == Location::Outdated {
                 out.push_str(" - outdated: the line has changed since");
@@ -568,6 +631,7 @@ mod tests {
             line,
             line_end,
             text: text.to_owned(),
+            base: None,
         }
     }
 
@@ -667,6 +731,22 @@ mod tests {
         let text = written(&r, Location::At(5));
         assert!(
             text.contains("#1 a.rs:5 in HEAD, before the change\n"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn an_old_side_comment_from_a_branch_review_names_the_commit_it_counts_in() {
+        let mut r = review();
+        let mut removed = anchor("a.rs", 5, 5, "gone();");
+        removed.side = Side::Old;
+        removed.base = Some("0123456789abcdef0123456789abcdef01234567".to_owned());
+        assert_eq!(removed.old(), "0123456789abcdef0123456789abcdef01234567");
+        r.comment(Some(removed), Author::Human, "why remove this?", 1)
+            .unwrap();
+        let text = written(&r, Location::At(5));
+        assert!(
+            text.contains("#1 a.rs:5 in 0123456789ab, before the change\n"),
             "{text}"
         );
     }
@@ -787,15 +867,42 @@ mod tests {
     #[test]
     fn a_viewed_mark_holds_only_for_the_change_that_was_read() {
         let mut r = review();
-        r.set_viewed("a.rs", Some("f1"), &["a.rs", "b.rs"]);
-        r.set_viewed("b.rs", Some("f2"), &["a.rs", "b.rs"]);
-        assert!(r.is_viewed("a.rs", "f1"));
-        assert!(!r.is_viewed("a.rs", "f9"), "the file changed since");
-        r.set_viewed("b.rs", None, &["a.rs", "b.rs"]);
-        assert!(!r.is_viewed("b.rs", "f2"));
-        r.set_viewed("c.rs", Some("f3"), &["c.rs"]);
-        assert!(!r.is_viewed("a.rs", "f1"), "a.rs is no longer changed");
-        assert!(r.is_viewed("c.rs", "f3"));
+        let head = Scope::Uncommitted;
+        r.set_viewed(head, "a.rs", Some("f1"), &["a.rs", "b.rs"]);
+        r.set_viewed(head, "b.rs", Some("f2"), &["a.rs", "b.rs"]);
+        assert!(r.is_viewed(head, "a.rs", "f1"));
+        assert!(!r.is_viewed(head, "a.rs", "f9"), "the file changed since");
+        r.set_viewed(head, "b.rs", None, &["a.rs", "b.rs"]);
+        assert!(!r.is_viewed(head, "b.rs", "f2"));
+        r.set_viewed(head, "c.rs", Some("f3"), &["c.rs"]);
+        assert!(
+            !r.is_viewed(head, "a.rs", "f1"),
+            "a.rs is no longer changed"
+        );
+        assert!(r.is_viewed(head, "c.rs", "f3"));
+    }
+
+    #[test]
+    fn the_branch_review_keeps_its_own_viewed_marks() {
+        let mut r = review();
+        r.set_viewed(Scope::Branch, "a.rs", Some("whole"), &["a.rs", "b.rs"]);
+        r.set_viewed(Scope::Branch, "b.rs", Some("whole"), &["a.rs", "b.rs"]);
+        // Marking the uncommitted change, where only b.rs is changed, keeps the branch's marks.
+        r.set_viewed(Scope::Uncommitted, "b.rs", Some("part"), &["b.rs"]);
+        assert!(r.is_viewed(Scope::Branch, "a.rs", "whole"));
+        assert!(r.is_viewed(Scope::Branch, "b.rs", "whole"));
+        assert!(r.is_viewed(Scope::Uncommitted, "b.rs", "part"));
+        assert!(!r.is_viewed(Scope::Uncommitted, "a.rs", "whole"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ReviewStore::open(dir.path(), Path::new("/src/app"));
+        store
+            .update(|saved| {
+                *saved = r.clone();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(store.load().unwrap(), r, "both sets of marks are saved");
     }
 
     #[test]

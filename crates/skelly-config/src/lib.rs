@@ -290,6 +290,8 @@ pub struct Session {
 pub struct Git {
     /// Diff layout.
     pub diff_view: DiffView,
+    /// What the git dock reviews the working tree against.
+    pub diff_against: DiffAgainst,
 }
 
 /// `[shell]`.
@@ -310,6 +312,17 @@ pub enum DiffView {
     Unified,
     /// Side-by-side old/new.
     Split,
+}
+
+/// What the git dock reviews the working tree against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DiffAgainst {
+    /// `HEAD`: the changes not committed yet (default).
+    #[default]
+    Head,
+    /// Where the branch left its base branch: everything the branch changed, committed or not.
+    Branch,
 }
 
 impl Default for Appearance {
@@ -374,6 +387,7 @@ impl Default for Git {
     fn default() -> Self {
         Self {
             diff_view: DiffView::Unified,
+            diff_against: DiffAgainst::Head,
         }
     }
 }
@@ -602,6 +616,22 @@ mod tests {
         assert!(c.panes.split_inherits_cwd);
         assert!(c.session.shadow_worktree);
         assert_eq!(c.git.diff_view, DiffView::Unified);
+        assert_eq!(c.git.diff_against, DiffAgainst::Head);
+    }
+
+    #[test]
+    fn the_git_dock_scope_round_trips() {
+        let config = Config::from_toml_str("[git]\ndiff_against = \"branch\"\n").unwrap();
+        assert_eq!(config.git.diff_against, DiffAgainst::Branch);
+        assert_eq!(
+            config.git.diff_view,
+            DiffView::Unified,
+            "a missing key defaults"
+        );
+        assert_eq!(
+            Config::from_toml_str(&config.to_toml_string().unwrap()).unwrap(),
+            config
+        );
     }
 
     #[test]

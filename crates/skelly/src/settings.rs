@@ -21,7 +21,7 @@
 //! The nav ends with the Workspaces page ([`crate::workspace`]): a manager over the session
 //! layout rather than the config, so it sits outside [`CATEGORIES`] and the one-key contract.
 
-use skelly_config::{Config, CursorStyle, DiffView, SidebarMode, TabTitle};
+use skelly_config::{Config, CursorStyle, DiffAgainst, DiffView, SidebarMode, TabTitle};
 use skelly_render::{
     ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme, THEMES, THEME_LABELS,
 };
@@ -506,25 +506,46 @@ static CATEGORIES: &[Category] = &[
     Category {
         icon: '%',
         label: "Git",
-        controls: &[Control {
-            label: "Diff layout",
-            key: "git.diff_view",
-            kind: Kind::Choice {
-                options: &["Unified", "Split"],
-                get: |c| match c.git.diff_view {
-                    DiffView::Unified => 0,
-                    DiffView::Split => 1,
+        controls: &[
+            Control {
+                label: "Diff layout",
+                key: "git.diff_view",
+                kind: Kind::Choice {
+                    options: &["Unified", "Split"],
+                    get: |c| match c.git.diff_view {
+                        DiffView::Unified => 0,
+                        DiffView::Split => 1,
+                    },
+                    set: |c, i| {
+                        c.git.diff_view = if i == 1 {
+                            DiffView::Split
+                        } else {
+                            DiffView::Unified
+                        };
+                    },
+                    cycle: false,
                 },
-                set: |c, i| {
-                    c.git.diff_view = if i == 1 {
-                        DiffView::Split
-                    } else {
-                        DiffView::Unified
-                    };
-                },
-                cycle: false,
             },
-        }],
+            Control {
+                label: "Review",
+                key: "git.diff_against",
+                kind: Kind::Choice {
+                    options: &["Uncommitted", "Branch"],
+                    get: |c| match c.git.diff_against {
+                        DiffAgainst::Head => 0,
+                        DiffAgainst::Branch => 1,
+                    },
+                    set: |c, i| {
+                        c.git.diff_against = if i == 1 {
+                            DiffAgainst::Branch
+                        } else {
+                            DiffAgainst::Head
+                        };
+                    },
+                    cycle: false,
+                },
+            },
+        ],
     },
     Category {
         icon: 'v',

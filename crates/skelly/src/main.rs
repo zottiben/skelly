@@ -41,14 +41,14 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use skelly_config::{Config, SidebarMode, TabTitle};
+use skelly_config::{Config, DiffAgainst, SidebarMode, TabTitle};
 use skelly_pane::{Dir, PaneId, PaneTree, Rect};
 use skelly_render::{
     AnsiPalette, CursorShape, GitDockView, GridCell, OverlayView, PaneLayer, PaneOverlayView,
     PaneView, ProseLabel, PxRect, Renderer, SettingsView, SidebarView, Srgb, TextMeasure, Theme,
     TimelineView,
 };
-use skelly_session::review::{Author, Review, ReviewError, Status as ThreadStatus};
+use skelly_session::review::{Author, Review, ReviewError, Scope, Status as ThreadStatus};
 use skelly_session::{Actor, Repo, SessionEvent, SnapshotStore, Status, Timeline};
 use skelly_term::{CellAttrs, CellColor, ExitStatus, KeyboardMode, TermCell, Terminal};
 
@@ -696,11 +696,11 @@ struct App {
     /// The repository backing the dock (from the active pane context cwd), cached while it is
     /// open so its actions run without re-discovering.
     git_repo: Option<Repo>,
-    /// The root of [`Self::git_repo`], shared with the git-poll thread, which reads that repo in
-    /// full for the dock each cycle (its changes and review comments, which an agent changes
-    /// from outside Skelly). `None` while the dock is closed, so the poll does no more than a
-    /// status then.
-    review_root: Arc<Mutex<Option<std::path::PathBuf>>>,
+    /// The root of [`Self::git_repo`] and the review the dock shows, shared with the git-poll
+    /// thread, which reads that repo in full for the dock each cycle (its changes and review
+    /// comments, which an agent changes from outside Skelly). `None` while the dock is closed,
+    /// so the poll does no more than a status then.
+    review_target: Arc<Mutex<Option<(std::path::PathBuf, Scope)>>>,
     /// The system clipboard, or `None` when none could be reached (see [`open_clipboard`]).
     clipboard: Option<arboard::Clipboard>,
     window: Option<Arc<Window>>,
@@ -863,7 +863,7 @@ impl App {
             rewind_off_notified: false,
             session_start: Instant::now(),
             git_repo: None,
-            review_root: Arc::new(Mutex::new(None)),
+            review_target: Arc::new(Mutex::new(None)),
             clipboard: open_clipboard(),
             window: None,
             renderer: None,
@@ -2512,6 +2512,12 @@ impl App {
             // Layout-affecting toggles: re-fit the grids. Hiding the status line reclaims its
             // rows; the sidebar width shifts the pane viewport.
             "appearance.show_status_line" | "sidebar.width" => self.sync_layout(),
+            "git.diff_against" => {
+                self.share_review_target();
+                if self.git_dock.open {
+                    self.reload_git_dock();
+                }
+            }
             "voice.enabled" => {
                 if self.config.voice.enabled {
                     self.show_toast("Pi voice bridge enabled for new panes", ToastKind::Info);
@@ -2588,7 +2594,7 @@ impl App {
         let snapshots = Arc::clone(&self.snapshots);
         let interval_ms = Arc::clone(&self.git_poll_ms);
         let generation_slot = Arc::clone(&self.git_generation);
-        let review_slot = Arc::clone(&self.review_root);
+        let review_slot = Arc::clone(&self.review_target);
         let record = self.config.session.timeline;
         let proxy = self.proxy.clone();
         std::thread::spawn(move || loop {
@@ -2604,8 +2610,8 @@ impl App {
                 cwds.extend(std::env::current_dir());
             }
             // The dock's repo is read in full, and polled even when no pane is in it.
-            let review_root = review_slot.lock().ok().and_then(|g| g.clone());
-            cwds.extend(review_root.clone());
+            let review_target = review_slot.lock().ok().and_then(|g| g.clone());
+            cwds.extend(review_target.as_ref().map(|(root, _)| root.clone()));
             // Discover + status each distinct repo once (dedup cwds that share a repo root).
             let mut result: HashMap<std::path::PathBuf, RepoStatus> = HashMap::new();
             for cwd in cwds {
@@ -2621,9 +2627,10 @@ impl App {
                     let snapshot = record
                         .then(|| capture_snapshot(&snapshots, &root))
                         .flatten();
-                    let reading = (review_root.as_ref() == Some(&root))
-                        .then(|| review::read(&repo, status.clone()).ok())
-                        .flatten();
+                    let reading = review_target
+                        .as_ref()
+                        .filter(|(target, _)| *target == root)
+                        .and_then(|&(_, scope)| review::read(&repo, status.clone(), scope).ok());
                     result.insert(
                         root,
                         RepoStatus {
@@ -3201,10 +3208,40 @@ impl App {
 
     /// Cache the dock's repository, and point the git-poll thread's full reading at it.
     fn set_git_repo(&mut self, repo: Option<Repo>) {
-        if let Ok(mut root) = self.review_root.lock() {
-            *root = repo.as_ref().map(|r| r.root().to_path_buf());
-        }
         self.git_repo = repo;
+        self.share_review_target();
+    }
+
+    /// Point the git-poll thread's full reading at the dock's repository, in the review the
+    /// config asks for.
+    fn share_review_target(&self) {
+        if let Ok(mut target) = self.review_target.lock() {
+            *target = self
+                .git_repo
+                .as_ref()
+                .map(|r| (r.root().to_path_buf(), self.review_scope()));
+        }
+    }
+
+    /// The review the git dock shows, as the config sets it (`git.diff_against`).
+    fn review_scope(&self) -> Scope {
+        match self.config.git.diff_against {
+            DiffAgainst::Head => Scope::Uncommitted,
+            DiffAgainst::Branch => Scope::Branch,
+        }
+    }
+
+    /// Show `scope`'s review in the git dock: set `git.diff_against`, the setting the dock's
+    /// control and `b` are a view of (Hard rule 1), and save it, as a settings edit does.
+    fn set_review_scope(&mut self, scope: Scope) {
+        if scope == self.review_scope() {
+            return;
+        }
+        self.config.git.diff_against = match scope {
+            Scope::Uncommitted => DiffAgainst::Head,
+            Scope::Branch => DiffAgainst::Branch,
+        };
+        self.apply_setting_change("git.diff_against");
     }
 
     /// Initialize a git repository in the active tab's focused-pane cwd (the git dock's "Init
@@ -5174,8 +5211,8 @@ impl App {
     /// hunk, and `PageUp/PageDown` page; `Enter` folds the cursor's file, or opens the composer
     /// on its line (a reply on its thread) as `c` does; `v` marks the file viewed, `r` resolves
     /// or reopens a thread and `⌫` deletes it; `Space` stages the file, `⌘↵` the hunk, and `a`
-    /// everything; `u` undoes the last commit; `Tab` moves to the commit box, and `Esc` closes
-    /// the dock.
+    /// everything; `u` undoes the last commit; `b` switches between the uncommitted and the
+    /// branch review; `Tab` moves to the commit box, and `Esc` closes the dock.
     fn on_review_key(&mut self, key_event: &KeyEvent) {
         let shift = self.modifiers.shift_key();
         let command = self.modifiers.super_key() || self.modifiers.control_key();
@@ -5244,6 +5281,10 @@ impl App {
             }
             "a" => self.stage_all(),
             "u" => self.undo_last_commit(),
+            "b" => self.set_review_scope(match self.review_scope() {
+                Scope::Uncommitted => Scope::Branch,
+                Scope::Branch => Scope::Uncommitted,
+            }),
             _ => {}
         }
     }
@@ -5373,9 +5414,10 @@ impl App {
         };
         let mark = (!self.git_dock.is_viewed(path)).then_some(fingerprint);
         let changed = self.git_dock.changed_paths();
+        let scope = self.git_dock.scope();
         self.change_review(|review| {
             let changed: Vec<&str> = changed.iter().map(String::as_str).collect();
-            review.set_viewed(path, mark.as_deref(), &changed);
+            review.set_viewed(scope, path, mark.as_deref(), &changed);
             Ok(())
         });
         self.git_dock.unfold_by_hand(path);
@@ -5438,15 +5480,16 @@ impl App {
         self.request_redraw();
     }
 
-    /// Stage `path`, or unstage it when everything in it is staged; then reload the dock.
+    /// Stage `path`, or unstage it when everything in it is staged; then reload the dock. A file
+    /// the branch review shows only for what it committed has nothing to stage.
     fn toggle_stage(&mut self, path: &str) {
         let Some(repo) = self.git_repo.clone() else {
             return;
         };
-        let fully_staged = self
-            .git_dock
-            .status_of(path)
-            .is_some_and(|f| f.staged && !f.unstaged);
+        let Some(file) = self.git_dock.status_of(path) else {
+            return;
+        };
+        let fully_staged = file.staged && !file.unstaged;
         let path = std::path::Path::new(path);
         let result = if fully_staged {
             repo.unstage(path)
@@ -5469,10 +5512,18 @@ impl App {
 
     /// Stage hunk `index` of `path` when it is unstaged, or unstage it when it is staged (an
     /// untracked file, which has no index entry to patch, stages whole); then reload the dock.
+    /// Only in the uncommitted review: a branch hunk can mix committed and uncommitted lines.
     fn toggle_hunk(&mut self, path: &str, index: usize) {
         let Some(repo) = self.git_repo.clone() else {
             return;
         };
+        if self.git_dock.scope() == Scope::Branch {
+            self.show_toast(
+                "Stage hunks in the Uncommitted review (press b)",
+                ToastKind::Info,
+            );
+            return;
+        }
         let file = std::path::Path::new(path);
         let result = if self.git_dock.is_untracked(path) {
             repo.stage(file)
@@ -5512,7 +5563,11 @@ impl App {
         let Some(repo) = self.git_repo.clone() else {
             return;
         };
-        match repo.status().and_then(|status| review::read(&repo, status)) {
+        let scope = self.review_scope();
+        match repo
+            .status()
+            .and_then(|status| review::read(&repo, status, scope))
+        {
             Ok(reading) => self.git_dock.load(reading),
             Err(err) => self.git_dock.set_error(err.to_string()),
         }
@@ -6170,6 +6225,7 @@ impl App {
         };
         match target {
             Target::Init => self.init_repo(),
+            Target::Scope(scope) => self.set_review_scope(scope),
             Target::Stage(path) => self.toggle_stage(&path),
             Target::Fold(path) => self.git_dock.toggle_fold(&path),
             Target::Viewed(path) => self.toggle_viewed(&path),
