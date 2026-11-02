@@ -82,6 +82,23 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-02 - **The ai-team palettes are Skelly themes.** User request: copy all the themes
+  from the ai-team project. Its six families join Ossein, each with a dark and a light variant:
+  Vice City (`vice-city`, `vice-city-light`), Gruvbox (`gruvbox`), Tokyo Night (`tokyonight`),
+  Catppuccin (`catppuccin`), Everforest (`everforest`) and Kanagawa (`kanagawa`), so there are
+  14 themes. The colors are copied from ai-team's `ui/src/synth/tokens.css`. The palette's
+  screen is `bg.base`, its floor is `bg.sidebar` and its raised panel is `bg.surface`.
+  `bg.elevated` is the hover step on a dark variant and the screen on a light one. `fg.muted`,
+  `fg.faint` and the three borders are the text over the screen at Ossein's weights. The accent
+  is the palette's cyan, as ai-team's `--synth-accent` is. The diff colors are `--git-added`,
+  `--git-deleted` and the terminal blue. The terminal uses each palette's `--synth-term-*`
+  colors; one theme name still selects both the UI tokens and the ANSI colors. Tokyo Night and
+  Kanagawa keep their config names, so a config that names them still resolves, and the ai-team
+  versions replace Skelly's dark-only ports. The settings picker cycles all 14, the palette has
+  a `Theme: <name>` command for each, and the sidebar's theme toggle flips the current family
+  between dark and light. Onboarding still offers the two Ossein cards.
+  _(was: Ossein Dark and Light, plus dark-only Tokyo Night and Kanagawa ports)_
+
 - 2026-11-02 - **The workspace chip row scrolls sideways.** User request: scroll
   sideways through the workspaces. Chips that do not fit the sidebar are hidden; before this
   they ran past the panel edge. The default 240px sidebar shows six tiles, the `+` included.

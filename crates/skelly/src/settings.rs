@@ -22,7 +22,9 @@
 //! layout rather than the config, so it sits outside [`CATEGORIES`] and the one-key contract.
 
 use skelly_config::{Config, CursorStyle, DiffView, SidebarMode, TabTitle};
-use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
+use skelly_render::{
+    ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme, THEMES, THEME_LABELS,
+};
 
 use crate::workspace;
 
@@ -239,22 +241,15 @@ static CATEGORIES: &[Category] = &[
                 label: "Theme",
                 key: "appearance.theme",
                 kind: Kind::Choice {
-                    options: &["Ossein Dark", "Ossein Light", "Tokyo Night", "Kanagawa"],
-                    get: |c| match c.appearance.theme.as_str() {
-                        "ossein-light" => 1,
-                        "tokyonight" => 2,
-                        "kanagawa" => 3,
-                        _ => 0,
+                    options: &THEME_LABELS,
+                    // An unknown name resolves as Ossein Dark, the first option.
+                    get: |c| {
+                        THEMES
+                            .iter()
+                            .position(|(name, _)| *name == c.appearance.theme)
+                            .unwrap_or(0)
                     },
-                    set: |c, i| {
-                        let name = match i {
-                            1 => "ossein-light",
-                            2 => "tokyonight",
-                            3 => "kanagawa",
-                            _ => "ossein-dark",
-                        };
-                        name.clone_into(&mut c.appearance.theme);
-                    },
+                    set: |c, i| THEMES[i].0.clone_into(&mut c.appearance.theme),
                     // Many, long options - render compactly so it never overflows the row.
                     cycle: true,
                 },
@@ -1995,7 +1990,7 @@ fn push_right(
 mod tests {
     use super::{target_at, Kind, Settings, Target, CATEGORIES, CLOSE_ICON, HEADER_H, PAD};
     use skelly_config::Config;
-    use skelly_render::{PxRect, TextMeasure, Theme};
+    use skelly_render::{PxRect, TextMeasure, Theme, THEMES};
 
     #[test]
     fn adjusting_theme_writes_the_config_and_returns_its_key() {
@@ -2010,6 +2005,13 @@ mod tests {
         assert_eq!(config.appearance.theme, "ossein-dark");
         settings.adjust(&mut config, -1);
         assert_eq!(config.appearance.theme, "ossein-dark");
+        // Right walks every theme in picker order, ending on the last.
+        for (name, _) in &THEMES[1..] {
+            settings.adjust(&mut config, 1);
+            assert_eq!(config.appearance.theme, *name);
+        }
+        settings.adjust(&mut config, 1);
+        assert_eq!(config.appearance.theme, "kanagawa-light");
     }
 
     #[test]
@@ -2226,9 +2228,11 @@ mod tests {
         assert_eq!(settings.selected_index(), 3);
         // The theme cycler wraps backwards from the first option.
         assert_eq!(settings.step(&mut config, 0, -1), Some("appearance.theme"));
-        assert_eq!(config.appearance.theme, "kanagawa");
+        assert_eq!(config.appearance.theme, "kanagawa-light");
         assert_eq!(settings.step(&mut config, 0, 1), Some("appearance.theme"));
         assert_eq!(config.appearance.theme, "ossein-dark");
+        assert_eq!(settings.step(&mut config, 0, 1), Some("appearance.theme"));
+        assert_eq!(config.appearance.theme, "ossein-light");
         // Font size slides 8..=32 along the track, snapping to whole steps.
         assert_eq!(
             settings.slide(&mut config, 1, 1.0),

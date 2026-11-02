@@ -92,10 +92,8 @@ pub(crate) enum Action {
     ShowTimeline,
     /// Open the full-window settings view.
     OpenSettings,
-    /// Switch the UI theme to Ossein Dark.
-    ThemeDark,
-    /// Switch the UI theme to Ossein Light.
-    ThemeLight,
+    /// Switch the UI theme to the named one (a `skelly_render::THEMES` config name).
+    Theme(&'static str),
     /// Insert clipboard text through the Pi bridge, exercising the dictation path.
     VoiceInsertClipboard,
     VoiceDictation,
@@ -230,14 +228,98 @@ pub(crate) const COMMANDS: &[Command] = &[
         icon: "\u{25D0}", // ◐ theme
         label: "Theme: Ossein Dark",
         hint: "",
-        action: Action::ThemeDark,
+        action: Action::Theme("ossein-dark"),
     },
     Command {
         category: "Appearance",
         icon: "\u{25D0}", // ◐ theme
         label: "Theme: Ossein Light",
         hint: "",
-        action: Action::ThemeLight,
+        action: Action::Theme("ossein-light"),
+    },
+    Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
+        label: "Theme: Vice City Dark",
+        hint: "",
+        action: Action::Theme("vice-city"),
+    },
+    Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
+        label: "Theme: Vice City Light",
+        hint: "",
+        action: Action::Theme("vice-city-light"),
+    },
+    Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
+        label: "Theme: Gruvbox Dark",
+        hint: "",
+        action: Action::Theme("gruvbox"),
+    },
+    Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
+        label: "Theme: Gruvbox Light",
+        hint: "",
+        action: Action::Theme("gruvbox-light"),
+    },
+    Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
+        label: "Theme: Tokyo Night Dark",
+        hint: "",
+        action: Action::Theme("tokyonight"),
+    },
+    Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
+        label: "Theme: Tokyo Night Light",
+        hint: "",
+        action: Action::Theme("tokyonight-light"),
+    },
+    Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
+        label: "Theme: Catppuccin Dark",
+        hint: "",
+        action: Action::Theme("catppuccin"),
+    },
+    Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
+        label: "Theme: Catppuccin Light",
+        hint: "",
+        action: Action::Theme("catppuccin-light"),
+    },
+    Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
+        label: "Theme: Everforest Dark",
+        hint: "",
+        action: Action::Theme("everforest"),
+    },
+    Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
+        label: "Theme: Everforest Light",
+        hint: "",
+        action: Action::Theme("everforest-light"),
+    },
+    Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
+        label: "Theme: Kanagawa Dark",
+        hint: "",
+        action: Action::Theme("kanagawa"),
+    },
+    Command {
+        category: "Appearance",
+        icon: "\u{25D0}", // ◐ theme
+        label: "Theme: Kanagawa Light",
+        hint: "",
+        action: Action::Theme("kanagawa-light"),
     },
     Command {
         category: "Voice",
@@ -1106,16 +1188,25 @@ mod tests {
     }
 
     #[test]
-    fn theme_query_surfaces_both_theme_commands() {
+    fn theme_query_surfaces_every_theme_command() {
         let mut p = Palette::new();
         p.open(Vec::new(), Vec::new());
         for c in "theme".chars() {
             p.push_char(c);
         }
-        assert_eq!(
-            p.match_actions(),
-            vec![Action::ThemeDark, Action::ThemeLight]
-        );
+        let themes: Vec<_> = skelly_render::THEMES
+            .iter()
+            .map(|(name, _)| Action::Theme(name))
+            .collect();
+        assert_eq!(p.match_actions(), themes);
+        // Each command's label names the theme it switches to.
+        for (name, label) in skelly_render::THEMES {
+            let command = COMMANDS
+                .iter()
+                .find(|c| c.action == Action::Theme(name))
+                .unwrap();
+            assert_eq!(command.label, format!("Theme: {label}"));
+        }
     }
 
     #[test]

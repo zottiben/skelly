@@ -22,6 +22,7 @@ mod cells;
 mod error;
 mod fonts;
 mod glyph;
+mod palettes;
 mod prose;
 mod renderer;
 mod text;
@@ -39,7 +40,7 @@ pub use fonts::FontRole;
 pub use prose::{ProseLabel, TextMeasure};
 pub use renderer::Renderer;
 pub use text::{measure_cell, TextLayer};
-pub use theme::{Rgba, Srgb, Theme};
+pub use theme::{toggled, Rgba, Srgb, Theme, THEMES, THEME_LABELS};
 
 /// A rectangle in physical pixels, positioning a pane on the render surface.
 #[derive(Clone, Copy, Debug, PartialEq)]

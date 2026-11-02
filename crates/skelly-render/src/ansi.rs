@@ -2,9 +2,10 @@
 //!
 //! This is the color set programs *inside* the terminal use - deliberately separate
 //! from the UI semantic tokens (Hard rule 2), so a user can pair any ANSI scheme
-//! with any UI theme. M2a ships the Ossein Dark / Light 16-color palettes from the
-//! design guide; importable schemes come later.
+//! with any UI theme. It ships the Ossein Dark / Light 16-color palettes from the design
+//! guide and the ai-team families' terminal colors; importable schemes come later.
 
+use crate::palettes;
 use crate::theme::Srgb;
 
 /// A resolved terminal palette: the 16 ANSI base colors plus the default
@@ -17,25 +18,22 @@ pub struct AnsiPalette {
 }
 
 impl AnsiPalette {
-    /// Resolve the palette for a theme name. Unknown / dark-only names fall back to
-    /// Ossein Dark (matching the design guide's fallback).
+    /// Resolve the palette for a theme name. Unknown names fall back to Ossein Dark
+    /// (matching the design guide's fallback).
     #[must_use]
     pub fn resolve(name: &str) -> Self {
+        if let Some(variant) = palettes::variant(name) {
+            return Self {
+                base: variant.ansi,
+                default_fg: variant.term_fg,
+                default_bg: variant.screen,
+            };
+        }
         match name {
             "ossein-light" => Self {
                 base: OSSEIN_LIGHT,
                 default_fg: rgb(0x4C, 0x4F, 0x69),
                 default_bg: rgb(0xEF, 0xF1, 0xF5),
-            },
-            "tokyonight" => Self {
-                base: TOKYONIGHT,
-                default_fg: rgb(0xC0, 0xCA, 0xF5),
-                default_bg: rgb(0x1A, 0x1B, 0x26),
-            },
-            "kanagawa" => Self {
-                base: KANAGAWA,
-                default_fg: rgb(0xDC, 0xD7, 0xBA),
-                default_bg: rgb(0x1F, 0x1F, 0x28),
             },
             _ => Self {
                 base: OSSEIN_DARK,
@@ -129,46 +127,6 @@ const OSSEIN_LIGHT: [Srgb; 16] = [
     rgb(0x4C, 0x4F, 0x69), // bright white
 ];
 
-/// Tokyo Night ANSI 16 (tokyonight.nvim's published terminal colors).
-const TOKYONIGHT: [Srgb; 16] = [
-    rgb(0x15, 0x16, 0x1E), // black
-    rgb(0xF7, 0x76, 0x8E), // red
-    rgb(0x9E, 0xCE, 0x6A), // green
-    rgb(0xE0, 0xAF, 0x68), // yellow
-    rgb(0x7A, 0xA2, 0xF7), // blue
-    rgb(0xBB, 0x9A, 0xF7), // magenta
-    rgb(0x7D, 0xCF, 0xFF), // cyan
-    rgb(0xA9, 0xB1, 0xD6), // white
-    rgb(0x41, 0x48, 0x68), // bright black
-    rgb(0xF7, 0x76, 0x8E), // bright red
-    rgb(0x9E, 0xCE, 0x6A), // bright green
-    rgb(0xE0, 0xAF, 0x68), // bright yellow
-    rgb(0x7A, 0xA2, 0xF7), // bright blue
-    rgb(0xBB, 0x9A, 0xF7), // bright magenta
-    rgb(0x7D, 0xCF, 0xFF), // bright cyan
-    rgb(0xC0, 0xCA, 0xF5), // bright white
-];
-
-/// Kanagawa (wave) ANSI 16 (kanagawa.nvim's published terminal colors).
-const KANAGAWA: [Srgb; 16] = [
-    rgb(0x09, 0x06, 0x18), // black
-    rgb(0xC3, 0x40, 0x43), // red
-    rgb(0x76, 0x94, 0x6A), // green
-    rgb(0xC0, 0xA3, 0x6E), // yellow
-    rgb(0x7E, 0x9C, 0xD8), // blue
-    rgb(0x95, 0x7F, 0xB8), // magenta
-    rgb(0x6A, 0x95, 0x89), // cyan
-    rgb(0xC8, 0xC0, 0x93), // white
-    rgb(0x72, 0x71, 0x69), // bright black
-    rgb(0xE8, 0x24, 0x24), // bright red
-    rgb(0x98, 0xBB, 0x6C), // bright green
-    rgb(0xE6, 0xC3, 0x84), // bright yellow
-    rgb(0x7F, 0xB4, 0xCA), // bright blue
-    rgb(0x93, 0x8A, 0xA9), // bright magenta
-    rgb(0x7A, 0xA8, 0x9F), // bright cyan
-    rgb(0xDC, 0xD7, 0xBA), // bright white
-];
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +136,20 @@ mod tests {
         let p = AnsiPalette::resolve("ossein-dark");
         assert_eq!(p.indexed(1), rgb(0xF3, 0x8B, 0xA8)); // red
         assert_eq!(p.indexed(4), rgb(0x89, 0xB4, 0xFA)); // blue
+    }
+
+    #[test]
+    fn ai_team_families_use_their_terminal_colors() {
+        let p = AnsiPalette::resolve("vice-city");
+        assert_eq!(p.indexed(0), rgb(0x07, 0x00, 0x12)); // --synth-term-black
+        assert_eq!(p.indexed(10), rgb(0xE0, 0xC3, 0xFF)); // --synth-term-bright-green
+        assert_eq!(p.default_fg(), rgb(0xE0, 0xC3, 0xFF));
+        assert_eq!(p.default_bg(), rgb(0x0A, 0x01, 0x19));
+        let p = AnsiPalette::resolve("gruvbox-light");
+        assert_eq!(p.indexed(0), rgb(0x28, 0x28, 0x28)); // --p-deep, inherited from dark
+        assert_eq!(p.indexed(1), rgb(0x8C, 0x2B, 0x25)); // --p-red
+        assert_eq!(p.indexed(13), rgb(0x80, 0x3C, 0x4E)); // bright magenta: --p-pink
+        assert_eq!(p.default_bg(), rgb(0xFF, 0xF9, 0xE8));
     }
 
     #[test]

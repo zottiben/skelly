@@ -5,6 +5,48 @@
 //! The UI reads these tokens, never raw hex (Hard rule 2), and they are kept
 //! distinct from the terminal ANSI palette so any scheme pairs with any theme.
 
+use crate::palettes::{self, Variant};
+
+/// Every selectable theme as `(config name, display name)`, in picker order: Skelly's own
+/// Ossein pair, then the ai-team families. Each family is a dark then light pair, which
+/// [`toggled`] relies on.
+pub const THEMES: &[(&str, &str)] = &[
+    ("ossein-dark", "Ossein Dark"),
+    ("ossein-light", "Ossein Light"),
+    ("vice-city", "Vice City Dark"),
+    ("vice-city-light", "Vice City Light"),
+    ("gruvbox", "Gruvbox Dark"),
+    ("gruvbox-light", "Gruvbox Light"),
+    ("tokyonight", "Tokyo Night Dark"),
+    ("tokyonight-light", "Tokyo Night Light"),
+    ("catppuccin", "Catppuccin Dark"),
+    ("catppuccin-light", "Catppuccin Light"),
+    ("everforest", "Everforest Dark"),
+    ("everforest-light", "Everforest Light"),
+    ("kanagawa", "Kanagawa Dark"),
+    ("kanagawa-light", "Kanagawa Light"),
+];
+
+/// The display names of [`THEMES`], in the same order (a settings picker's options).
+pub const THEME_LABELS: [&str; THEMES.len()] = {
+    let mut labels = [""; THEMES.len()];
+    let mut i = 0;
+    while i < THEMES.len() {
+        labels[i] = THEMES[i].1;
+        i += 1;
+    }
+    labels
+};
+
+/// The theme the light/dark toggle switches `name` to: the other variant of its family, which
+/// is its pair in [`THEMES`]. A name outside [`THEMES`] resolves as Ossein Dark, so it toggles
+/// to Ossein Light.
+#[must_use]
+pub fn toggled(name: &str) -> &'static str {
+    let index = THEMES.iter().position(|(id, _)| *id == name).unwrap_or(0);
+    THEMES[index ^ 1].0
+}
+
 /// A resolved color in **linear** RGBA (0.0..=1.0), ready to hand to the GPU as a
 /// clear value.
 ///
@@ -36,6 +78,11 @@ pub struct Srgb {
 }
 
 impl Srgb {
+    /// This color as an opaque linear [`Rgba`] (the GPU clear).
+    pub(crate) fn to_rgba(self) -> Rgba {
+        srgb_hex(self.r, self.g, self.b)
+    }
+
     /// Convert to linear RGBA (alpha 1.0) for a GPU vertex color on an sRGB surface.
     #[must_use]
     pub(crate) fn to_linear(self) -> [f32; 4] {
@@ -160,10 +207,13 @@ pub struct Theme {
 }
 
 impl Theme {
-    /// Resolve a theme by its config name. Unknown or dark-only names fall back to
+    /// Resolve a theme by its config name (see [`THEMES`]). Unknown names fall back to
     /// Ossein Dark, matching the design guide's fallback behavior.
     #[must_use]
     pub fn resolve(name: &str) -> Self {
+        if let Some(variant) = palettes::variant(name) {
+            return Self::from_variant(variant);
+        }
         match name {
             // Ossein Light (see the guide's token table; border #BCC0CC is the shared
             // Catppuccin-Latte surface the palette derives from - see design/README).
@@ -187,50 +237,6 @@ impl Theme {
                 diff_del: srgb(0xD2, 0x0F, 0x39),
                 diff_hunk: srgb(0x1E, 0x66, 0xF5),
             },
-            // Tokyo Night (the canonical "night" palette; the guide's config lists it as a
-            // preset). Mapped from tokyonight.nvim's published colors to Skelly's semantic tokens.
-            "tokyonight" => Self {
-                bg_base: srgb_hex(0x1A, 0x1B, 0x26),
-                bg_sidebar: srgb(0x16, 0x16, 0x1E),
-                bg_surface: srgb(0x29, 0x2E, 0x42),
-                bg_elevated: srgb(0x2F, 0x35, 0x49),
-                bg_inset: srgb(0x16, 0x16, 0x1E),
-                fg_primary: srgb(0xC0, 0xCA, 0xF5),
-                fg_secondary: srgb(0xA9, 0xB1, 0xD6),
-                fg_muted: srgb(0x56, 0x5F, 0x89),
-                fg_faint: srgb(0x41, 0x48, 0x68),
-                accent: srgb(0x7A, 0xA2, 0xF7),
-                accent_hover: srgb(0x9E, 0xB8, 0xF9),
-                accent_subtle_alpha: 0.16,
-                border_subtle: srgb(0x1F, 0x23, 0x35),
-                border: srgb(0x29, 0x2E, 0x42),
-                border_strong: srgb(0x54, 0x5C, 0x7E),
-                diff_add: srgb(0x9E, 0xCE, 0x6A),
-                diff_del: srgb(0xF7, 0x76, 0x8E),
-                diff_hunk: srgb(0x7A, 0xA2, 0xF7),
-            },
-            // Kanagawa (the "wave" palette; the guide's config lists it as a preset). Mapped from
-            // kanagawa.nvim's published colors.
-            "kanagawa" => Self {
-                bg_base: srgb_hex(0x1F, 0x1F, 0x28),
-                bg_sidebar: srgb(0x16, 0x16, 0x1D),
-                bg_surface: srgb(0x2A, 0x2A, 0x37),
-                bg_elevated: srgb(0x36, 0x36, 0x46),
-                bg_inset: srgb(0x16, 0x16, 0x1D),
-                fg_primary: srgb(0xDC, 0xD7, 0xBA),
-                fg_secondary: srgb(0xC8, 0xC0, 0x93),
-                fg_muted: srgb(0x72, 0x71, 0x69),
-                fg_faint: srgb(0x54, 0x54, 0x64),
-                accent: srgb(0x7E, 0x9C, 0xD8),
-                accent_hover: srgb(0x7F, 0xB4, 0xCA),
-                accent_subtle_alpha: 0.16,
-                border_subtle: srgb(0x22, 0x22, 0x2C),
-                border: srgb(0x2A, 0x2A, 0x37),
-                border_strong: srgb(0x54, 0x54, 0x6D),
-                diff_add: srgb(0x76, 0x94, 0x6A),
-                diff_del: srgb(0xC3, 0x40, 0x43),
-                diff_hunk: srgb(0x7E, 0x9C, 0xD8),
-            },
             // Ossein Dark (default) - the guide's token table.
             _ => Self {
                 bg_base: srgb_hex(0x18, 0x18, 0x25),
@@ -252,6 +258,35 @@ impl Theme {
                 diff_del: srgb(0xF3, 0x8B, 0xA8),
                 diff_hunk: srgb(0x89, 0xB4, 0xFA),
             },
+        }
+    }
+
+    /// Map an ai-team variant onto the semantic tokens. The terminal surface is `bg.base`, the
+    /// app floor is the sidebar, and a key's face is `bg.surface`. `bg.elevated` is the most
+    /// lifted surface (dark: `--p-hover`; light: the screen) and `bg.inset` the most recessed
+    /// (dark: the screen; light: a panel). The muted / faint inks and the borders are `text`
+    /// over the screen at the same weights Ossein's tokens sit at.
+    fn from_variant(v: &Variant) -> Self {
+        let ink = |alpha: f32| v.text.over(v.screen, alpha);
+        Self {
+            bg_base: v.screen.to_rgba(),
+            bg_sidebar: v.floor,
+            bg_surface: v.raised,
+            bg_elevated: if v.light { v.screen } else { v.hover },
+            bg_inset: if v.light { v.panel } else { v.screen },
+            fg_primary: v.text,
+            fg_secondary: v.secondary,
+            fg_muted: ink(0.58),
+            fg_faint: ink(0.32),
+            accent: v.accent,
+            accent_hover: v.text.over(v.accent, 0.3),
+            accent_subtle_alpha: if v.light { 0.12 } else { 0.16 },
+            border_subtle: ink(0.12),
+            border: ink(0.2),
+            border_strong: ink(0.45),
+            diff_add: v.added,
+            diff_del: v.deleted,
+            diff_hunk: v.hunk,
         }
     }
 
@@ -309,15 +344,69 @@ mod tests {
     }
 
     #[test]
-    fn preset_themes_resolve_to_distinct_palettes() {
-        // Tokyo Night + Kanagawa are real, distinct themes (not the Ossein fallback).
-        let ossein = Theme::resolve("ossein-dark");
-        let tokyo = Theme::resolve("tokyonight");
-        let kana = Theme::resolve("kanagawa");
-        assert_ne!(tokyo.bg_base, ossein.bg_base);
-        assert_ne!(kana.bg_base, ossein.bg_base);
-        assert_ne!(tokyo.bg_base, kana.bg_base);
-        assert_ne!(tokyo.accent, kana.accent);
+    fn every_listed_theme_resolves_to_its_own_tokens() {
+        // No two listed themes share a surface + accent, so none is the Ossein fallback in
+        // disguise (only `ossein-dark` itself equals it).
+        let fallback = Theme::resolve("nope");
+        for (i, (a, _)) in THEMES.iter().enumerate() {
+            let ta = Theme::resolve(a);
+            assert_eq!(ta == fallback, *a == "ossein-dark", "{a}");
+            for (b, _) in &THEMES[i + 1..] {
+                let tb = Theme::resolve(b);
+                assert!(
+                    ta.bg_base != tb.bg_base || ta.accent != tb.accent,
+                    "{a} == {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn light_themes_put_dark_ink_on_light_surfaces() {
+        let luma = |c: Srgb| 2 * u32::from(c.r) + 7 * u32::from(c.g) + u32::from(c.b);
+        for (name, label) in THEMES {
+            let t = Theme::resolve(name);
+            let (bg, fg) = (luma(t.bg_base.to_srgb()), luma(t.fg_primary));
+            assert_eq!(bg > fg, label.ends_with("Light"), "{name}");
+            // The ink steps keep their order on every theme: primary, muted, faint, base.
+            let order = [fg, luma(t.fg_muted), luma(t.fg_faint), bg];
+            assert!(
+                order.windows(2).all(|w| (w[0] < w[1]) == (fg < bg)),
+                "{name}: {order:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_toggle_flips_between_a_familys_dark_and_light_variants() {
+        assert_eq!(toggled("ossein-dark"), "ossein-light");
+        assert_eq!(toggled("ossein-light"), "ossein-dark");
+        assert_eq!(toggled("gruvbox"), "gruvbox-light");
+        assert_eq!(toggled("vice-city-light"), "vice-city");
+        // An unknown name resolves as Ossein Dark, so it toggles to Ossein Light.
+        assert_eq!(toggled("nope"), "ossein-light");
+        assert_eq!(toggled("nope-light"), "ossein-light");
+        // Every theme pairs with the other variant of its own family.
+        let family = |label: &str| label.rsplit_once(' ').unwrap().0.to_owned();
+        for (i, (name, label)) in THEMES.iter().enumerate() {
+            let (partner, partner_label) = THEMES[i ^ 1];
+            assert_eq!(toggled(name), partner);
+            assert_eq!(family(label), family(partner_label), "{name}");
+            assert_ne!(label.ends_with("Light"), partner_label.ends_with("Light"));
+        }
+    }
+
+    #[test]
+    fn vice_city_maps_its_synth_tokens() {
+        let t = Theme::resolve("vice-city");
+        assert_eq!(t.bg_base.to_srgb(), srgb(0x0A, 0x01, 0x19)); // --synth-screen
+        assert_eq!(t.bg_sidebar, srgb(0x0C, 0x02, 0x1C)); // --synth-floor
+        assert_eq!(t.bg_surface, srgb(0x26, 0x10, 0x49)); // --synth-panel-hi
+        assert_eq!(t.fg_primary, srgb(0xFD, 0xF4, 0xFF)); // --synth-text
+        assert_eq!(t.fg_secondary, srgb(0xA1, 0x98, 0xA8)); // --synth-text-muted, opaque
+        assert_eq!(t.accent, srgb(0x2D, 0xE2, 0xE6)); // --synth-accent
+        assert_eq!(t.diff_del, srgb(0xFF, 0x6B, 0x35)); // --git-deleted
+        assert_eq!(THEME_LABELS[2], "Vice City Dark");
     }
 
     #[test]

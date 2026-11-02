@@ -3284,17 +3284,13 @@ impl App {
     }
 
     /// Run a sidebar utility-bar toggle (design §08 #7). Each is a second entry point to an
-    /// existing command; the theme icon flips between Ossein Dark and Light.
+    /// existing command; the theme icon flips the theme family between its dark and light
+    /// variants.
     fn on_util_action(&mut self, action: sidebar::UtilAction) {
         match action {
             sidebar::UtilAction::Settings => self.open_settings(),
             sidebar::UtilAction::Theme => {
-                let next = if self.config.appearance.theme == "ossein-light" {
-                    "ossein-dark"
-                } else {
-                    "ossein-light"
-                };
-                self.apply_theme(next);
+                self.apply_theme(skelly_render::toggled(&self.config.appearance.theme));
             }
             sidebar::UtilAction::Timeline => self.toggle_timeline(),
             sidebar::UtilAction::Git => self.toggle_git_dock(),
@@ -5032,8 +5028,7 @@ impl App {
             Action::ShowGitDiff => self.toggle_git_dock(),
             Action::ShowTimeline => self.toggle_timeline(),
             Action::OpenSettings => self.open_settings(),
-            Action::ThemeDark => self.apply_theme("ossein-dark"),
-            Action::ThemeLight => self.apply_theme("ossein-light"),
+            Action::Theme(name) => self.apply_theme(name),
             Action::VoiceInsertClipboard => self.voice_insert_clipboard(),
             Action::VoiceDictation => self.toggle_dictation(),
             Action::VoiceCancel => self.cancel_dictation("Dictation cancelled"),
