@@ -294,8 +294,7 @@ mod tests {
     fn fixture(script: &str, engine: Engine) -> (tempfile::TempDir, LocalSpeech) {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("speech fixture");
-        fs::write(&program, format!("#!/bin/sh\nset -eu\n{script}")).unwrap();
-        fs::set_permissions(&program, Permissions::from_mode(0o700)).unwrap();
+        crate::process::write_script(&program, &format!("#!/bin/sh\nset -eu\n{script}"));
         let speech = LocalSpeech {
             engine,
             program,

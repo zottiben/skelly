@@ -196,8 +196,7 @@ mod tests {
     fn fixture(script: &str) -> (tempfile::TempDir, Whisper) {
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("whisper fixture");
-        fs::write(&program, format!("#!/bin/sh\nset -eu\n{script}\n")).unwrap();
-        fs::set_permissions(&program, Permissions::from_mode(0o700)).unwrap();
+        crate::process::write_script(&program, &format!("#!/bin/sh\nset -eu\n{script}\n"));
         let model = dir.path().join("model file.bin");
         fs::write(&model, b"fixture").unwrap();
         let engine = Whisper::new(program.to_str().unwrap(), model.to_str().unwrap(), "en");

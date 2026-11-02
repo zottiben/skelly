@@ -4,6 +4,8 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+use std::path::Path;
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -26,6 +28,20 @@ fn wait_for<T>(budget: Duration, mut f: impl FnMut() -> Option<T>) -> T {
         assert!(start.elapsed() < budget, "bridge condition timed out");
         thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// Write an executable fixture script from a child shell, so this process never holds a write fd
+/// on it. On Linux a process that another test thread is spawning keeps a copy of every open fd
+/// until it execs, and running a script that any process can still write fails with `ETXTBSY`
+/// ("Text file busy").
+fn write_script(path: &Path, body: &str) {
+    let status = Command::new("/bin/sh")
+        .args(["-c", r#"printf '%s' "$1" > "$2""#, "sh", body])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "write {}", path.display());
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
 }
 
 fn frame(stream: &mut UnixStream, value: &Value) {
@@ -179,7 +195,7 @@ fn dictated_fixture_text() -> String {
     }
     let dir = tempfile::tempdir().unwrap();
     let executable = dir.path().join("whisper-fixture");
-    fs::write(
+    write_script(
         &executable,
         r#"#!/bin/sh
 set -eu
@@ -189,9 +205,7 @@ while [ "$#" -gt 0 ]; do
 done
 printf '你好\nsecond line' > "$output.txt"
 "#,
-    )
-    .unwrap();
-    fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+    );
     let model = dir.path().join("fixture-model.bin");
     fs::write(&model, b"fixture").unwrap();
     let engine = skelly_voice::whisper::Whisper::new(

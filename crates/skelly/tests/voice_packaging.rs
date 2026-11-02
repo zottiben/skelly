@@ -9,8 +9,17 @@ fn root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
+/// Write an executable fixture script from a child shell, so this process never holds a write fd
+/// on it. On Linux a process that another test thread is spawning keeps a copy of every open fd
+/// until it execs, and running a script that any process can still write fails with `ETXTBSY`
+/// ("Text file busy").
 fn executable(path: &Path, body: &str) {
-    fs::write(path, body).unwrap();
+    let status = Command::new("/bin/sh")
+        .args(["-c", r#"printf '%s' "$1" > "$2""#, "sh", body])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "write {}", path.display());
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 

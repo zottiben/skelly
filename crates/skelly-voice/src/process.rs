@@ -27,6 +27,22 @@ impl EngineProcess {
     }
 }
 
+#[cfg(test)]
+/// Write an executable fixture script from a child shell, so this process never holds a write fd
+/// on it. On Linux a process that another test thread is spawning keeps a copy of every open fd
+/// until it execs, and running a script that any process can still write fails with `ETXTBSY`
+/// ("Text file busy").
+pub(crate) fn write_script(path: &std::path::Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let status = Command::new("/bin/sh")
+        .args(["-c", r#"printf '%s' "$1" > "$2""#, "sh", body])
+        .arg(path)
+        .status()
+        .unwrap();
+    assert!(status.success(), "write {}", path.display());
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
 impl Drop for EngineProcess {
     fn drop(&mut self) {
         // An unreaped leader reserves this PID/PGID even if it has just exited.
