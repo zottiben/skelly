@@ -436,7 +436,7 @@ fn rows_layout(
 /// for `view`, filling `panel` (physical px) at DPI `scale`. The workspace chips are tested
 /// first, then the bottom utility bar (full panel), then the tab rows + new-tab action; the
 /// command well; the spacers/overflow indicators map to nothing. Shares [`rows_layout`] +
-/// [`utility_slots`] + [`chip_slots`] with [`build`] so a click lands on exactly what is drawn.
+/// [`utility_slots`] + [`chip_row`] with [`build`] so a click lands on exactly what is drawn.
 pub(crate) fn hit(view: &View, panel: PxRect, scale: f32, px: f32, py: f32) -> Option<Hit> {
     // Workspace chips (full panel only).
     let inside = |r: &PxRect| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h;
