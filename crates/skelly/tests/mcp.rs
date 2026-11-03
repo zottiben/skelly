@@ -166,28 +166,10 @@ fn reviewed_repo(home: &Path) -> std::path::PathBuf {
     root
 }
 
-#[test]
-fn a_legacy_client_initializes_then_reads_answers_and_resolves() {
-    let home = tempfile::tempdir().expect("temp home");
-    let root = reviewed_repo(home.path());
-    let status = git(&root, &["status", "--porcelain"]);
-    let mut server = Server::start(&root, home.path());
-
-    let init = server.request(
-        1,
-        "initialize",
-        &json!({
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": { "name": "test", "version": "1" },
-        }),
-    );
-    let result = &init["result"];
-    assert_eq!(result["protocolVersion"], "2025-06-18", "{init}");
-    assert_eq!(result["serverInfo"]["name"], "skelly");
-    assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
-    assert!(result["capabilities"]["tools"].is_object(), "{init}");
-    let instructions = result["instructions"].as_str().expect("instructions");
+/// The server's instructions tell the agent which tool to reach for, and to pass
+/// `directory`, within the first 512 characters, which Codex weighs most.
+fn guides_the_agent(instructions: &Value) {
+    let instructions = instructions.as_str().expect("instructions");
     let head: String = instructions.chars().take(512).collect();
     for needed in [
         "`list_review_comments`",
@@ -197,12 +179,13 @@ fn a_legacy_client_initializes_then_reads_answers_and_resolves() {
     ] {
         assert!(
             head.contains(needed),
-            "Codex weighs the first 512 characters most; {needed} must be in them: {head}"
+            "{needed} is not in the first 512: {head}"
         );
     }
-    server.notify("notifications/initialized");
+}
 
-    let listed = server.request(2, "tools/list", &json!({}));
+/// A `tools/list` response holds the three review tools, each with schemas any client accepts.
+fn lists_the_review_tools(listed: &Value) {
     let tools = listed["result"]["tools"].as_array().expect("tools");
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
     assert_eq!(
@@ -231,6 +214,33 @@ fn a_legacy_client_initializes_then_reads_answers_and_resolves() {
         json!(["id", "note"]),
         "a resolution always says what was done"
     );
+}
+
+#[test]
+fn a_legacy_client_initializes_then_reads_answers_and_resolves() {
+    let home = tempfile::tempdir().expect("temp home");
+    let root = reviewed_repo(home.path());
+    let status = git(&root, &["status", "--porcelain"]);
+    let mut server = Server::start(&root, home.path());
+
+    let init = server.request(
+        1,
+        "initialize",
+        &json!({
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "test", "version": "1" },
+        }),
+    );
+    let result = &init["result"];
+    assert_eq!(result["protocolVersion"], "2025-06-18", "{init}");
+    assert_eq!(result["serverInfo"]["name"], "skelly");
+    assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+    assert!(result["capabilities"]["tools"].is_object(), "{init}");
+    guides_the_agent(&result["instructions"]);
+    server.notify("notifications/initialized");
+
+    lists_the_review_tools(&server.request(2, "tools/list", &json!({})));
 
     let open = server.request(
         3,
@@ -298,7 +308,7 @@ fn a_2026_client_discovers_and_calls_with_no_handshake() {
         result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
         "skelly"
     );
-    assert!(result["instructions"].is_string(), "{discovered}");
+    guides_the_agent(&result["instructions"]);
 
     let resolved = server.request(
         2,
