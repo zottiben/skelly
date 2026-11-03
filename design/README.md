@@ -82,6 +82,17 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-03 - **A sideways wheel anywhere in the sidebar switches workspaces.** User
+  request: side-scroll anywhere in the sidebar to move between workspaces. A wheel or a swipe
+  whose dominant axis is horizontal switches workspaces over any part of the sidebar: the
+  command well, the pinned grid, the tab list, the empty space and the utility bar, and the
+  hover-expanded rail. It steps the same way as over the chip row: one workspace per wheel
+  line, or per tile-width of trackpad travel, stopping at the first and the last. A vertical
+  wheel switches only over the chip row, as before, and does nothing elsewhere in the
+  sidebar; before, over the hover-expanded rail, it scrolled the terminal under the rail. It
+  is ignored under the same modal surfaces as a chip click.
+  _(was: only a wheel over the chip row switched workspaces)_
+
 - 2026-11-03 - **The branch review's base is chosen per branch, from a drop-down.** User
   request: review stacked branches against their parent branch, not the remote's default.
   In the branch review, what the review is against is a field at the right of the scope row

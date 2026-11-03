@@ -662,7 +662,7 @@ struct App {
     /// The active workspace the chip row last scrolled into view; a different one is revealed
     /// on the next build, however it became active.
     chip_seen: Option<usize>,
-    /// Sideways trackpad travel over the chip row not yet a whole tile, physical px.
+    /// Trackpad travel over the sidebar not yet a whole tile, physical px.
     chip_swipe: f64,
     /// Current surface size in physical px.
     size: (u32, u32),
@@ -1046,6 +1046,12 @@ impl App {
         }
     }
 
+    /// Whether the pointer is over the sidebar, the hover-expanded rail included. `false` when
+    /// the sidebar is hidden.
+    fn pointer_in_sidebar(&self) -> bool {
+        self.sidebar.visible() && point_f32(self.pointer).0 < self.sidebar_width_px()
+    }
+
     /// Whether the pointer is over the open right dock's body (used to give the dock keyboard
     /// focus on click). `false` when no dock is open.
     fn pointer_in_right_dock(&self) -> bool {
@@ -1235,7 +1241,7 @@ impl App {
             || self
                 .dock_button_rect()
                 .is_some_and(|r| voicebar::contains(r, point_f32(self.pointer)))
-            || (self.sidebar.visible() && point_f32(self.pointer).0 < self.sidebar_width_px())
+            || self.pointer_in_sidebar()
         {
             return None;
         }
@@ -6590,9 +6596,9 @@ impl App {
         }
     }
 
-    /// Switch to an earlier or later workspace by a wheel or trackpad `delta` over the chip row
-    /// (see [`chip_steps`]), stopping at the first and the last. The row scrolls to keep the new
-    /// active chip in view.
+    /// Switch to an earlier or later workspace by a wheel or trackpad `delta` over the sidebar
+    /// (see [`wheel_switches_workspace`] and [`chip_steps`]), stopping at the first and the last.
+    /// The row scrolls to keep the new active chip in view.
     fn scroll_workspaces(&mut self, delta: MouseScrollDelta) {
         let tile = f64::from(sidebar::CHIP_STEP) * self.scale;
         let steps = chip_steps(delta, &mut self.chip_swipe, tile);
@@ -6639,11 +6645,9 @@ impl App {
             }
             return;
         }
-        if matches!(
-            self.sidebar_hit(),
-            Some(sidebar::Hit::Workspace(_) | sidebar::Hit::AddWorkspace | sidebar::Hit::Chips)
-        ) {
-            // A wheel switches workspaces only where a click on a chip would: never under a
+        let in_sidebar = self.pointer_in_sidebar();
+        if wheel_switches_workspace(delta, self.sidebar_hit(), in_sidebar) {
+            // A wheel switches workspaces only when a click on a chip would: never under a
             // modal surface, which would then act on the workspace left behind.
             let modal = self.onboarding.is_some()
                 || self.context_menu.is_some()
@@ -6655,7 +6659,9 @@ impl App {
             }
             return;
         }
-        if lines == 0 {
+        // Nothing else in the sidebar takes the wheel, and the hover-expanded rail covers panes
+        // it must not scroll.
+        if in_sidebar || lines == 0 {
             return;
         }
         // The git dock is outside `pane_at_pointer`, so route a wheel/trackpad gesture over it to
@@ -7871,6 +7877,24 @@ fn chip_steps(delta: MouseScrollDelta, swipe: &mut f64, tile: f64) -> i32 {
     -back
 }
 
+/// Whether a wheel or trackpad `delta` at sidebar target `hit` switches workspaces: a gesture on
+/// either axis over the chip row, and a sideways one anywhere else in the sidebar (`in_sidebar`).
+/// The axis is the gesture's dominant one, as in [`chip_steps`].
+fn wheel_switches_workspace(
+    delta: MouseScrollDelta,
+    hit: Option<sidebar::Hit>,
+    in_sidebar: bool,
+) -> bool {
+    let sideways = match delta {
+        MouseScrollDelta::LineDelta(x, y) => x.abs() > y.abs(),
+        MouseScrollDelta::PixelDelta(pos) => pos.x.abs() > pos.y.abs(),
+    };
+    matches!(
+        hit,
+        Some(sidebar::Hit::Workspace(_) | sidebar::Hit::AddWorkspace | sidebar::Hit::Chips)
+    ) || (in_sidebar && sideways)
+}
+
 /// Cast a DPI scale factor to `f32`. Sub-pixel precision loss is irrelevant here.
 #[allow(
     clippy::cast_possible_truncation,
@@ -8357,8 +8381,9 @@ mod tests {
         notch_lines, order, overlay_panel_top, overlay_rise_offset, pane_action, pane_dims,
         panic_message, parse_chord, pointer_cell_in, poll_wait, process_name, resolve_cell,
         selection_cells, selection_text, shell_escape_path, step_index, super_chord, tab_action,
-        take_group, take_tab, ungroup, xterm_modifier_code, ClipboardAction, Duration, Instant,
-        PaneAction, Selection, SuperChord, Tab, TabAction, TabGroup,
+        take_group, take_tab, ungroup, wheel_switches_workspace, xterm_modifier_code,
+        ClipboardAction, Duration, Instant, PaneAction, Selection, SuperChord, Tab, TabAction,
+        TabGroup,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -9314,6 +9339,32 @@ mod tests {
         // Turning back drops the carried travel instead of cancelling against it.
         assert_eq!(chip_steps(px(70.0, 0.0), &mut swipe, 66.0), -1);
         assert!((swipe - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_sideways_wheel_anywhere_in_the_sidebar_switches_workspaces() {
+        use super::sidebar::Hit;
+        use winit::dpi::PhysicalPosition;
+        use winit::event::MouseScrollDelta::{LineDelta, PixelDelta};
+        let up = LineDelta(0.0, 1.0);
+        let left = LineDelta(1.0, 0.2);
+        let swipe = PixelDelta(PhysicalPosition::new(-30.0, 4.0));
+        let scroll = PixelDelta(PhysicalPosition::new(3.0, -30.0));
+        // Over the chip row a gesture on either axis switches.
+        for hit in [Hit::Workspace(1), Hit::AddWorkspace, Hit::Chips] {
+            assert!(wheel_switches_workspace(up, Some(hit), true));
+            assert!(wheel_switches_workspace(left, Some(hit), true));
+        }
+        // Elsewhere in the sidebar, a tab or the gap between rows, only a sideways one does.
+        for hit in [Some(Hit::Tab(0)), Some(Hit::CommandInput), None] {
+            assert!(wheel_switches_workspace(left, hit, true));
+            assert!(wheel_switches_workspace(swipe, hit, true));
+            assert!(!wheel_switches_workspace(up, hit, true));
+            assert!(!wheel_switches_workspace(scroll, hit, true));
+        }
+        // Outside the sidebar nothing switches.
+        assert!(!wheel_switches_workspace(left, None, false));
+        assert!(!wheel_switches_workspace(swipe, None, false));
     }
 
     #[test]
