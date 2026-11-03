@@ -144,6 +144,21 @@ impl Timeline {
             .find_map(|e| e.restore.as_deref())
     }
 
+    /// Make the log restorable to `target` from its first event on, when nothing in it is
+    /// restorable yet: a repo's first snapshot arriving after its "session started" anchor was
+    /// recorded without one. Events recorded in between inherit it (see
+    /// [`effective_restore`](Self::effective_restore)). Returns whether the log changed.
+    pub fn anchor_restore(&mut self, target: impl Into<String>) -> bool {
+        if self.events.iter().any(|e| e.restore.is_some()) {
+            return false;
+        }
+        let Some(first) = self.events.first_mut() else {
+            return false;
+        };
+        first.restore = Some(target.into());
+        true
+    }
+
     /// Whether viewing event `index` means viewing the current HEAD (i.e. "now"): its
     /// effective restore matches the newest event's. Restoring to it is a no-op, so the
     /// binary discards any shadow worktree rather than re-checking-out HEAD.
@@ -258,6 +273,30 @@ mod tests {
         ));
         assert_eq!(t.effective_restore(0), None);
         assert!(t.is_now(0), "nothing to rewind to");
+    }
+
+    #[test]
+    fn a_late_first_snapshot_anchors_the_log_once() {
+        let mut t = Timeline::new();
+        t.record(SessionEvent::new(
+            Actor::System,
+            "0:00",
+            "Session started",
+            "main",
+        ));
+        t.record(SessionEvent::new(
+            Actor::Human,
+            "0:05",
+            "Staged all changes",
+            "",
+        ));
+        assert!(t.anchor_restore("tree-first"));
+        assert_eq!(t.effective_restore(0), Some("tree-first"));
+        assert_eq!(t.effective_restore(1), Some("tree-first"));
+        // Once anything restores, the anchor is settled.
+        assert!(!t.anchor_restore("tree-later"));
+        assert_eq!(t.effective_restore(0), Some("tree-first"));
+        assert!(!Timeline::new().anchor_restore("tree"), "nothing to anchor");
     }
 
     #[test]
