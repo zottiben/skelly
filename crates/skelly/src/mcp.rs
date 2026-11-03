@@ -22,21 +22,19 @@ use serde::Deserialize;
 
 use crate::review;
 
-/// What the server tells the agent when it connects: what Skelly is, and when to reach for
-/// which tool.
-const INSTRUCTIONS: &str = "Skelly is the terminal the user is running you in. In its git \
-    dock the user reviews the changes in a repository and leaves comments on specific lines. \
-    These tools are your side of that review: the user sees your replies and resolutions \
-    under their comments as they land.\n\
+/// What the server tells the agent when it connects: when to reach for which tool, then what
+/// Skelly is. Codex weighs the first 512 characters most, so the workflow comes first.
+const INSTRUCTIONS: &str = "Use these tools when the user asks you to read or address their \
+    review comments. Call `list_review_comments`, change the code for each open comment, then \
+    call `resolve_review_comment` for each one with a short note saying what you changed. To \
+    ask a question or explain why you did not change something, call \
+    `reply_to_review_comment` instead and leave the comment open. Pass your working directory \
+    as `directory` on every call.\n\
     \n\
-    When the user asks you to read or address their review comments, call \
-    `list_review_comments`, change the code for each open comment, then call \
-    `resolve_review_comment` for each one with a short note saying what you changed. To ask a \
-    question or explain why you did not change something, call `reply_to_review_comment` \
-    instead and leave the comment open for the user.\n\
-    \n\
-    Each tool works on the git repository that contains `directory`: pass your working \
-    directory. Without it, a tool uses the directory this server was started in.";
+    Skelly is the terminal the user is running you in. In its git dock the user reviews the \
+    changes in a repository and leaves comments on specific lines, and sees your replies and \
+    resolutions under them as they land. Without `directory`, a tool uses the directory this \
+    server was started in.";
 
 /// What every tool's `directory` argument is, for the agent.
 const DIRECTORY: &str = "A directory in the git repository, such as your working directory. \

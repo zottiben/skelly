@@ -188,11 +188,18 @@ fn a_legacy_client_initializes_then_reads_answers_and_resolves() {
     assert_eq!(result["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
     assert!(result["capabilities"]["tools"].is_object(), "{init}");
     let instructions = result["instructions"].as_str().expect("instructions");
-    assert!(
-        instructions.contains("list_review_comments")
-            && instructions.contains("resolve_review_comment"),
-        "the agent is told which tool to reach for: {instructions}"
-    );
+    let head: String = instructions.chars().take(512).collect();
+    for needed in [
+        "`list_review_comments`",
+        "`resolve_review_comment`",
+        "`reply_to_review_comment`",
+        "`directory`",
+    ] {
+        assert!(
+            head.contains(needed),
+            "Codex weighs the first 512 characters most; {needed} must be in them: {head}"
+        );
+    }
     server.notify("notifications/initialized");
 
     let listed = server.request(2, "tools/list", &json!({}));
