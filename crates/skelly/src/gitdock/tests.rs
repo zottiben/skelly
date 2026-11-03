@@ -829,6 +829,7 @@ fn branch_reading(dir: &Path) -> Reading {
                 name: "origin/main".to_owned(),
                 commit: FORK.to_owned(),
             }),
+            unusable: None,
         },
         ..reading(
             changes,
@@ -855,18 +856,142 @@ fn the_scope_row_picks_the_review_and_says_what_it_is_against() {
     let branch = rect_of(&dock, &Target::Scope(Scope::Branch));
     assert!(uncommitted.x + uncommitted.w <= branch.x, "side by side");
 
+    assert_eq!(
+        dock.base_field(),
+        None,
+        "the uncommitted review is against HEAD only"
+    );
+
     dock.load(branch_reading(dir.path()));
     assert_eq!(dock.scope(), Scope::Branch);
-    assert!(texts(&built(&mut dock)).contains(&"against origin/main"));
+    let paint = built(&mut dock);
+    let field = dock.base_field().expect("the branch review's base field");
+    let (x, y) = center(field);
+    assert_eq!(dock.target_at(x, y), Some(Target::Base));
+    let at = |text: &str| {
+        paint
+            .labels
+            .iter()
+            .find(|l| l.text == text)
+            .unwrap_or_else(|| panic!("{text} in {:?}", texts(&paint)))
+            .x
+    };
+    assert!(
+        field.x < at("origin/main") && at("origin/main") < field.x + field.w,
+        "the base is in the field"
+    );
+    assert!(at("against") < field.x, "after what it says");
+    assert!(
+        field.x + field.w <= panel().x + panel().w,
+        "right-anchored inside the dock"
+    );
+}
 
-    dock.load(Reading {
-        base: Base {
-            scope: Scope::Branch,
-            branch: None,
-        },
+#[test]
+fn the_scope_row_says_when_the_review_is_not_against_the_chosen_base() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dock = GitDock::new();
+    dock.open();
+    dock.load(branch_reading(dir.path()));
+    let paint = built(&mut dock);
+    let unusable = |base: Base| Reading {
+        base,
         ..branch_reading(dir.path())
-    });
-    assert!(texts(&built(&mut dock)).contains(&"no base branch - against HEAD"));
+    };
+    let label_top = |paint: &Paint| {
+        paint
+            .labels
+            .iter()
+            .find(|l| l.text.starts_with("CHANGED"))
+            .expect("the label row")
+            .y
+    };
+    let usable_top = label_top(&paint);
+    let chosen = "feat/a-very-long-parent-branch-name";
+    for (base, lead, name, notice) in [
+        (
+            Base {
+                scope: Scope::Branch,
+                branch: None,
+                unusable: None,
+            },
+            "no base branch - against",
+            "HEAD",
+            None,
+        ),
+        (
+            Base {
+                unusable: Some(Unusable::Missing(chosen.into())),
+                ..branch_reading(dir.path()).base
+            },
+            "against",
+            "origin/main",
+            Some(format!("chosen base {chosen} not found")),
+        ),
+        (
+            Base {
+                scope: Scope::Branch,
+                branch: None,
+                unusable: Some(Unusable::Unrelated(chosen.into())),
+            },
+            "no base branch - against",
+            "HEAD",
+            Some(format!("chosen base {chosen} shares no history")),
+        ),
+    ] {
+        dock.load(unusable(base));
+        let paint = built(&mut dock);
+        let shown = texts(&paint);
+        assert!(
+            shown.contains(&lead) && shown.contains(&name),
+            "{lead} {name} in {shown:?}"
+        );
+        let Some(notice) = notice else {
+            assert!((label_top(&paint) - usable_top).abs() < f32::EPSILON);
+            continue;
+        };
+        assert!(
+            shown.contains(&notice.as_str()),
+            "the whole name, in full, at the dock's default width: {notice} in {shown:?}"
+        );
+        assert!(
+            label_top(&paint) > usable_top,
+            "the notice has its own line under the scope row"
+        );
+    }
+}
+
+#[test]
+fn the_base_field_shows_its_drop_down_is_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dock = GitDock::new();
+    dock.open();
+    dock.load(branch_reading(dir.path()));
+    let ring = |dock: &mut GitDock| {
+        let paint = built(dock);
+        let field = dock.base_field().expect("field");
+        paint
+            .quads
+            .iter()
+            .find(|q| q.rect == field)
+            .expect("the field's ring")
+            .color
+    };
+    let theme = Theme::resolve("ossein-dark");
+    assert_eq!(ring(&mut dock), theme.border_subtle);
+    dock.set_picking_base(true);
+    assert_eq!(ring(&mut dock), theme.border_strong);
+    dock.set_picking_base(false);
+    assert_eq!(ring(&mut dock), theme.border_subtle);
+    assert!(!dock.commit_focused() && !dock.composer_focused());
+
+    dock.set_error("fatal: bad object HEAD".to_owned());
+    built(&mut dock);
+    assert_eq!(
+        dock.base_field(),
+        None,
+        "a git error draws no field for a drop-down to hang from"
+    );
 }
 
 #[test]

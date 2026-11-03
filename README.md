@@ -108,18 +108,27 @@ on a line, ask the agent to read your comments, and see its answers appear under
 
 When you or the agent commit the work, it leaves the **Uncommitted** review. Click
 **Branch** at the top of the dock (or press **b**) to review the branch instead: every
-change since the branch left its base branch, committed or not. The base branch is the
-one `origin/HEAD` names, else `origin/main`, `main`, `origin/master` or `master`, and the
-dock shows it next to the control. A comment on a removed line in this review is on the
-file where the branch began. Skelly remembers the choice as `[git] diff_against` in
-`config.toml`.
+change since the branch left its base branch, committed or not. By default the base branch
+is the one `origin/HEAD` names, else `origin/main`, `main`, `origin/master` or `master`, and
+the dock shows it next to the control. A comment on a removed line in this review is on the
+file where the branch began. Skelly remembers which review you use as `[git] diff_against`
+in `config.toml`.
+
+To review a stacked branch against its parent branch, click the base next to the control
+(or press **⇧B**), type to filter the branches, and pick the parent. **Default branch**
+goes back to the default. Skelly keeps the choice for each branch in git, as
+`branch.<name>.gh-merge-base`, which is also the base `gh pr create` uses. Of
+`origin/<name>` and `<name>`, the review uses the one the branch left most recently. If the
+chosen branch is gone, or has no history in common with yours, the dock says so and
+reviews against the default.
 
 In the dock, **↑/↓** move between rows, **⇧↑/⇧↓** between files and **[ / ]** between
 hunks. **↩** folds a file or opens the composer on a line or comment. **v** marks a file
 viewed and folds it until it changes again, **r** resolves or reopens a comment, and
-**⌫** deletes one. **b** switches between the Uncommitted and Branch reviews. **Space**
-stages a file, **⌘↩** stages one hunk (in the Uncommitted review), **a** stages
-everything, **Tab** moves to the commit message, and **u** undoes the last commit.
+**⌫** deletes one. **b** switches between the Uncommitted and Branch reviews, and **⇧B**
+chooses the branch review's base. **Space** stages a file, **⌘↩** stages one hunk (in the
+Uncommitted review), **a** stages everything, **Tab** moves to the commit message, and
+**u** undoes the last commit.
 
 The comments are kept outside the repository, one file per repository, and the dock never
 moves your `HEAD`, branches or index except when you stage or commit. See

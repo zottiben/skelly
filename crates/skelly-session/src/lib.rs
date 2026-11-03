@@ -183,15 +183,6 @@ impl Repo {
     /// since taken in from upstream. `None` when the repository has none of them.
     #[must_use]
     pub fn base_branch(&self) -> Option<String> {
-        let exists = |name: &str| {
-            self.git_stdout(&[
-                "rev-parse",
-                "--verify",
-                "--quiet",
-                &format!("{name}^{{commit}}"),
-            ])
-            .is_ok()
-        };
         if let Ok(target) = self.git_stdout(&[
             "symbolic-ref",
             "--quiet",
@@ -199,14 +190,135 @@ impl Repo {
             "refs/remotes/origin/HEAD",
         ]) {
             let target = target.trim();
-            if !target.is_empty() && exists(target) {
+            if !target.is_empty() && self.has_commit(target) {
                 return Some(target.to_owned());
             }
         }
         ["main", "master"]
             .into_iter()
             .flat_map(|name| [format!("origin/{name}"), name.to_owned()])
-            .find(|name| exists(name))
+            .find(|name| self.has_commit(name))
+    }
+
+    /// The base branch chosen for `branch`, when one is: git's `branch.<branch>.gh-merge-base`,
+    /// which GitHub CLI's `gh pr create` also takes as the pull request's base. It is a bare
+    /// branch name, as [`Self::fork_point`] takes it.
+    #[must_use]
+    pub fn chosen_base(&self, branch: &str) -> Option<String> {
+        let name = self
+            .git_stdout(&["config", "--get", &merge_base_key(branch)])
+            .ok()?;
+        let name = name.trim();
+        (!name.is_empty()).then(|| name.to_owned())
+    }
+
+    /// Choose the branch named `base` as `branch`'s base branch, or with `None` clear the choice.
+    /// Only `branch.<branch>.gh-merge-base` in the repository's config changes.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git config` cannot be run or fails.
+    pub fn choose_base(&self, branch: &str, base: Option<&str>) -> Result<(), GitError> {
+        let key = merge_base_key(branch);
+        match base {
+            Some(base) => self.git_stdout(&["config", &key, base]).map(drop),
+            None if self.chosen_base(branch).is_some() => {
+                self.git_stdout(&["config", "--unset-all", &key]).map(drop)
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// The branches a branch review can be against, by name, most recently committed first: the
+    /// local branches and `origin`'s, each name once, without the checked-out branch. These are
+    /// the names [`Self::fork_point`] and [`Self::choose_base`] take.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] if `git for-each-ref` cannot be run or fails.
+    pub fn branch_names(&self) -> Result<Vec<String>, GitError> {
+        let current = self
+            .git_stdout(&["symbolic-ref", "--quiet", "--short", "HEAD"])
+            .unwrap_or_default();
+        let refs = self.git_stdout(&[
+            "for-each-ref",
+            "--sort=-committerdate",
+            "--format=%(refname)",
+            "refs/heads/",
+            "refs/remotes/origin/",
+        ])?;
+        let mut names: Vec<String> = Vec::new();
+        for full in refs.lines() {
+            if full == "refs/remotes/origin/HEAD" {
+                continue;
+            }
+            let Some(name) = full
+                .strip_prefix("refs/heads/")
+                .or_else(|| full.strip_prefix("refs/remotes/origin/"))
+            else {
+                continue;
+            };
+            if name != current.trim() && !names.iter().any(|n| n == name) {
+                names.push(name.to_owned());
+            }
+        }
+        Ok(names)
+    }
+
+    /// Where `HEAD` left the branch `name`: of `origin/<name>` and the local `<name>`, the one
+    /// whose fork point is nearer `HEAD`, or the remote-tracking one when they are level. A parent
+    /// branch can be ahead locally, or behind what was pushed; either way the nearer fork point
+    /// is where this branch's own work starts. Returns the branch as git shortens it with the fork
+    /// point, or `None` when there is no such branch.
+    ///
+    /// # Errors
+    /// Returns [`GitError`] when the branch shares no history with `HEAD`, or git fails.
+    pub fn fork_point(&self, name: &str) -> Result<Option<(String, String)>, GitError> {
+        let candidates = [
+            (
+                format!("refs/remotes/origin/{name}"),
+                format!("origin/{name}"),
+            ),
+            (format!("refs/heads/{name}"), name.to_owned()),
+        ];
+        let mut nearest: Option<(String, String)> = None;
+        let mut failure = None;
+        for (full, short) in candidates {
+            if !self.has_commit(&full) {
+                continue;
+            }
+            match self.merge_base(&full) {
+                Ok(fork) => {
+                    let nearer = nearest
+                        .as_ref()
+                        .is_none_or(|(_, best)| fork != *best && self.is_ancestor(best, &fork));
+                    if nearer {
+                        nearest = Some((short, fork));
+                    }
+                }
+                Err(err) => failure = Some(err),
+            }
+        }
+        match (nearest, failure) {
+            (Some(found), _) => Ok(Some(found)),
+            (None, Some(err)) => Err(err),
+            (None, None) => Ok(None),
+        }
+    }
+
+    /// Whether `rev` names a commit.
+    fn has_commit(&self, rev: &str) -> bool {
+        self.git_stdout(&[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ])
+        .is_ok()
+    }
+
+    /// Whether commit `ancestor` is in the history of commit `of`.
+    fn is_ancestor(&self, ancestor: &str, of: &str) -> bool {
+        self.git_stdout(&["merge-base", "--is-ancestor", ancestor, of])
+            .is_ok()
     }
 
     /// The commit where `HEAD` and `other` last shared history: `git merge-base HEAD <other>`.
@@ -455,6 +567,12 @@ impl Repo {
     fn git_stdout(&self, args: &[&str]) -> Result<String, GitError> {
         run_git(&self.root, args)
     }
+}
+
+/// The git config key holding `branch`'s chosen base branch: GitHub CLI's, so `gh pr create`
+/// targets the base the branch review is against.
+fn merge_base_key(branch: &str) -> String {
+    format!("branch.{branch}.gh-merge-base")
 }
 
 /// Run `git -C <root> <args>` and return its stdout, erroring on a non-zero exit. The

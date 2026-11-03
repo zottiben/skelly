@@ -596,3 +596,172 @@ fn a_repository_without_main_or_master_has_no_base_branch() {
     let repo = Repo::discover(root).expect("discover").expect("in a repo");
     assert_eq!(repo.base_branch(), None);
 }
+
+/// Commit everything in `root` as `message`, at `when` (a unix time), so the commits of a test
+/// sort by date the way a real history does.
+fn commit_at(root: &Path, message: &str, when: u64) {
+    let date = format!("@{when} +0000");
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["commit", "-q", "-m", message, "--no-gpg-sign"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .env("GIT_AUTHOR_DATE", &date)
+        .env("GIT_COMMITTER_DATE", &date)
+        .status()
+        .expect("run git");
+    assert!(status.success(), "git commit {message} failed");
+}
+
+/// `main` <- `feat-a` <- `stack/feat-b.v2`, each with a file of its own, checked out on the
+/// last. Returns the repository and the tips of `main` and `feat-a`.
+fn stacked(root: &Path) -> (Repo, String, String) {
+    git(root, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("base.txt"), "base\n").expect("write base");
+    git(root, &["add", "."]);
+    commit_at(root, "init", 1_700_000_000);
+    let main = git_out(root, &["rev-parse", "HEAD"]);
+    git(root, &["checkout", "-q", "-b", "feat-a"]);
+    std::fs::write(root.join("a.txt"), "a\n").expect("write a");
+    git(root, &["add", "."]);
+    commit_at(root, "feat a", 1_700_000_100);
+    let feat_a = git_out(root, &["rev-parse", "HEAD"]);
+    git(root, &["checkout", "-q", "-b", "stack/feat-b.v2"]);
+    std::fs::write(root.join("b.txt"), "b\n").expect("write b");
+    git(root, &["add", "."]);
+    commit_at(root, "feat b", 1_700_000_200);
+    let repo = Repo::discover(root).expect("discover").expect("in a repo");
+    (repo, main, feat_a)
+}
+
+#[test]
+fn a_chosen_base_is_kept_where_gh_pr_create_reads_it() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    let (repo, _, _) = stacked(root);
+    let branch = "stack/feat-b.v2";
+    let before = (
+        git_out(root, &["rev-parse", "HEAD"]),
+        git_out(root, &["for-each-ref"]),
+        std::fs::read(root.join(".git/index")).expect("index"),
+    );
+
+    assert_eq!(repo.chosen_base(branch), None, "nothing is chosen yet");
+    repo.choose_base(branch, Some("feat-a")).expect("choose");
+    assert_eq!(repo.chosen_base(branch).as_deref(), Some("feat-a"));
+    assert_eq!(
+        git_out(
+            root,
+            &["config", "--get", "branch.stack/feat-b.v2.gh-merge-base"]
+        ),
+        "feat-a",
+        "GitHub CLI's key, holding a bare branch name"
+    );
+    repo.choose_base(branch, Some("main"))
+        .expect("choose again");
+    assert_eq!(repo.chosen_base(branch).as_deref(), Some("main"));
+    repo.choose_base(branch, None).expect("clear");
+    assert_eq!(repo.chosen_base(branch), None);
+    repo.choose_base(branch, None)
+        .expect("clearing what is not chosen is not an error");
+
+    let after = (
+        git_out(root, &["rev-parse", "HEAD"]),
+        git_out(root, &["for-each-ref"]),
+        std::fs::read(root.join(".git/index")).expect("index"),
+    );
+    assert_eq!(before, after, "choosing a base moves no ref and no index");
+}
+
+#[test]
+fn a_stacked_branch_is_measured_from_where_it_left_its_parent() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    let (repo, main, feat_a) = stacked(root);
+
+    let (name, fork) = repo
+        .fork_point("feat-a")
+        .expect("fork point")
+        .expect("feat-a exists");
+    assert_eq!((name.as_str(), fork.as_str()), ("feat-a", feat_a.as_str()));
+    let paths: Vec<String> = repo
+        .changes(Some(&fork))
+        .expect("changes")
+        .iter()
+        .map(|c| c.path.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        paths,
+        ["b.txt"],
+        "only the branch's own work, not its parent's"
+    );
+
+    // A remote-tracking copy that is behind: the local parent is nearer.
+    git(root, &["update-ref", "refs/remotes/origin/feat-a", &main]);
+    assert_eq!(
+        repo.fork_point("feat-a").expect("fork point"),
+        Some(("feat-a".to_owned(), feat_a.clone()))
+    );
+    // Level: the remote-tracking one, as in the default rule.
+    git(root, &["update-ref", "refs/remotes/origin/feat-a", &feat_a]);
+    assert_eq!(
+        repo.fork_point("feat-a").expect("fork point"),
+        Some(("origin/feat-a".to_owned(), feat_a.clone()))
+    );
+    // A local copy that is behind: the remote-tracking one is nearer.
+    git(root, &["branch", "-f", "feat-a", &main]);
+    assert_eq!(
+        repo.fork_point("feat-a").expect("fork point"),
+        Some(("origin/feat-a".to_owned(), feat_a.clone()))
+    );
+
+    assert_eq!(repo.fork_point("gone").expect("fork point"), None);
+    git(root, &["tag", "v1", &main]);
+    assert_eq!(
+        repo.fork_point("v1").expect("fork point"),
+        None,
+        "a tag is not a branch"
+    );
+    git(root, &["checkout", "-q", "--orphan", "lonely"]);
+    commit_at(root, "alone", 1_700_000_300);
+    git(root, &["branch", "-q", "unrelated"]);
+    git(root, &["checkout", "-q", "stack/feat-b.v2"]);
+    assert!(
+        repo.fork_point("unrelated").is_err(),
+        "no history in common is an error, not a missing branch"
+    );
+}
+
+#[test]
+fn the_branches_to_choose_from_are_named_once_newest_first() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let root = dir.path();
+    let (repo, main, feat_a) = stacked(root);
+    git(root, &["update-ref", "refs/remotes/origin/main", &main]);
+    git(root, &["update-ref", "refs/remotes/origin/feat-a", &feat_a]);
+    git(root, &["update-ref", "refs/remotes/origin/released", &main]);
+    git(
+        root,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
+    git(
+        root,
+        &["update-ref", "refs/remotes/upstream/fork-only", &main],
+    );
+    git(root, &["tag", "v1", &main]);
+
+    assert_eq!(
+        repo.branch_names().expect("branch names"),
+        ["feat-a", "main", "released"],
+        "the checked-out branch, origin/HEAD, tags and other remotes are not offered"
+    );
+}

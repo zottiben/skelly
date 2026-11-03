@@ -27,6 +27,8 @@ use skelly_session::{
     ChangedFile, DiffLine, FileChange, FileStatus, Hunk, LineKind, Skipped, Status,
 };
 
+use crate::palette;
+
 /// Git-dock layout constants in **logical** px (multiplied by the DPI scale). Tuned to the
 /// guide's §10.6: a status bar, the `CHANGED - N` label, the review scroll, and a commit box
 /// at the foot.
@@ -37,6 +39,8 @@ const PAD_TOP: f32 = 12.0;
 const STATUS_H: f32 = 26.0;
 /// The height of the row that picks what the review is against.
 const SCOPE_H: f32 = 30.0;
+/// The height of the notice under it, while the base chosen for the branch cannot be used.
+const NOTICE_H: f32 = 18.0;
 /// That row's segmented control: the container's inner padding, a segment's height and
 /// horizontal padding, and the container's and a segment's radius (§09's control, compact).
 const SEG_PAD: f32 = 2.0;
@@ -103,6 +107,8 @@ enum Focus {
     Commit,
     /// The comment composer (typing edits the comment; Enter sends it).
     Composer,
+    /// The base field's drop-down (the binary's picker takes the keys; the field shows open).
+    Base,
 }
 
 /// What a reading's changes are against.
@@ -113,6 +119,18 @@ pub(crate) struct Base {
     /// The base branch a branch review is against; `None` against `HEAD`, which a branch
     /// review falls back to when the repository has no base branch.
     pub(crate) branch: Option<BaseBranch>,
+    /// The base branch chosen for the checked-out branch, when the review cannot be against it
+    /// and is against the default instead.
+    pub(crate) unusable: Option<Unusable>,
+}
+
+/// Why a branch review is not against the base branch chosen for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Unusable {
+    /// No branch has the chosen name (it was deleted after it merged, say).
+    Missing(String),
+    /// The chosen branch shares no history with `HEAD`.
+    Unrelated(String),
 }
 
 impl Base {
@@ -181,6 +199,8 @@ pub(crate) enum Target {
     Init,
     /// A segment of the control that picks what the review is against.
     Scope(Scope),
+    /// The branch review's base field, which drops down the branches to review against.
+    Base,
     /// A file's stage checkbox.
     Stage(String),
     /// A file header, which folds or unfolds it.
@@ -331,7 +351,7 @@ impl GitDock {
     pub(crate) fn close(&mut self) {
         self.open = false;
         self.hover = None;
-        if self.focus == Focus::Composer {
+        if matches!(self.focus, Focus::Composer | Focus::Base) {
             self.focus = Focus::List;
         }
     }
@@ -370,6 +390,21 @@ impl GitDock {
     /// Move focus back to the review scroll.
     pub(crate) fn focus_list(&mut self) {
         self.focus = Focus::List;
+    }
+
+    /// Show the base field open while its drop-down is (`picking`), and give focus back to the
+    /// review when it closes.
+    pub(crate) fn set_picking_base(&mut self, picking: bool) {
+        if picking {
+            self.focus = Focus::Base;
+        } else if self.focus == Focus::Base {
+            self.focus = Focus::List;
+        }
+    }
+
+    /// Whether the base field's drop-down is open.
+    pub(crate) fn picking_base(&self) -> bool {
+        self.focus == Focus::Base
     }
 
     /// Append a typed character to the commit message.
@@ -456,6 +491,11 @@ impl GitDock {
     /// The review the dock shows: the uncommitted change, or the whole branch.
     pub(crate) fn scope(&self) -> Scope {
         self.data.base.scope
+    }
+
+    /// The checked-out branch, as last read; `None` on a detached `HEAD`.
+    pub(crate) fn branch(&self) -> Option<&str> {
+        self.data.status.branch.as_deref()
     }
 
     /// The review's threads (none when it could not be read).
@@ -819,6 +859,14 @@ impl GitDock {
             .map(|(_, target)| target.clone())
     }
 
+    /// Where the last build put the branch review's base field, for its drop-down to hang from.
+    pub(crate) fn base_field(&self) -> Option<PxRect> {
+        self.targets
+            .iter()
+            .find(|(_, target)| *target == Target::Base)
+            .map(|(rect, _)| *rect)
+    }
+
     /// The scroll's structure: its sections and items, folds applied.
     fn outline(&self) -> Outline {
         let threads = self.threads();
@@ -1035,7 +1083,7 @@ impl GitDock {
                 measure,
                 panel.y + (PAD_TOP + STATUS_H) * scale,
             );
-            let top = panel.y + (PAD_TOP + STATUS_H + SCOPE_H) * scale;
+            let top = panel.y + (PAD_TOP + STATUS_H + self.scope_h()) * scale;
             self.push_label_row(&mut out, &ctx, measure, top);
             let body = (
                 top + LABEL_H * scale,
@@ -1275,22 +1323,142 @@ impl GitDock {
             out.targets.push((rect, target));
             x += w;
         }
-        let base = &self.data.base;
-        let against = match (&base.branch, base.scope) {
-            (Some(branch), _) => format!("against {}", branch.name),
-            (None, Scope::Branch) => "no base branch - against HEAD".to_owned(),
-            (None, Scope::Uncommitted) => "against HEAD".to_owned(),
-        };
         let left = control.x + control.w + 10.0 * scale;
-        let x = (ctx.cr - measure.width(&against, role, None)).max(left);
+        let base = &self.data.base;
+        if base.scope == Scope::Uncommitted {
+            let against = "against HEAD";
+            let x = (ctx.cr - measure.width(against, role, None)).max(left);
+            out.labels.push(ProseLabel {
+                text: against.to_owned(),
+                x,
+                y: top + (SCOPE_H * scale - line_h) * 0.5,
+                role,
+                color: theme.fg_muted,
+                weight: None,
+                max_w: (ctx.cr - x).max(1.0),
+            });
+            return;
+        }
+        let field = PxRect {
+            y: control.y,
+            h: control.h,
+            ..control
+        };
+        self.push_base_field(out, ctx, measure, field, left);
+        if let Some(notice) = self.base_notice() {
+            let w = (ctx.cr - ctx.cx).max(0.0);
+            let (text, _) = palette::fit_label(&notice, &[], w, role, measure);
+            out.labels.push(ProseLabel {
+                text,
+                x: ctx.cx,
+                y: top + SCOPE_H * scale + (NOTICE_H * scale - line_h) * 0.5,
+                role,
+                color: theme.diff_del,
+                weight: None,
+                max_w: w.max(1.0),
+            });
+        }
+    }
+
+    /// The height of the scope row, with the notice under it while there is one.
+    fn scope_h(&self) -> f32 {
+        if self.base_notice().is_some() {
+            SCOPE_H + NOTICE_H
+        } else {
+            SCOPE_H
+        }
+    }
+
+    /// Why the branch review is not against the base chosen for the branch, if it is not.
+    fn base_notice(&self) -> Option<String> {
+        Some(match self.data.base.unusable.as_ref()? {
+            Unusable::Missing(chosen) => format!("chosen base {chosen} not found"),
+            Unusable::Unrelated(chosen) => format!("chosen base {chosen} shares no history"),
+        })
+    }
+
+    /// The branch review's base field, right-anchored on the scope row from `left`: what the
+    /// review is against, in a `bg.inset` field with a `border.subtle` ring (`border.strong` while
+    /// hovered or dropped down, §09's input) and a chevron, after a muted `against` (which says
+    /// when there is no base branch). `row` gives the field's height and top.
+    fn push_base_field(
+        &self,
+        out: &mut Out,
+        ctx: &GCtx,
+        measure: &mut TextMeasure,
+        row: PxRect,
+        left: f32,
+    ) {
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let base = &self.data.base;
+        let name = base.branch.as_ref().map_or("HEAD", |b| b.name.as_str());
+        let lead = if base.branch.is_some() {
+            "against"
+        } else {
+            "no base branch - against"
+        };
+        let pad = SEG_PAD_X * scale;
+        let gap = 6.0 * scale;
+        let chevron_w = measure.width(CHEVRON_DOWN, FontRole::Icon, None);
+        let room = (ctx.cr - left).max(0.0);
+        let natural = pad + measure.width(name, FontRole::Mono, None) + gap + chevron_w + pad;
+        let field = PxRect {
+            x: ctx.cr - natural.min(room * 0.65),
+            w: natural.min(room * 0.65),
+            ..row
+        };
+        let open = self.picking_base() || self.hover.as_ref() == Some(&Target::Base);
+        push_ringed(
+            &mut out.quads,
+            field,
+            if open {
+                theme.border_strong
+            } else {
+                theme.border_subtle
+            },
+            theme.bg_inset,
+            SEG_RADIUS * scale,
+            scale,
+        );
+        let text_w = (field.w - 2.0 * pad - gap - chevron_w).max(0.0);
+        let (text, _) = palette::fit_label(name, &[], text_w, FontRole::Mono, measure);
+        let mono_h = measure.line_height(FontRole::Mono);
         out.labels.push(ProseLabel {
-            text: against,
+            text,
+            x: field.x + pad,
+            y: field.y + (field.h - mono_h) * 0.5,
+            role: FontRole::Mono,
+            color: if open {
+                theme.fg_primary
+            } else {
+                theme.fg_secondary
+            },
+            weight: None,
+            max_w: text_w.max(1.0),
+        });
+        let icon_h = measure.line_height(FontRole::Icon);
+        out.labels.push(ProseLabel {
+            text: CHEVRON_DOWN.to_owned(),
+            x: field.x + field.w - pad - chevron_w,
+            y: field.y + (field.h - icon_h) * 0.5,
+            role: FontRole::Icon,
+            color: theme.fg_muted,
+            weight: None,
+            max_w: f32::MAX,
+        });
+        out.targets.push((field, Target::Base));
+        let role = FontRole::Caption;
+        let lead_w = (field.x - gap - left).max(0.0);
+        let (lead, _) = palette::fit_label(lead, &[], lead_w, role, measure);
+        let x = (field.x - gap - measure.width(&lead, role, None)).max(left);
+        out.labels.push(ProseLabel {
+            text: lead,
             x,
-            y: top + (SCOPE_H * scale - line_h) * 0.5,
+            y: field.y + (field.h - measure.line_height(role)) * 0.5,
             role,
             color: theme.fg_muted,
             weight: None,
-            max_w: (ctx.cr - x).max(1.0),
+            max_w: lead_w.max(1.0),
         });
     }
 

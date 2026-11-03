@@ -18,7 +18,7 @@ use skelly_session::review::{
 };
 use skelly_session::{GitError, Repo, Status as Working};
 
-use crate::gitdock::{Base, BaseBranch, Reading};
+use crate::gitdock::{Base, BaseBranch, Reading, Unusable};
 use crate::session_state;
 
 /// The review store for `repo`, under Skelly's state directory.
@@ -35,7 +35,7 @@ pub(crate) fn store_for(repo: &Repo) -> Option<ReviewStore> {
 /// # Errors
 /// [`GitError`] when git cannot list the changes.
 pub(crate) fn read(repo: &Repo, status: Working, scope: Scope) -> Result<Reading, GitError> {
-    let base = base(repo, scope);
+    let base = base(repo, &status, scope);
     let changes = repo.changes(base.commit())?;
     let (review, review_problem) = match store_for(repo).map(|store| store.load()) {
         Some(Ok(review)) => (Some(review), None),
@@ -59,17 +59,41 @@ pub(crate) fn read(repo: &Repo, status: Working, scope: Scope) -> Result<Reading
     })
 }
 
-/// What `scope`'s review of `repo` is against: in the branch review, where `HEAD` left the base
-/// branch, when the repository has one it shares history with; else `HEAD`.
-fn base(repo: &Repo, scope: Scope) -> Base {
-    let branch = match scope {
-        Scope::Uncommitted => None,
-        Scope::Branch => repo.base_branch().and_then(|name| {
-            let commit = repo.merge_base(&name).ok()?;
-            Some(BaseBranch { name, commit })
-        }),
-    };
-    Base { scope, branch }
+/// What `scope`'s review of `repo`, whose status is `status`, is against: in the branch review,
+/// where `HEAD` left the base branch chosen for the checked-out branch, else the repository's
+/// default base branch, when it shares history with it; else `HEAD`. A chosen base it cannot be
+/// against is kept, with why, so the dock can say so.
+fn base(repo: &Repo, status: &Working, scope: Scope) -> Base {
+    if scope == Scope::Uncommitted {
+        return Base {
+            scope,
+            branch: None,
+            unusable: None,
+        };
+    }
+    let mut unusable = None;
+    if let Some(chosen) = status.branch.as_deref().and_then(|b| repo.chosen_base(b)) {
+        match repo.fork_point(&chosen) {
+            Ok(Some((name, commit))) => {
+                return Base {
+                    scope,
+                    branch: Some(BaseBranch { name, commit }),
+                    unusable: None,
+                };
+            }
+            Ok(None) => unusable = Some(Unusable::Missing(chosen)),
+            Err(_) => unusable = Some(Unusable::Unrelated(chosen)),
+        }
+    }
+    let branch = repo.base_branch().and_then(|name| {
+        let commit = repo.merge_base(&name).ok()?;
+        Some(BaseBranch { name, commit })
+    });
+    Base {
+        scope,
+        branch,
+        unusable,
+    }
 }
 
 /// Why there is nowhere to keep reviews.
@@ -427,7 +451,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (work, fork) = branched_clone(dir.path());
         let repo = Repo::discover(&work).unwrap().unwrap();
-        let branch = base(&repo, Scope::Branch);
+        let status = repo.status().unwrap();
+        let branch = base(&repo, &status, Scope::Branch);
         assert_eq!(
             branch.branch,
             Some(BaseBranch {
@@ -438,7 +463,7 @@ mod tests {
         );
         assert_eq!(branch.commit(), Some(fork.as_str()));
         assert_eq!(branch.old(), fork);
-        let uncommitted = base(&repo, Scope::Uncommitted);
+        let uncommitted = base(&repo, &status, Scope::Uncommitted);
         assert_eq!(uncommitted.branch, None);
         assert_eq!((uncommitted.commit(), uncommitted.old()), (None, "HEAD"));
     }
@@ -450,10 +475,66 @@ mod tests {
         git(&work, &["checkout", "-q", "--orphan", "lonely"]);
         git(&work, &["commit", "-q", "-m", "alone", "--no-gpg-sign"]);
         let repo = Repo::discover(&work).unwrap().unwrap();
-        let branch = base(&repo, Scope::Branch);
+        let branch = base(&repo, &repo.status().unwrap(), Scope::Branch);
         assert_eq!(branch.scope, Scope::Branch);
         assert_eq!(branch.branch, None);
         assert_eq!((branch.commit(), branch.old()), (None, "HEAD"));
+    }
+
+    #[test]
+    fn the_branch_review_is_against_the_base_chosen_for_the_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (work, _) = branched_clone(dir.path());
+        let parent = git(&work, &["rev-parse", "HEAD"]);
+        git(&work, &["checkout", "-q", "-b", "child"]);
+        std::fs::write(work.join("c.txt"), "c\n").unwrap();
+        git(&work, &["add", "."]);
+        git(&work, &["commit", "-q", "-m", "child", "--no-gpg-sign"]);
+        git(&work, &["checkout", "-q", "--orphan", "lonely"]);
+        git(&work, &["commit", "-q", "-m", "alone", "--no-gpg-sign"]);
+        git(&work, &["checkout", "-q", "child"]);
+        let repo = Repo::discover(&work).unwrap().unwrap();
+        let status = repo.status().unwrap();
+        let against = |chosen: Option<&str>, scope: Scope| {
+            repo.choose_base("child", chosen).unwrap();
+            base(&repo, &status, scope)
+        };
+
+        let chosen = against(Some("feat"), Scope::Branch);
+        assert_eq!(
+            chosen.branch,
+            Some(BaseBranch {
+                name: "feat".to_owned(),
+                commit: parent,
+            }),
+            "where the branch left its parent, not the remote default"
+        );
+        assert_eq!(chosen.unusable, None);
+        assert_eq!(
+            against(Some("feat"), Scope::Uncommitted),
+            Base::default(),
+            "the uncommitted review is against HEAD whatever is chosen"
+        );
+
+        let default = Some("origin/trunk".to_owned());
+        let missing = against(Some("gone"), Scope::Branch);
+        assert_eq!(missing.unusable, Some(Unusable::Missing("gone".to_owned())));
+        assert_eq!(
+            missing.branch.map(|b| b.name),
+            default,
+            "the default instead"
+        );
+        let unrelated = against(Some("lonely"), Scope::Branch);
+        assert_eq!(
+            unrelated.unusable,
+            Some(Unusable::Unrelated("lonely".to_owned()))
+        );
+        assert_eq!(unrelated.branch.map(|b| b.name), default);
+        let cleared = against(None, Scope::Branch);
+        assert_eq!(
+            (cleared.branch.map(|b| b.name), cleared.unusable),
+            (default, None)
+        );
     }
 
     #[test]

@@ -875,7 +875,7 @@ struct Row {
 /// character of `query` appears in order in `label` (ASCII case-insensitive), else
 /// `None`. An empty query matches with no highlights. Higher score is better - an
 /// earlier first match and fewer gaps between matched characters win.
-fn fuzzy_match(query: &str, label: &str) -> Option<(i32, Vec<usize>)> {
+pub(crate) fn fuzzy_match(query: &str, label: &str) -> Option<(i32, Vec<usize>)> {
     let mut wanted = query.chars().filter(|c| !c.is_whitespace()).peekable();
     if wanted.peek().is_none() {
         return Some((0, Vec::new()));
@@ -939,16 +939,18 @@ fn push_line(
     });
 }
 
-/// Truncate `label` to fit `max_w` physical px, keeping the tail behind a leading `…` (the
-/// informative end of a file path), and remap its fuzzy-match `positions` onto the kept tail.
-/// Returns the label unchanged when it already fits or there is no room to truncate.
-fn fit_label(
+/// Truncate `label`, set in `role`, to fit `max_w` physical px, keeping the tail behind a
+/// leading `…` (the informative end of a file path), and remap its fuzzy-match `positions` onto
+/// the kept tail. Returns the label unchanged when it already fits or there is no room to
+/// truncate.
+pub(crate) fn fit_label(
     label: &str,
     positions: &[usize],
     max_w: f32,
+    role: FontRole,
     measure: &mut TextMeasure,
 ) -> (String, Vec<usize>) {
-    if max_w <= 0.0 || measure.width(label, FontRole::Body, None) <= max_w {
+    if max_w <= 0.0 || measure.width(label, role, None) <= max_w {
         return (label.to_owned(), positions.to_vec());
     }
     let chars: Vec<char> = label.chars().collect();
@@ -958,7 +960,7 @@ fn fit_label(
         let candidate: String = std::iter::once('\u{2026}')
             .chain(chars[start..].iter().copied())
             .collect();
-        if measure.width(&candidate, FontRole::Body, None) <= max_w {
+        if measure.width(&candidate, role, None) <= max_w {
             let remapped = positions
                 .iter()
                 .filter(|&&p| p >= start)
@@ -1012,7 +1014,13 @@ fn push_command(
         measure.width(row.hint, FontRole::Micro, None) + ICON_GAP * scale
     };
     let label_max_w = (cx + cw - ROW_INSET * scale - hint_reserve - label_start).max(0.0);
-    let (label, positions) = fit_label(&row.label, &row.positions, label_max_w, measure);
+    let (label, positions) = fit_label(
+        &row.label,
+        &row.positions,
+        label_max_w,
+        FontRole::Body,
+        measure,
+    );
     let mut x = label_start;
     for (text, matched) in matched_runs(&label, &positions) {
         let color = if matched {
@@ -1051,7 +1059,7 @@ fn push_command(
 
 /// Split `label` into consecutive `(text, matched)` runs by whether each character's index
 /// is in `positions` (the fuzzy-matched positions), so matched runs can draw in accent.
-fn matched_runs(label: &str, positions: &[usize]) -> Vec<(String, bool)> {
+pub(crate) fn matched_runs(label: &str, positions: &[usize]) -> Vec<(String, bool)> {
     let mut runs: Vec<(String, bool)> = Vec::new();
     for (i, ch) in label.chars().enumerate() {
         let matched = positions.contains(&i);

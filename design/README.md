@@ -82,6 +82,30 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-03 - **The branch review's base is chosen per branch, from a drop-down.** User
+  request: review stacked branches against their parent branch, not the remote's default.
+  In the branch review, what the review is against is a field at the right of the scope row
+  (a `bg.inset` field with a `border.subtle` ring, `border.strong` while hovered or open,
+  the base in mono and a chevron), after a muted `against`. A click on it, or `⇧B` in the
+  review, drops down a card like the right-click menu's, under the field and right-aligned
+  with it: a filter row (§09's input, with fuzzy matching like the command palette's), a
+  `Default branch` row whose mono hint names the default (or `HEAD`), then the local and
+  `origin` branches, most recently committed first, without the checked-out branch or
+  `origin/HEAD`. Matched characters are `accent`, the current choice has a check, and at most
+  10 rows show before the list scrolls. `↑/↓` and `PageUp/PageDown` move the highlight, the
+  wheel scrolls the list, and `↩` or a click picks; `Esc` or a click elsewhere closes it. The choice is kept in the repository's
+  git config as `branch.<name>.gh-merge-base`, a bare branch name, the key `gh` already reads
+  as the default base of `gh pr create` and sets with `gh issue develop --base`; `Default
+  branch` unsets it. It is not a `config.toml` key, because it is a fact about one branch of
+  one repository, shared with `gh`, and `git branch -m` carries it with the branch. A chosen
+  name is reviewed against whichever of `origin/<name>` and `<name>` has its fork point
+  nearer `HEAD` (the remote one on a tie). When the chosen branch is gone or has no history
+  in common, the review falls back to the default rule, and a `diff.del` line under the scope
+  row says `chosen base <name> not found` or `chosen base <name> shares no history`, on its
+  own line so a long name is never cut. A detached `HEAD` has no branch to keep a choice for,
+  so `⇧B` there shows a toast instead. The default rule itself is unchanged.
+  _(was: "There is no per-repository override yet" in the 2026-11-02 branch-review entry)_
+
 - 2026-11-03 - **`skelly mcp` serves the review to any agent over MCP.** User request: an
   MCP server built into Skelly, so an agent finds the user's review comments and acts on them
   without reading Skelly's source ("ground yourself in the review comments I made and address

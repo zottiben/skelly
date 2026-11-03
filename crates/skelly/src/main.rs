@@ -10,6 +10,7 @@
 //! output. Errors are contextualized here with `anyhow`; `wgpu`/`alacritty` types
 //! never leak up.
 
+mod basepicker;
 mod cheatsheet;
 mod cli;
 mod confirm;
@@ -55,6 +56,7 @@ use skelly_session::review::{Author, Review, ReviewError, Scope, Status as Threa
 use skelly_session::{Actor, Repo, SessionEvent, Status, Timeline};
 use skelly_term::{CellAttrs, CellColor, ExitStatus, KeyboardMode, TermCell, Terminal};
 
+use basepicker::{BasePicker, Pick};
 use confirm::{CloseTarget, Confirm};
 use contextmenu::{ContextMenu, MenuAction, MenuContext};
 use gitdock::{Compose, GitDock, Spot};
@@ -695,6 +697,9 @@ struct App {
     /// The open right-click tab action menu (design §08), or `None` when closed. Reuses the
     /// shared overlay card, anchored at the click; captures keys + clicks while up.
     context_menu: Option<ContextMenu>,
+    /// The git dock's base-branch drop-down, or `None` when closed. Reuses the shared overlay
+    /// card, hung from the dock's base field; captures keys, clicks and the wheel while up.
+    base_picker: Option<BasePicker>,
     /// The current transient toast (design §12), or `None`. Non-modal: it auto-dismisses at
     /// `toast_expires` (the loop wakes at that deadline) and never captures input.
     toast: Option<Toast>,
@@ -837,6 +842,7 @@ impl App {
             dragging_tab: None,
             rail_expanded: false,
             context_menu: None,
+            base_picker: None,
             toast: None,
             dictation: None,
             conversation: None,
@@ -1221,6 +1227,7 @@ impl App {
             || self.onboarding.is_some()
             || self.cheatsheet_open
             || self.context_menu.is_some()
+            || self.base_picker.is_some()
             || self.pointer_in_find_bar()
             || self.pointer_in_right_dock()
             || self.on_dock_edge()
@@ -1867,6 +1874,13 @@ impl App {
             .is_some()
             .then(|| self.build_context_menu_frame())
             .flatten();
+        // The git dock's base drop-down reuses it too, hung from the dock's base field. The dock
+        // was built above, so the field is where this frame draws it (or closes it).
+        let base_picker = self
+            .base_picker
+            .is_some()
+            .then(|| self.build_base_picker_frame())
+            .flatten();
         // A transient toast (design §12) reuses the overlay card at the lowest priority.
         let toast = self.build_toast_frame();
         // Hover help temporarily takes precedence over toasts, including the voice HUD. The
@@ -1911,8 +1925,9 @@ impl App {
                 })),
                 None => renderer.set_timeline(None),
             }
-            // Overlay precedence: onboarding (first run) > cheatsheet > context menu > palette >
-            // confirm (mutually exclusive in practice; the order guards accidental overlaps).
+            // Overlay precedence: onboarding (first run) > cheatsheet > context menu > base
+            // drop-down > palette > confirm (mutually exclusive in practice; the order guards
+            // accidental overlaps).
             let overlay_frame = onboarding
                 .as_ref()
                 .map(|f| (f.panel, &f.quads, &f.labels))
@@ -1922,6 +1937,7 @@ impl App {
                         .as_ref()
                         .map(|f| (f.panel, &f.quads, &f.labels))
                 })
+                .or_else(|| base_picker.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
                 .or_else(|| overlay.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
                 .or_else(|| confirm.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
                 .or_else(|| tooltip.as_ref().map(|f| (f.panel, &f.quads, &f.labels)))
@@ -2079,6 +2095,39 @@ impl App {
         let scale = scale32(self.scale);
         let menu = self.context_menu.as_ref()?;
         let (quads, labels) = menu.build(panel, scale, &self.theme, &mut self.measure);
+        Some(OnboardingFrame {
+            panel,
+            quads,
+            labels,
+        })
+    }
+
+    /// The placed panel (physical px) of the open base drop-down: its natural size, under the
+    /// git dock's base field as the last build put it, inside the window. `None` when it is
+    /// closed, or before the dock has drawn the field.
+    fn base_picker_panel(&mut self) -> Option<PxRect> {
+        let scale = scale32(self.scale);
+        let surface = (dim_f32(self.size.0), dim_f32(self.size.1));
+        let field = self.git_dock.base_field()?;
+        let size = self
+            .base_picker
+            .as_ref()?
+            .natural_size(scale, &mut self.measure);
+        Some(BasePicker::place(field, size, surface, scale))
+    }
+
+    /// Lay out the base drop-down as an overlay card under the git dock's base field. It hangs
+    /// from that field, so it closes when the dock stops drawing one (a git error, the other
+    /// review, a closed dock).
+    fn build_base_picker_frame(&mut self) -> Option<OnboardingFrame> {
+        if !self.git_dock.open || self.git_dock.base_field().is_none() {
+            self.close_base_picker();
+            return None;
+        }
+        let panel = self.base_picker_panel()?;
+        let scale = scale32(self.scale);
+        let picker = self.base_picker.as_ref()?;
+        let (quads, labels) = picker.build(panel, scale, &self.theme, &mut self.measure);
         Some(OnboardingFrame {
             panel,
             quads,
@@ -3099,8 +3148,13 @@ impl App {
         }
     }
 
-    /// Cache the dock's repository, and point the git-poll thread's full reading at it.
+    /// Cache the dock's repository, and point the git-poll thread's full reading at it. The
+    /// base drop-down lists another repository's branches, so it closes when this one goes.
     fn set_git_repo(&mut self, repo: Option<Repo>) {
+        let same = matches!((&self.git_repo, &repo), (Some(a), Some(b)) if a.root() == b.root());
+        if !same {
+            self.close_base_picker();
+        }
         self.git_repo = repo;
         self.share_review_target();
     }
@@ -3135,6 +3189,161 @@ impl App {
             Scope::Branch => DiffAgainst::Branch,
         };
         self.apply_setting_change("git.diff_against");
+    }
+
+    /// Drop down the branches the branch review can be against, under the dock's base field
+    /// (`⇧B`, or a click on the field), switching to the branch review first. A detached `HEAD`
+    /// has no branch to keep a choice for, which a toast says instead.
+    fn open_base_picker(&mut self) {
+        let Some(repo) = self.git_repo.clone() else {
+            return;
+        };
+        let Some(branch) = self.git_dock.branch().map(str::to_owned) else {
+            self.show_toast(
+                "Check out a branch to choose what it is reviewed against",
+                ToastKind::Info,
+            );
+            return;
+        };
+        let names = match repo.branch_names() {
+            Ok(names) => names,
+            Err(err) => {
+                self.show_toast(format!("Cannot list the branches: {err}"), ToastKind::Error);
+                return;
+            }
+        };
+        let current = repo
+            .chosen_base(&branch)
+            .map_or(Pick::Default, Pick::Branch);
+        self.set_review_scope(Scope::Branch);
+        self.base_picker = Some(BasePicker::new(branch, repo.base_branch(), names, current));
+        self.git_dock.set_picking_base(true);
+        self.request_redraw();
+    }
+
+    /// Close the base drop-down without choosing.
+    fn close_base_picker(&mut self) {
+        if self.base_picker.take().is_some() {
+            self.git_dock.set_picking_base(false);
+            self.request_redraw();
+        }
+    }
+
+    /// Review the branch against `pick`: keep the choice in git (`branch.<name>.gh-merge-base`,
+    /// which `gh pr create` reads too), close the drop-down and reload the dock. A failure is a
+    /// toast.
+    fn choose_base(&mut self, pick: &Pick) {
+        let Some(picker) = self.base_picker.take() else {
+            return;
+        };
+        self.git_dock.set_picking_base(false);
+        self.request_redraw();
+        if pick == picker.current() {
+            return;
+        }
+        let Some(repo) = self.git_repo.clone() else {
+            return;
+        };
+        let base = match pick {
+            Pick::Default => None,
+            Pick::Branch(name) => Some(name.as_str()),
+        };
+        if let Err(err) = repo.choose_base(picker.branch(), base) {
+            self.show_toast(
+                format!("Cannot choose the base branch: {err}"),
+                ToastKind::Error,
+            );
+        }
+        self.reload_git_dock();
+    }
+
+    /// Keys while the base drop-down is open: typing filters the branches (`⌘V` pastes), `⌫`
+    /// deletes, `↑/↓` and `PageUp/PageDown` move the highlight, `↩` picks it, and `Esc` closes
+    /// the drop-down. Captured while open.
+    fn on_base_picker_key(&mut self, key_event: &KeyEvent) {
+        let command = self.modifiers.super_key() || self.modifiers.control_key();
+        let key = key_event.logical_key.as_ref();
+        match key {
+            Key::Named(NamedKey::Escape) => return self.close_base_picker(),
+            Key::Named(NamedKey::Enter) => {
+                if let Some(pick) = self
+                    .base_picker
+                    .as_ref()
+                    .and_then(BasePicker::selected_pick)
+                {
+                    self.choose_base(&pick);
+                }
+                return;
+            }
+            _ => {}
+        }
+        let paste = match key {
+            Key::Character(ch) if command && ch.eq_ignore_ascii_case("v") => {
+                self.clipboard.as_mut().and_then(|c| c.get_text().ok())
+            }
+            _ => None,
+        };
+        let Some(picker) = self.base_picker.as_mut() else {
+            return;
+        };
+        match key {
+            Key::Named(NamedKey::ArrowUp) => picker.move_selection(-1),
+            Key::Named(NamedKey::ArrowDown) => picker.move_selection(1),
+            Key::Named(NamedKey::PageUp) => picker.page(-1),
+            Key::Named(NamedKey::PageDown) => picker.page(1),
+            Key::Named(NamedKey::Backspace) => picker.backspace(),
+            _ if command => {
+                if let Some(text) = paste {
+                    picker.type_text(&text);
+                }
+            }
+            _ => {
+                if let Some(text) = &key_event.text {
+                    picker.type_text(text);
+                }
+            }
+        }
+        self.request_redraw();
+    }
+
+    /// The pointer moved while the base drop-down is open: highlight the row under it.
+    fn on_base_picker_pointer(&mut self) {
+        let Some(panel) = self.base_picker_panel() else {
+            return;
+        };
+        let (px, py) = point_f32(self.pointer);
+        let scale = scale32(self.scale);
+        if self
+            .base_picker
+            .as_mut()
+            .is_some_and(|p| p.hover(panel, scale, px, py))
+        {
+            self.request_redraw();
+        }
+    }
+
+    /// A press while the base drop-down is open: a row picks its branch, and anywhere else
+    /// closes the drop-down (the field too, so a second click on it closes what the first
+    /// opened). A release does nothing.
+    fn on_base_picker_click(&mut self, state: ElementState) {
+        if state != ElementState::Pressed {
+            return;
+        }
+        let (px, py) = point_f32(self.pointer);
+        let scale = scale32(self.scale);
+        let Some(panel) = self.base_picker_panel() else {
+            return self.close_base_picker();
+        };
+        if !voicebar::contains(panel, (px, py)) {
+            return self.close_base_picker();
+        }
+        let pick = self.base_picker.as_mut().and_then(|picker| {
+            let row = picker.hit(panel, scale, px, py)?;
+            picker.pick_at(row)
+        });
+        if let Some(pick) = pick {
+            self.choose_base(&pick);
+        }
     }
 
     /// Initialize a git repository in the active tab's focused-pane cwd (the git dock's "Init
@@ -3891,6 +4100,7 @@ impl App {
         if self.context_menu.is_some() {
             self.close_context_menu();
         }
+        self.close_base_picker();
         let anchor = point_f32(self.pointer);
         match self.sidebar_hit() {
             Some(sidebar::Hit::Tab(index)) => {
@@ -5105,7 +5315,8 @@ impl App {
     /// on its line (a reply on its thread) as `c` does; `v` marks the file viewed, `r` resolves
     /// or reopens a thread and `⌫` deletes it; `Space` stages the file, `⌘↵` the hunk, and `a`
     /// everything; `u` undoes the last commit; `b` switches between the uncommitted and the
-    /// branch review; `Tab` moves to the commit box, and `Esc` closes the dock.
+    /// branch review, and `⇧B` drops down the branches it can be against; `Tab` moves to the
+    /// commit box, and `Esc` closes the dock.
     fn on_review_key(&mut self, key_event: &KeyEvent) {
         let shift = self.modifiers.shift_key();
         let command = self.modifiers.super_key() || self.modifiers.control_key();
@@ -5143,6 +5354,10 @@ impl App {
 
     /// The review's one-character keys (see [`Self::on_review_key`]).
     fn on_review_letter(&mut self, ch: &str) {
+        if ch.eq_ignore_ascii_case("b") && self.modifiers.shift_key() {
+            self.open_base_picker();
+            return;
+        }
         let cursor = self.git_dock.cursor().cloned();
         match ch.to_ascii_lowercase().as_str() {
             "[" => self.git_dock.move_hunk(-1),
@@ -5678,6 +5893,11 @@ impl App {
             self.on_context_menu_key(key_event);
             return;
         }
+        // So does the git dock's base drop-down.
+        if self.base_picker.is_some() {
+            self.on_base_picker_key(key_event);
+            return;
+        }
         // The keybinding cheatsheet (§11) captures input: Esc or ⌘/ closes, everything else is
         // swallowed while it is up.
         if self.cheatsheet_open {
@@ -5866,6 +6086,11 @@ impl App {
             }
             return;
         }
+        // So does the base drop-down: hovering highlights its rows.
+        if self.base_picker.is_some() {
+            self.on_base_picker_pointer();
+            return;
+        }
         // The settings view covers the window: its widgets take the pointer.
         if self.settings.open {
             self.on_settings_pointer();
@@ -5977,6 +6202,11 @@ impl App {
         // dismisses it (design §08). Either way nothing behind the menu reacts.
         if self.context_menu.is_some() {
             self.on_context_menu_click(state);
+            return;
+        }
+        // The base drop-down does too: a row picks it, a click elsewhere closes it.
+        if self.base_picker.is_some() {
+            self.on_base_picker_click(state);
             return;
         }
         // A click during an overlay's fade-out dismisses it (and is consumed) instead of
@@ -6118,6 +6348,7 @@ impl App {
         match target {
             Target::Init => self.init_repo(),
             Target::Scope(scope) => self.set_review_scope(scope),
+            Target::Base => self.open_base_picker(),
             Target::Stage(path) => self.toggle_stage(&path),
             Target::Fold(path) => self.git_dock.toggle_fold(&path),
             Target::Viewed(path) => self.toggle_viewed(&path),
@@ -6385,6 +6616,20 @@ impl App {
             MouseScrollDelta::LineDelta(_, y) => notch_lines(f64::from(y)),
             MouseScrollDelta::PixelDelta(pos) => wheel_lines(pos.y / 20.0),
         };
+        // The base drop-down takes the wheel while open: over it, its rows scroll (winit's
+        // positive delta is up); nothing behind it moves.
+        if self.base_picker.is_some() {
+            let over = self
+                .base_picker_panel()
+                .is_some_and(|panel| voicebar::contains(panel, point_f32(self.pointer)));
+            if over && lines != 0 {
+                if let Some(picker) = self.base_picker.as_mut() {
+                    picker.scroll_rows(-lines);
+                }
+                self.request_redraw();
+            }
+            return;
+        }
         // The settings view covers the panes; a wheel over it must not scroll a hidden terminal.
         // It scrolls the active page's rows, which overflow in a short window.
         if self.settings.open {

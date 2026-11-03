@@ -9,23 +9,36 @@
 //! `threads` (the default), `composer`, `scrolled` (a short window scrolled into a file, its
 //! header pinned), `norepo` (the "Not a git repo" empty state), or - with the agent's change
 //! committed on a branch - `branch` (the branch review) or `committed` (the uncommitted one).
+//! With the branch stacked on a parent branch: `stacked` (the review against the parent chosen
+//! for it), `missing` (a chosen parent that is gone), `picker` (the base drop-down open over the
+//! dock) or `picker-filter` (the drop-down filtered).
 //! Run: `cargo run -p skelly --example git_dock_capture -- git-dock.png [theme] [state]`.
 #![allow(
     clippy::cast_precision_loss,
     reason = "example: surface dimensions are small, non-negative values"
 )]
 
+#[allow(dead_code, reason = "the example drives only part of the drop-down")]
+#[path = "../src/basepicker.rs"]
+mod basepicker;
 #[allow(dead_code, reason = "the example drives only part of the dock")]
 #[path = "../src/gitdock.rs"]
 mod gitdock;
+#[allow(
+    dead_code,
+    reason = "the dock and the drop-down use only its text helpers"
+)]
+#[path = "../src/palette.rs"]
+mod palette;
 
 use std::path::Path;
 use std::process::Command;
 
-use gitdock::{Base, BaseBranch, GitDock, Reading, Spot};
+use basepicker::{BasePicker, Pick};
+use gitdock::{Base, BaseBranch, GitDock, Reading, Spot, Unusable};
 use skelly_config::Appearance;
 use skelly_render::{
-    CaptureGitDock, CapturePane, Chrome, GridCell, PxRect, Srgb, TextMeasure, Theme,
+    CaptureGitDock, CaptureOverlay, CapturePane, Chrome, GridCell, PxRect, Srgb, TextMeasure, Theme,
 };
 use skelly_session::review::{self, Anchor, Author, ReviewStore, Scope, Side};
 use skelly_session::Repo;
@@ -100,36 +113,7 @@ fn main() {
     let theme = Theme::resolve(&appearance.theme);
 
     let work = tempfile::tempdir().expect("temp dir");
-    let mut dock = GitDock::new();
-    dock.open();
-    if state == "norepo" {
-        dock.set_no_repo();
-    } else {
-        let (committed, scope) = match state.as_str() {
-            "branch" => (true, Scope::Branch),
-            "committed" => (true, Scope::Uncommitted),
-            _ => (false, Scope::Uncommitted),
-        };
-        dock.load(read(work.path(), committed, scope));
-        dock.set_cursor(Spot::Line {
-            path: "src/pane/tree.rs".to_owned(),
-            side: Side::New,
-            line: 12,
-        });
-    }
-    if state == "composer" {
-        dock.start_comment(&Spot::Line {
-            path: "src/pane/tree.rs".to_owned(),
-            side: Side::New,
-            line: 18,
-        });
-        dock.compose_text(
-            "Should closing also clear the zoom? A zoomed pane that closes leaves the camera on nothing.",
-        );
-    }
-    if state == "scrolled" {
-        dock.scroll_rows(9);
-    }
+    let mut dock = dock_in(work.path(), &state);
 
     // One pane, inset on the left by the window margin and on the right by the dock - as the
     // binary's `viewport_rect` insets it.
@@ -155,12 +139,26 @@ fn main() {
         w: dock_w,
         h: height as f32,
     };
-    let paint = dock.build(panel, scale, &theme, &mut TextMeasure::new(scale));
+    let mut measure = TextMeasure::new(scale);
+    dock.set_picking_base(state.starts_with("picker"));
+    let paint = dock.build(panel, scale, &theme, &mut measure);
     let view = CaptureGitDock {
         panel,
         quads: paint.quads,
         labels: paint.labels,
     };
+    let overlay = dock.picking_base().then(|| {
+        let filter = if state == "picker-filter" { "pane" } else { "" };
+        let size = (width as f32, height as f32);
+        drop_down(
+            &work.path().join("repo"),
+            &dock,
+            filter,
+            size,
+            scale,
+            &theme,
+        )
+    });
     let rgba = skelly_render::capture_panes_rgba(
         &appearance,
         width,
@@ -169,6 +167,7 @@ fn main() {
         &[pane],
         &Chrome {
             git_dock: Some(&view),
+            overlay: overlay.as_ref(),
             ..Default::default()
         },
     );
@@ -184,10 +183,92 @@ fn main() {
     println!("wrote {path}");
 }
 
+/// The open dock of `state` (see the module docs), over a repository made in `dir`.
+fn dock_in(dir: &Path, state: &str) -> GitDock {
+    let mut dock = GitDock::new();
+    dock.open();
+    if state == "norepo" {
+        dock.set_no_repo();
+    } else {
+        let (committed, scope) = match state {
+            "branch" | "stacked" | "missing" | "picker" | "picker-filter" => (true, Scope::Branch),
+            "committed" => (true, Scope::Uncommitted),
+            _ => (false, Scope::Uncommitted),
+        };
+        let stack = match state {
+            "stacked" | "picker" | "picker-filter" => Stack::Chosen(PARENT),
+            "missing" => Stack::Chosen("feat/pane-moved"),
+            _ => Stack::Flat,
+        };
+        dock.load(read(dir, committed, scope, stack));
+        dock.set_cursor(Spot::Line {
+            path: "src/pane/tree.rs".to_owned(),
+            side: Side::New,
+            line: 12,
+        });
+    }
+    if state == "composer" {
+        dock.start_comment(&Spot::Line {
+            path: "src/pane/tree.rs".to_owned(),
+            side: Side::New,
+            line: 18,
+        });
+        dock.compose_text(
+            "Should closing also clear the zoom? A zoomed pane that closes leaves the camera on nothing.",
+        );
+    }
+    if state == "scrolled" {
+        dock.scroll_rows(9);
+    }
+    dock
+}
+
+/// The parent branch the stacked states put the agent's branch on.
+const PARENT: &str = "feat/pane-model";
+
+/// How the agent's branch sits in the repository.
+#[derive(Clone, Copy)]
+enum Stack<'a> {
+    /// Straight off the default branch, with nothing chosen for it.
+    Flat,
+    /// On [`PARENT`], beside other branches, with the named base chosen for it.
+    Chosen(&'a str),
+}
+
+/// The base drop-down of `root`'s branch review as the binary opens it, filtered by `filter`,
+/// under `dock`'s base field in a `surface`-sized window.
+fn drop_down(
+    root: &Path,
+    dock: &GitDock,
+    filter: &str,
+    surface: (f32, f32),
+    scale: f32,
+    theme: &Theme,
+) -> CaptureOverlay {
+    let mut measure = TextMeasure::new(scale);
+    let repo = Repo::discover(root).expect("discover").expect("in a repo");
+    let branch = "feat/split-leaf".to_owned();
+    let current = repo
+        .chosen_base(&branch)
+        .map_or(Pick::Default, Pick::Branch);
+    let names = repo.branch_names().expect("branch names");
+    let mut picker = BasePicker::new(branch, repo.base_branch(), names, current);
+    picker.type_text(filter);
+    let field = dock.base_field().expect("the base field");
+    let natural = picker.natural_size(scale, &mut measure);
+    let panel = BasePicker::place(field, natural, surface, scale);
+    let (quads, labels) = picker.build(panel, scale, theme, &mut measure);
+    CaptureOverlay {
+        panel,
+        quads,
+        labels,
+    }
+}
+
 /// Make a repository in `dir` with a commit and the agent's changes - its edit to the pane tree
 /// `committed` on a branch, or not - review them, and read it in `scope`'s review the way the
-/// binary does.
-fn read(dir: &Path, committed: bool, scope: Scope) -> Reading {
+/// binary does, with the branch placed as `stack` says.
+fn read(dir: &Path, committed: bool, scope: Scope, stack: Stack) -> Reading {
     let root = dir.join("repo");
     std::fs::create_dir_all(root.join("src/pane")).expect("repo dir");
     std::fs::create_dir_all(root.join("src/session")).expect("repo dir");
@@ -201,7 +282,22 @@ fn read(dir: &Path, committed: bool, scope: Scope) -> Reading {
     std::fs::write(root.join("src/pane/tree.rs"), TREE_BEFORE).expect("write");
     repo.stage_all().expect("stage");
     repo.commit("Pane tree").expect("commit");
-    if committed {
+    if let Stack::Chosen(chosen) = stack {
+        for name in ["release/0.1", "fix/review-anchors"] {
+            git(&root, &["branch", name]);
+        }
+        git(&root, &["checkout", "-q", "-b", PARENT]);
+        std::fs::write(
+            root.join("src/pane/model.rs"),
+            "/// A pane's place in the tree.\npub struct Node;\n",
+        )
+        .expect("write");
+        repo.stage_all().expect("stage");
+        repo.commit("Pane model").expect("commit");
+        git(&root, &["checkout", "-q", "-b", "feat/split-leaf"]);
+        repo.choose_base("feat/split-leaf", Some(chosen))
+            .expect("choose");
+    } else if committed {
         git(&root, &["checkout", "-q", "-b", "feat/split-leaf"]);
     }
     std::fs::write(root.join("src/pane/tree.rs"), TREE_AFTER).expect("write");
@@ -258,14 +354,7 @@ fn read(dir: &Path, committed: bool, scope: Scope) -> Reading {
         })
         .expect("review");
     let review = store.load().expect("load review");
-    let branch = match scope {
-        Scope::Uncommitted => None,
-        Scope::Branch => repo.base_branch().map(|name| BaseBranch {
-            commit: repo.merge_base(&name).expect("merge-base"),
-            name,
-        }),
-    };
-    let base = Base { scope, branch };
+    let base = base(&repo, scope);
     let locations = review::locate(&repo, Some(base.old()), review.threads())
         .into_iter()
         .map(|located| located.location)
@@ -278,6 +367,30 @@ fn read(dir: &Path, committed: bool, scope: Scope) -> Reading {
         review: Some(review),
         locations,
         review_problem: None,
+    }
+}
+
+/// What `scope`'s review of `repo` is against, as the binary's `review::base` reads it: the base
+/// chosen for the branch, else the default base branch.
+fn base(repo: &Repo, scope: Scope) -> Base {
+    if scope == Scope::Uncommitted {
+        return Base::default();
+    }
+    let chosen = repo.chosen_base("feat/split-leaf");
+    if let Some(Ok(Some((name, commit)))) = chosen.as_deref().map(|c| repo.fork_point(c)) {
+        return Base {
+            scope,
+            branch: Some(BaseBranch { name, commit }),
+            unusable: None,
+        };
+    }
+    Base {
+        scope,
+        branch: repo.base_branch().map(|name| BaseBranch {
+            commit: repo.merge_base(&name).expect("merge-base"),
+            name,
+        }),
+        unusable: chosen.map(Unusable::Missing),
     }
 }
 
