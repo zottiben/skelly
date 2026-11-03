@@ -48,6 +48,10 @@ skelly-pane = { version = "0.1.0", path = "../skelly-pane" }
 skelly-session = { version = "0.1.0", path = "../skelly-session" }
 # Text-only clipboard; disable the default image feature to keep the tree lean.
 arboard = { version = "3.6.1", default-features = false }
+# `skelly mcp`: the official MCP SDK, serving stdio on a single-threaded runtime that only
+# that subcommand starts (ADR-0012).
+rmcp = { version = "3.8.0", default-features = false, features = ["server", "macros", "transport-io"] }
+tokio = { version = "1", features = ["rt"] }
 
 # macOS: build a native application menu so the standard system shortcuts (⌘H hide, ⌘M
 # minimize, ⌘Q quit, Hide Others, …) work - winit installs no menu on its own. Versions are

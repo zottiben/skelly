@@ -1,11 +1,11 @@
 //! `skelly review`: the line comments on a repository's changes, from the command line.
 //!
 //! The human comments in the window; the agent that made the change reads and answers them
-//! here (through the Pi companion's tools, or from any shell): `skelly review` prints the
-//! open comments as instructions, `reply` answers one, and `resolve --note` closes one with
-//! what was done. Both sides share one review file per repository in Skelly's state
-//! directory ([`skelly_session::review`]), so the window sees an agent's answers as soon as
-//! they land.
+//! here (through the Pi companion's tools, from any shell, or over MCP with [`crate::mcp`]):
+//! `skelly review` prints the open comments as instructions, `reply` answers one, and
+//! `resolve --note` closes one with what was done. Both sides share one review file per
+//! repository in Skelly's state directory ([`skelly_session::review`]), so the window sees an
+//! agent's answers as soon as they land.
 
 use std::path::{Component, Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -13,7 +13,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{bail, Context as _};
 use serde::Serialize;
 use skelly_session::review::{
-    self, Anchor, Author, Location, ReviewStore, Scope, Side, Status, Thread,
+    self, Anchor, Author, Located, Location, Review, ReviewError, ReviewStore, Scope, Side, Status,
+    Thread,
 };
 use skelly_session::{GitError, Repo, Status as Working};
 
@@ -74,6 +75,55 @@ fn base(repo: &Repo, scope: Scope) -> Base {
 /// Why there is nowhere to keep reviews.
 pub(crate) const NO_STATE_DIR: &str =
     "no state directory to keep reviews in: set HOME or XDG_STATE_HOME";
+
+/// The repository `dir` is in, and the store its review is kept in.
+///
+/// # Errors
+/// When `dir` is not inside a git repository, git cannot run, or there is no state directory.
+pub(crate) fn open(dir: &Path) -> anyhow::Result<(Repo, ReviewStore)> {
+    let Some(repo) = Repo::discover(dir).context("running git")? else {
+        bail!("{} is not inside a git repository", dir.display());
+    };
+    let Some(store) = store_for(&repo) else {
+        bail!(NO_STATE_DIR);
+    };
+    Ok((repo, store))
+}
+
+/// The comments on `repo`'s changes, written as instructions for the agent that made them:
+/// the open ones, or with `all` every one.
+///
+/// # Errors
+/// When the review file cannot be read.
+pub(crate) fn instructions(repo: &Repo, store: &ReviewStore, all: bool) -> anyhow::Result<String> {
+    let saved = store.load()?;
+    Ok(review::instructions(&shown(repo, &saved, all)))
+}
+
+/// Answer comment `id` with `body`, as the agent.
+///
+/// # Errors
+/// [`ReviewError`]: no such comment, an empty or too long body, or the file cannot be written.
+pub(crate) fn reply(store: &ReviewStore, id: u64, body: &str) -> Result<(), ReviewError> {
+    store.update(|r| r.reply(id, Author::Agent, body, now()))
+}
+
+/// Resolve comment `id` as the agent, with a note saying what was done.
+///
+/// # Errors
+/// [`ReviewError`]: no such comment, an empty or too long note, or the file cannot be written.
+pub(crate) fn resolve(store: &ReviewStore, id: u64, note: Option<&str>) -> Result<(), ReviewError> {
+    store.update(|r| r.resolve(id, Author::Agent, note, now()))
+}
+
+/// The threads of `saved` to show, open ones or with `all` every one, with where each is now.
+fn shown<'a>(repo: &Repo, saved: &'a Review, all: bool) -> Vec<Located<'a>> {
+    let threads = saved
+        .threads()
+        .iter()
+        .filter(|thread| all || thread.status == Status::Open);
+    review::locate(repo, None, threads)
+}
 
 /// `skelly review --help`.
 pub(crate) const USAGE: &str = "Usage:\n  \
@@ -182,12 +232,7 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<i32> {
         }
     };
     let cwd = std::env::current_dir().context("reading the current directory")?;
-    let Some(repo) = Repo::discover(&cwd).context("running git")? else {
-        bail!("{} is not inside a git repository", cwd.display());
-    };
-    let Some(store) = store_for(&repo) else {
-        bail!(NO_STATE_DIR);
-    };
+    let (repo, store) = open(&cwd)?;
     match command {
         Command::List { all, json } => list(&repo, &store, all, json)?,
         Command::Add { at, side, body } => {
@@ -197,11 +242,11 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<i32> {
             println!("Added comment #{id} on {place}.");
         }
         Command::Reply { id, body } => {
-            store.update(|r| r.reply(id, Author::Agent, &body, now()))?;
+            reply(&store, id, &body)?;
             println!("Replied to #{id}.");
         }
         Command::Resolve { id, note } => {
-            store.update(|r| r.resolve(id, Author::Agent, note.as_deref(), now()))?;
+            resolve(&store, id, note.as_deref())?;
             println!("Resolved #{id}.");
         }
     }
@@ -217,30 +262,25 @@ struct Listed<'a> {
 }
 
 fn list(repo: &Repo, store: &ReviewStore, all: bool, json: bool) -> anyhow::Result<()> {
-    let saved = store.load()?;
-    let shown = saved
-        .threads()
-        .iter()
-        .filter(|thread| all || thread.status == Status::Open);
-    let located = review::locate(repo, None, shown);
-    if json {
-        let listed: Vec<Listed<'_>> = located
-            .iter()
-            .map(|l| Listed {
-                thread: l.thread,
-                location: l.location,
-            })
-            .collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "repo": repo.root(),
-                "threads": listed,
-            }))?
-        );
-    } else {
-        print!("{}", review::instructions(&located));
+    if !json {
+        print!("{}", instructions(repo, store, all)?);
+        return Ok(());
     }
+    let saved = store.load()?;
+    let listed: Vec<Listed<'_>> = shown(repo, &saved, all)
+        .iter()
+        .map(|l| Listed {
+            thread: l.thread,
+            location: l.location,
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "repo": repo.root(),
+            "threads": listed,
+        }))?
+    );
     Ok(())
 }
 

@@ -100,8 +100,9 @@ on a line, ask the agent to read your comments, and see its answers appear under
 2. In the dock, click the **+** next to a line (or move to it and press **c**), write the
    comment, and press **↩** to send it (**⇧↩** starts a new line). A comment on a removed
    line is on the file as it is in `HEAD`.
-3. Ask Pi to read your review comments. With the companion extension, Pi uses the
-   `skelly_review_comments` tool; any other agent can run `skelly review`.
+3. Ask the agent to read your review comments. With the companion extension, Pi uses the
+   `skelly_review_comments` tool. Any agent that speaks MCP finds them through
+   `skelly mcp` (see below), and any other agent can run `skelly review`.
 4. The agent makes the changes, then resolves each comment with a note. The dock updates
    while it works: the note shows under your comment, and the comment is marked resolved.
 
@@ -124,6 +125,25 @@ The comments are kept outside the repository, one file per repository, and the d
 moves your `HEAD`, branches or index except when you stage or commit. See
 [the Pi extension](integrations/pi/README.md#review-comments) for the tools and the
 `skelly review` commands.
+
+### Connect an agent over MCP
+
+`skelly mcp` is an MCP server on stdin/stdout. Add it to your agent once, and "address my
+review comments" works in every repository:
+
+```sh
+claude mcp add --scope user skelly -- skelly mcp   # Claude Code
+codex mcp add skelly -- skelly mcp                 # Codex
+```
+
+Other clients take the same command in their MCP config:
+`{"mcpServers": {"skelly": {"command": "skelly", "args": ["mcp"]}}}`.
+
+The server has three tools. `list_review_comments` reads the open comments (or every one,
+with `all`), `reply_to_review_comment` answers one and leaves it open, and
+`resolve_review_comment` resolves one with a note saying what changed. Each tool works on
+the repository that holds its `directory` argument, else the directory the server started
+in. It speaks MCP 2026-07-28 and the earlier `initialize` handshake.
 
 ## Optional local voice (experimental)
 

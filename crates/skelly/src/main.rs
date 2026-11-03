@@ -17,6 +17,7 @@ mod contextmenu;
 mod deadpane;
 mod emptystate;
 mod gitdock;
+mod mcp;
 #[cfg(target_os = "macos")]
 mod menu;
 mod motion;
@@ -173,6 +174,7 @@ fn main() -> anyhow::Result<()> {
         Ok(cli::Cli::Review(args)) => {
             std::process::exit(review::cli(&args)?);
         }
+        Ok(cli::Cli::Mcp) => return mcp::serve(),
         Err(arg) => {
             eprintln!("skelly: unrecognized argument '{arg}'\n\n{}", cli::help());
             std::process::exit(2);

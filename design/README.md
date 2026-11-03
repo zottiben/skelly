@@ -82,6 +82,20 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-03 - **`skelly mcp` serves the review to any agent over MCP.** User request: an
+  MCP server built into Skelly, so an agent finds the user's review comments and acts on them
+  without reading Skelly's source ("ground yourself in the review comments I made and address
+  them"). The server runs on stdin/stdout and has three tools: `list_review_comments` (the
+  open comments as instructions, or every one with `all`), `reply_to_review_comment` (answers
+  and leaves the comment open) and `resolve_review_comment` (a note is required, since the
+  user reads it under the comment). Each tool works on the repository that holds its optional
+  `directory`, else where the server started. They write as the agent through the same code
+  as `skelly review`, so the dock shows the answers as they land. The server's instructions
+  tell the agent when to use which tool. Only the review is served, because it is the only
+  agent-facing state on disk; the timeline and panes live in the window process. The Pi
+  companion keeps its own tools. See ADR-0012.
+  _(was: an agent other than Pi had to be told that `skelly review` exists)_
+
 - 2026-11-03 - **The wheel over the workspace chip row switches workspaces.** User request:
   scroll left and right between workspaces with the mouse wheel. A wheel or a swipe over the
   row, its gutters and the `+` included, makes the previous or next workspace active: one per
