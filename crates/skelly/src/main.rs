@@ -2811,22 +2811,15 @@ impl App {
 
     /// Record a git-action event (commit / stage / …) into the *active* repo's timeline, stamped
     /// with the session-relative elapsed time. A no-op outside a repo.
-    fn record_event(
-        &mut self,
-        actor: Actor,
-        title: impl Into<String>,
-        detail: impl Into<String>,
-        restore: Option<String>,
-    ) {
+    fn record_event(&mut self, actor: Actor, title: impl Into<String>, detail: impl Into<String>) {
         let Some(root) = self.active_root.clone() else {
             return;
         };
         let mut event = SessionEvent::new(actor, self.elapsed_label(), title, detail);
         // Staging and committing move the index and refs, not the files - so the moment these
-        // events restore to is the repo's last observed content snapshot, whatever `restore` names.
-        let target =
-            restore.or_else(|| self.timelines.get(&root).and_then(|rt| rt.snapshot.clone()));
-        if let Some(tree) = target {
+        // events restore to is the repo's last observed content snapshot. Never the commit itself:
+        // every restore reads Skelly's own store, which holds no commits.
+        if let Some(tree) = self.timelines.get(&root).and_then(|rt| rt.snapshot.clone()) {
             event = event.restoring(tree);
         }
         self.record_edit(&root, event);
@@ -5345,7 +5338,6 @@ impl App {
                     Actor::Human,
                     format!("git commit - {subject}"),
                     format!("{sha} - {branch}"),
-                    (!sha.is_empty()).then(|| sha.clone()),
                 );
                 // A transient success toast confirms the commit (design §12 flow 3: "a toast
                 // shows the short SHA"); the git dock's inline hint keeps the ⌘U Undo affordance.
@@ -5401,7 +5393,7 @@ impl App {
                     |n| n.to_string_lossy().into_owned(),
                 );
                 let verb = if fully_staged { "Unstaged" } else { "Staged" };
-                self.record_event(Actor::Human, format!("{verb} {name}"), String::new(), None);
+                self.record_event(Actor::Human, format!("{verb} {name}"), String::new());
                 self.reload_git_dock();
             }
             Err(err) => self.show_toast(err.to_string(), ToastKind::Error),
@@ -5444,7 +5436,7 @@ impl App {
         };
         match repo.stage_all() {
             Ok(()) => {
-                self.record_event(Actor::Human, "Staged all changes", String::new(), None);
+                self.record_event(Actor::Human, "Staged all changes", String::new());
                 self.reload_git_dock();
             }
             Err(err) => self.git_dock.set_error(err.to_string()),

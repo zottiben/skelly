@@ -7,13 +7,12 @@
 //! The [`Actor::Agent`] variant exists so an external AI-actions transport can feed events
 //! later (the still-open AI-actions contract, ADR-0007); v1 has no such transport.
 //!
-//! Only some events are **restorable**: an event may carry a commit SHA
-//! ([`SessionEvent::restore`]) as a rewind target, because the non-destructive rewind can
-//! only check a real git object out into a shadow worktree ([`crate::Repo::shadow_checkout`],
-//! Hard rule 3). A non-commit event (staging) has no SHA of its own, so its restorable
-//! state is inherited from the nearest earlier event that does have one
-//! ([`Timeline::effective_restore`]) - which is exactly the working tree as of the last
-//! commit at or before it.
+//! Only some events are **restorable**: an event may carry a working-tree snapshot - a tree
+//! id in Skelly's own object store ([`crate::SnapshotStore`], ADR-0008) - as its rewind
+//! target ([`SessionEvent::restore`]). Never a commit SHA: the store holds no commits, so it
+//! could not restore one. An event without a snapshot of its own inherits the nearest
+//! earlier event's ([`Timeline::effective_restore`]) - the working tree as last observed at
+//! or before it.
 //!
 //! The model is clock-free for determinism (playbook §4): the display time is a plain
 //! label the recorder (the binary) fills in, never read from the wall clock here.
@@ -54,8 +53,8 @@ pub struct SessionEvent {
     pub title: String,
     /// A secondary detail line (e.g. `"a1b2c3d - main"`, `"timeline.rs, tree.rs"`).
     pub detail: String,
-    /// The commit SHA this event restores the codebase to, if it is a restorable point
-    /// (a commit / the session's starting HEAD). `None` for a non-commit event.
+    /// The snapshot (a tree id in Skelly's own store) this event restores the working tree
+    /// to, if it is a restorable point. `None` for an event that inherits an earlier one's.
     pub restore: Option<String>,
 }
 
@@ -77,10 +76,10 @@ impl SessionEvent {
         }
     }
 
-    /// Set this event's restore target (a commit SHA), making it a rewind point.
+    /// Set this event's restore target (a snapshot tree id), making it a rewind point.
     #[must_use]
-    pub fn restoring(mut self, sha: impl Into<String>) -> Self {
-        self.restore = Some(sha.into());
+    pub fn restoring(mut self, tree: impl Into<String>) -> Self {
+        self.restore = Some(tree.into());
         self
     }
 }
@@ -131,10 +130,10 @@ impl Timeline {
         self.events.len().checked_sub(1)
     }
 
-    /// The restorable commit SHA in effect *at* event `index`: the `restore` target of the
-    /// event itself, or - for a non-commit event - the nearest earlier event that has one
-    /// (the working tree as of the last commit at or before it). `None` when no event at or
-    /// before `index` is restorable (e.g. a repo with no commits yet).
+    /// The restorable snapshot in effect *at* event `index`: the `restore` target of the
+    /// event itself, or - for an event without one - the nearest earlier event that has one
+    /// (the working tree as last observed at or before it). `None` when no event at or
+    /// before `index` is restorable (e.g. a repo whose first snapshot has not arrived yet).
     #[must_use]
     pub fn effective_restore(&self, index: usize) -> Option<&str> {
         self.events
