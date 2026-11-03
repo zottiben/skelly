@@ -237,7 +237,7 @@ pub fn capture_panes_rgba(
     let dead_pane_scenes: Vec<Scene> = pane_overlay_scene.into_iter().collect();
     let sidebar_scene = chrome.sidebar.map(|sb| SidebarScene {
         quads: sb.quads.iter().map(chrome_quad).collect(),
-        quad_clip: None,
+        quad_clip: Some(sb.panel),
         rows: &[],
         left: sb.panel.x,
         top: sb.panel.y,

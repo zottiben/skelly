@@ -15,6 +15,8 @@
 //! member count; a collapsed group hides its member rows), and the bottom-anchored utility bar
 //! (§08 #7 - the ⚙ settings / ◐ theme / ⟲ timeline / ⑂ git toggles).
 
+use std::ops::Range;
+
 use skelly_config::SidebarMode;
 use skelly_render::{
     logo_chrome_quads, ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme,
@@ -533,6 +535,11 @@ pub(crate) struct Paint {
     pub(crate) labels: Vec<ProseLabel>,
     /// The chip row's scroll this build settled on, to keep; `None` when no chips were drawn.
     pub(crate) chip_first: Option<usize>,
+    /// The quads of the workspace's own rows (pinned grid, groups, tabs, new-tab action): the
+    /// part a workspace switch slides. The chrome around them stays put.
+    pub(crate) list_quads: Range<usize>,
+    /// The labels of the same rows.
+    pub(crate) list_labels: Range<usize>,
 }
 
 /// Build the sidebar's display list for `view`, filling `panel` (physical px) at DPI `scale`,
@@ -603,6 +610,7 @@ pub(crate) fn build(
     };
     // The slim rail lays the tab list out flat (numbered), so groups only shape the full panel.
     let layout_groups: &[GroupSpan] = if view.rail { &[] } else { view.groups };
+    let mut list = (quads.len(), labels.len());
     for row in rows_layout(
         view.tab_count,
         view.active_tab,
@@ -612,7 +620,12 @@ pub(crate) fn build(
         pinned_block_h(view, panel, scale),
     ) {
         push_row(&mut quads, &mut labels, row, &ctx, measure);
+        // The command well is the same in every workspace, so the list starts after it.
+        if matches!(row.kind, RowKind::Command) {
+            list = (quads.len(), labels.len());
+        }
     }
+    let (list_quads, list_labels) = (list.0..quads.len(), list.1..labels.len());
 
     // The bottom-anchored utility bar (design §08 #7) - full panel only; the slim rail has no
     // room for it (its actions stay reachable via keys / the palette).
@@ -637,6 +650,8 @@ pub(crate) fn build(
         quads,
         labels,
         chip_first,
+        list_quads,
+        list_labels,
     }
 }
 
@@ -1788,5 +1803,39 @@ mod tests {
         // Rail tab labels are the bare numbers, centered (x offset from the left edge > 0).
         let two = paint.labels.iter().find(|l| l.text == "2").unwrap();
         assert!(two.x > 0.0 && two.x < p.w);
+    }
+
+    #[test]
+    fn the_list_is_the_workspaces_own_rows_and_nothing_around_them() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
+        let titles = ["one".to_owned(), "two".to_owned()];
+        let v = View {
+            chips: &['A', 'B'],
+            pinned: &['P'],
+            tab_titles: &titles,
+            top_inset: 38.0,
+            ..view(2, 1, false)
+        };
+        let paint = build(&v, panel(), 2.0, &theme, &mut m);
+        let list = &paint.labels[paint.list_labels.clone()];
+        for text in ["PINNED", "P", "one", "two", "+ New tab"] {
+            assert!(list.iter().any(|l| l.text == text), "{text} is in the list");
+        }
+        let around: Vec<&str> = paint.labels[..paint.list_labels.start]
+            .iter()
+            .chain(&paint.labels[paint.list_labels.end..])
+            .map(|l| l.text.as_str())
+            .collect();
+        for text in ["skelly", "A", "B", "+", super::CMD_PLACEHOLDER] {
+            assert!(around.contains(&text), "{text} stays out of the list");
+        }
+        assert!(UTIL_ICONS.iter().all(|(_, icon, _)| around.contains(icon)));
+        // The panel fill comes before the list and the edge divider after it; the active tab's
+        // indicator bar is in it.
+        assert!(paint.list_quads.start > 0 && paint.list_quads.end < paint.quads.len());
+        assert!(paint.quads[paint.list_quads.clone()]
+            .iter()
+            .any(|q| q.color == theme.accent && q.rect.w < 10.0));
     }
 }

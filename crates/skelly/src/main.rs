@@ -30,6 +30,7 @@ mod settings;
 mod sidebar;
 mod snapshots;
 mod statusline;
+mod swoosh;
 mod timeline;
 mod toast;
 mod tooltip;
@@ -664,6 +665,8 @@ struct App {
     chip_seen: Option<usize>,
     /// Trackpad travel over the sidebar not yet a whole tile, physical px.
     chip_swipe: f64,
+    /// The sidebar's rows sliding from the workspace left to the active one, while they move.
+    swoosh: Option<swoosh::Swoosh>,
     /// Current surface size in physical px.
     size: (u32, u32),
     scale: f64,
@@ -829,6 +832,7 @@ impl App {
             chip_first: 0,
             chip_seen: None,
             chip_swipe: 0.0,
+            swoosh: None,
             size: (0, 0),
             scale: 1.0,
             modifiers: ModifiersState::empty(),
@@ -1860,7 +1864,7 @@ impl App {
         // chips) and the chrome frames, all before the mutable renderer borrow.
         let (frames, pane_layer, pane_overlay) = self.build_pane_layer(redraw_start);
         let views: Vec<PaneView> = frames.iter().map(PaneFrame::view).collect();
-        let sidebar = self.sidebar.visible().then(|| self.build_sidebar_frame());
+        let sidebar = self.sidebar_frame(redraw_start);
         let git_dock = self.git_dock.open.then(|| self.build_git_dock_frame());
         let timeline = self.timeline.open.then(|| self.build_timeline_frame());
         // The first-run onboarding modal (design §10.1) reuses the overlay pass and takes
@@ -2246,6 +2250,18 @@ impl App {
             }
         }
         (unpinned, pinned)
+    }
+
+    /// The sidebar as shown at `now`: at rest, or with its rows mid-swoosh; `None` while hidden.
+    fn sidebar_frame(&mut self, now: Instant) -> Option<sidebar::Paint> {
+        if !self.sidebar.visible() {
+            return None;
+        }
+        let mut paint = self.build_sidebar_frame();
+        if let Some(swoosh) = &self.swoosh {
+            swoosh.apply(&mut paint, now);
+        }
+        Some(paint)
     }
 
     fn build_sidebar_frame(&mut self) -> sidebar::Paint {
@@ -4619,6 +4635,7 @@ impl App {
         }
         // A half-typed rename names a tab or group of the workspace being left; drop it.
         self.renaming = None;
+        let (leaving, rows) = self.leaving_rows();
         self.stash_active_workspace();
         let (tabs, active, groups) = self.workspaces[index]
             .stash
@@ -4630,12 +4647,35 @@ impl App {
         self.active_workspace = index;
         self.selecting = false;
         self.sync_layout(); // re-fit the swapped-in shells to the viewport
+        self.start_swoosh(leaving, rows);
         self.request_redraw();
+    }
+
+    /// The workspace on screen and its sidebar rows at rest, to slide out of a switch; no rows
+    /// while the sidebar is hidden.
+    fn leaving_rows(&mut self) -> (usize, Option<swoosh::Rows>) {
+        let rows = self
+            .sidebar
+            .visible()
+            .then(|| swoosh::Rows::of(&self.build_sidebar_frame()));
+        (self.active_workspace, rows)
+    }
+
+    /// Slide the sidebar's rows from workspace `leaving`, whose rows are `rows`, to the active one.
+    fn start_swoosh(&mut self, leaving: usize, rows: Option<swoosh::Rows>) {
+        let (prev, to, width) = (
+            self.swoosh.take(),
+            self.active_workspace,
+            self.sidebar_width_px(),
+        );
+        self.swoosh =
+            rows.map(|rows| swoosh::Swoosh::start(prev, Instant::now(), leaving, rows, to, width));
     }
 
     /// Add a new workspace (the `+` chip) with a fresh single tab, and switch to it.
     fn add_workspace(&mut self) {
         self.renaming = None;
+        let (leaving, rows) = self.leaving_rows();
         self.stash_active_workspace();
         let taken: Vec<&str> = self.workspaces.iter().map(|w| w.name.as_str()).collect();
         let name = workspace::free_name(&taken);
@@ -4651,6 +4691,7 @@ impl App {
         self.active_workspace = self.workspaces.len() - 1;
         self.selecting = false;
         self.sync_layout();
+        self.start_swoosh(leaving, rows);
         self.request_redraw();
     }
 
@@ -4791,6 +4832,9 @@ impl App {
         self.workspaces.remove(w);
         if self.active_workspace > w {
             self.active_workspace -= 1;
+        }
+        if let Some(swoosh) = self.swoosh.as_mut() {
+            swoosh.forget(w);
         }
         self.request_redraw();
     }
@@ -7492,7 +7536,16 @@ impl App {
             self.request_redraw();
         }
         let zooming = zoom.is_some_and(|motion| motion.gliding(now));
-        self.palette_anim.is_some() || self.confirm_anim.is_some() || fading || zooming
+        // The sidebar's workspace swoosh: drop it at rest, painting the settled rows once.
+        if self.swoosh.as_ref().is_some_and(|swoosh| swoosh.done(now)) {
+            self.swoosh = None;
+            self.request_redraw();
+        }
+        self.palette_anim.is_some()
+            || self.confirm_anim.is_some()
+            || fading
+            || zooming
+            || self.swoosh.is_some()
     }
 }
 

@@ -530,13 +530,11 @@ impl Renderer {
             return;
         };
         let quads: Vec<Quad> = view.quads.iter().map(chrome_quad).collect();
-        self.sidebar.set_paint(
+        self.sidebar.set_paint_runs(
             &self.device,
             &self.queue,
             (self.config.width, self.config.height),
-            &quads,
-            view.labels,
-            view.panel,
+            &[(&quads, view.labels, Some(view.panel))],
         );
     }
 

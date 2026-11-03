@@ -82,6 +82,21 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-03 - **A workspace switch swooshes the sidebar's rows sideways.** User request:
+  animate the sidebar when scrolling between workspaces, like a swoosh. On every workspace
+  switch (a wheel, a chip click, the `+`, or removing the workspace on screen) the
+  workspace's own rows slide like a carousel: the pinned grid, the group headers, the tabs
+  and `+ New tab`. The rows left behind slide out as the new workspace's slide in from the
+  side of its chip, so a later workspace comes in from the right. They travel one panel width
+  apart over the `PANEL` duration (320ms) on the decelerate curve, clipped to the sidebar.
+  The brand, the chip row, the command well, the utility bar and the edge divider stay still,
+  and the active chip changes at once. A switch during a slide continues it from where the
+  rows are, so a run of wheel notches reads as one sweep and turning back slides the same
+  rows home. Only the sidebar moves: the panes switch at once, as before, and a click during
+  the slide acts on the row at its resting place. The swoosh is motion, not a setting, so it
+  has no config key.
+  _(was: sidebar slides were deferred on 2026-07-13, and the rows changed at once)_
+
 - 2026-11-03 - **A sideways wheel anywhere in the sidebar switches workspaces.** User
   request: side-scroll anywhere in the sidebar to move between workspaces. A wheel or a swipe
   whose dominant axis is horizontal switches workspaces over any part of the sidebar: the

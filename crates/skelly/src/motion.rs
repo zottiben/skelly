@@ -17,10 +17,6 @@ pub(crate) const BASE: Duration = Duration::from_millis(180);
 /// Slow: pane split / close.
 pub(crate) const SLOW: Duration = Duration::from_millis(260);
 /// Panel: sidebar / dock slide.
-#[allow(
-    dead_code,
-    reason = "token table; wired per transition as the motion slices land"
-)]
 pub(crate) const PANEL: Duration = Duration::from_millis(320);
 
 /// Decelerate `cubic-bezier(0,0,0,1)` - enter / expand (fast in, eases to rest).
