@@ -82,6 +82,17 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-03 - **The wheel over the workspace chip row switches workspaces.** User request:
+  scroll left and right between workspaces with the mouse wheel. A wheel or a swipe over the
+  row, its gutters and the `+` included, makes the previous or next workspace active: one per
+  wheel line, or per tile-width of trackpad travel, along the gesture's dominant axis. It
+  stops at the first and the last workspace and does not wrap. The row follows the active
+  chip, so it still scrolls when the chips overflow. The wheel no longer scrolls the row
+  without switching. Every other part of the 2026-11-02 chip-row decision stays. On macOS a
+  slow wheel notch, which macOS reports as about a tenth of a line, now counts as one line
+  over every surface the wheel scrolls; before, it rounded to nothing.
+  _(was: the wheel only scrolled the row's view, so it did nothing when every chip fit)_
+
 - 2026-11-02 - **The git dock also reviews the branch against its base branch.** User
   request: keep committed work reviewable after the human or an agent commits it. A row under
   the status bar holds an `Uncommitted` / `Branch` segmented control (a `bg.inset` container

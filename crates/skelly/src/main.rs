@@ -6467,15 +6467,18 @@ impl App {
         }
     }
 
-    /// Step the workspace-chip row sideways by a wheel or trackpad `delta` over it (see
-    /// [`chip_steps`]); the next sidebar build clamps the scroll to the row.
-    fn scroll_chips(&mut self, delta: MouseScrollDelta) {
+    /// Switch to an earlier or later workspace by a wheel or trackpad `delta` over the chip row
+    /// (see [`chip_steps`]), stopping at the first and the last. The row scrolls to keep the new
+    /// active chip in view.
+    fn scroll_workspaces(&mut self, delta: MouseScrollDelta) {
         let tile = f64::from(sidebar::CHIP_STEP) * self.scale;
         let steps = chip_steps(delta, &mut self.chip_swipe, tile);
         if steps != 0 {
-            let steps = isize::try_from(steps).unwrap_or(0);
-            self.chip_first = self.chip_first.saturating_add_signed(steps);
-            self.request_redraw();
+            self.switch_workspace(step_index(
+                self.active_workspace,
+                self.workspaces.len(),
+                steps,
+            ));
         }
     }
 
@@ -6487,7 +6490,7 @@ impl App {
             return;
         }
         let lines = match delta {
-            MouseScrollDelta::LineDelta(_, y) => wheel_lines(f64::from(y)),
+            MouseScrollDelta::LineDelta(_, y) => notch_lines(f64::from(y)),
             MouseScrollDelta::PixelDelta(pos) => wheel_lines(pos.y / 20.0),
         };
         // The settings view covers the panes; a wheel over it must not scroll a hidden terminal.
@@ -6503,7 +6506,16 @@ impl App {
             self.sidebar_hit(),
             Some(sidebar::Hit::Workspace(_) | sidebar::Hit::AddWorkspace | sidebar::Hit::Chips)
         ) {
-            self.scroll_chips(delta);
+            // A wheel switches workspaces only where a click on a chip would: never under a
+            // modal surface, which would then act on the workspace left behind.
+            let modal = self.onboarding.is_some()
+                || self.context_menu.is_some()
+                || self.palette.open
+                || self.confirm.is_some()
+                || self.cheatsheet_open;
+            if !modal {
+                self.scroll_workspaces(delta);
+            }
             return;
         }
         if lines == 0 {
@@ -7569,6 +7581,15 @@ fn cycle_index(active: usize, count: usize, forward: bool) -> usize {
     }
 }
 
+/// The index `steps` on from `active` among `count` items (negative steps back), stopping at the
+/// first and the last: a wheel runs into the ends of a row instead of wrapping around it.
+fn step_index(active: usize, count: usize, steps: i32) -> usize {
+    let steps = isize::try_from(steps).unwrap_or(0);
+    active
+        .saturating_add_signed(steps)
+        .min(count.saturating_sub(1))
+}
+
 /// Remove group `gi` from `groups`, moving its tabs back to the ungrouped list and shifting
 /// later groups' members down one index so every `Tab.group` stays valid.
 fn ungroup(tabs: &mut [Tab], groups: &mut Vec<TabGroup>, gi: usize) {
@@ -7673,7 +7694,20 @@ fn wheel_lines(delta: f64) -> i32 {
     delta.round() as i32
 }
 
-/// The chip tiles a wheel or trackpad `delta` steps the workspace-chip row, along the gesture's
+/// The whole lines a mouse wheel's line `delta` scrolls (see [`wheel_lines`]). macOS accelerates
+/// the wheel itself and reports a slow notch as a fraction of a line (about 0.1), which would
+/// round to nothing, so there any movement scrolls at least one line its way; a faster spin still
+/// scrolls its own, larger delta. Elsewhere a fraction is a high-resolution wheel's real part of a
+/// notch, so it rounds as it is.
+fn notch_lines(delta: f64) -> i32 {
+    if cfg!(target_os = "macos") && delta != 0.0 {
+        wheel_lines(delta.abs().max(1.0).copysign(delta))
+    } else {
+        wheel_lines(delta)
+    }
+}
+
+/// The chips a wheel or trackpad `delta` steps along the workspace-chip row, along the gesture's
 /// dominant axis: one per wheel line, or one per `tile` px of trackpad travel, carrying the rest
 /// in `swipe` (dropped when the direction turns). Winit's positive deltas reveal what lies left
 /// (or above), so they step back (negative); the result steps forward through later chips.
@@ -7684,7 +7718,7 @@ fn wheel_lines(delta: f64) -> i32 {
 fn chip_steps(delta: MouseScrollDelta, swipe: &mut f64, tile: f64) -> i32 {
     let dominant = |x: f64, y: f64| if x.abs() > y.abs() { x } else { y };
     let back = match delta {
-        MouseScrollDelta::LineDelta(x, y) => wheel_lines(dominant(f64::from(x), f64::from(y))),
+        MouseScrollDelta::LineDelta(x, y) => notch_lines(dominant(f64::from(x), f64::from(y))),
         MouseScrollDelta::PixelDelta(pos) => {
             let travel = dominant(pos.x, pos.y);
             if travel.signum() != swipe.signum() {
@@ -8182,11 +8216,11 @@ mod tests {
         adopt, changed_since, chip_steps, clipboard_action, csi_edit, cursor_key,
         cursor_navigation_shortcut, cycle_index, dim, dirty_stats, edit_text, editor_filetype,
         editor_mode, enter_bytes, index_after_close, interval_ms, kitty_csi, kitty_modifier_code,
-        order, overlay_panel_top, overlay_rise_offset, pane_action, pane_dims, panic_message,
-        parse_chord, pointer_cell_in, poll_wait, process_name, resolve_cell, selection_cells,
-        selection_text, shell_escape_path, super_chord, tab_action, take_group, take_tab, ungroup,
-        xterm_modifier_code, ClipboardAction, Duration, Instant, PaneAction, Selection, SuperChord,
-        Tab, TabAction, TabGroup,
+        notch_lines, order, overlay_panel_top, overlay_rise_offset, pane_action, pane_dims,
+        panic_message, parse_chord, pointer_cell_in, poll_wait, process_name, resolve_cell,
+        selection_cells, selection_text, shell_escape_path, step_index, super_chord, tab_action,
+        take_group, take_tab, ungroup, xterm_modifier_code, ClipboardAction, Duration, Instant,
+        PaneAction, Selection, SuperChord, Tab, TabAction, TabGroup,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
@@ -8967,6 +9001,19 @@ mod tests {
     }
 
     #[test]
+    fn step_index_stops_at_both_ends() {
+        // Two workspaces: a wheel notch either way moves between them.
+        assert_eq!(step_index(0, 2, 1), 1);
+        assert_eq!(step_index(1, 2, -1), 0);
+        // Past either end it stops rather than wrapping.
+        assert_eq!(step_index(1, 2, 1), 1);
+        assert_eq!(step_index(0, 2, -1), 0);
+        assert_eq!(step_index(1, 5, 9), 4);
+        assert_eq!(step_index(3, 5, -9), 0);
+        assert_eq!(step_index(0, 1, 1), 0);
+    }
+
+    #[test]
     fn index_after_close_lands_on_a_surviving_tab() {
         // Closing the last of three tabs focuses the new last (index 1).
         assert_eq!(index_after_close(2, 3), 1);
@@ -9129,5 +9176,19 @@ mod tests {
         // Turning back drops the carried travel instead of cancelling against it.
         assert_eq!(chip_steps(px(70.0, 0.0), &mut swipe, 66.0), -1);
         assert!((swipe - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_slow_wheel_notch_moves_one_line_on_macos() {
+        use winit::event::MouseScrollDelta::LineDelta;
+        // macOS reports a slow notch of a mouse wheel as about a tenth of a line.
+        let notch = i32::from(cfg!(target_os = "macos"));
+        assert_eq!(notch_lines(0.1), notch);
+        assert_eq!(notch_lines(-0.1), -notch);
+        assert_eq!(chip_steps(LineDelta(0.0, -0.1), &mut 0.0, 66.0), notch);
+        // No movement is no line, and a faster spin keeps its own size.
+        assert_eq!(notch_lines(0.0), 0);
+        assert_eq!(notch_lines(2.6), 3);
+        assert_eq!(notch_lines(-1.4), -1);
     }
 }

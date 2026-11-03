@@ -112,7 +112,7 @@ pub(crate) enum Hit {
     /// Add a new workspace (the `+` chip).
     AddWorkspace,
     /// The workspace-chip row outside a chip (its gutters and gaps): no click action, but a
-    /// wheel over it scrolls the row like one over a chip.
+    /// wheel over it switches workspaces like one over a chip.
     Chips,
     /// Switch to the pinned tab at this 0-based grid position (design §08 #4).
     Pinned(usize),
