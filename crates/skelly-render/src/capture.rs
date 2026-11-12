@@ -10,7 +10,7 @@
 use skelly_config::Appearance;
 
 use crate::cells::{
-    card_quads, chrome_quad, dock_frame_quads, grid_quads, scrim_quad, settings_frame_quads, Quad,
+    card_quads, chrome_quad, dock_frame_quads, grid_quads, scrim_quad, settings_quads, Quad,
     QuadLayer,
 };
 use crate::prose::{ProseLabel, ProseLayer};
@@ -185,6 +185,8 @@ pub struct Chrome<'a> {
     pub git_dock: Option<&'a CaptureGitDock>,
     /// The session-timeline dock (right strip; mutually exclusive with `git_dock`).
     pub timeline: Option<&'a CaptureTimeline>,
+    /// The full-window settings view, over the docks and beneath the overlay.
+    pub settings: Option<&'a CaptureSettings>,
     /// The command-palette overlay (passes 7-8).
     pub overlay: Option<&'a CaptureOverlay>,
 }
@@ -296,9 +298,17 @@ pub fn capture_panes_rgba(
         dead_pane_scenes
             .into_iter()
             .chain(
-                [sidebar_scene, gitdock_scene, timeline_scene, overlay_scene]
-                    .into_iter()
-                    .flatten(),
+                [
+                    sidebar_scene,
+                    gitdock_scene,
+                    timeline_scene,
+                    chrome
+                        .settings
+                        .map(|settings| settings_scene(settings, &theme, scale as f32)),
+                    overlay_scene,
+                ]
+                .into_iter()
+                .flatten(),
             )
             .collect(),
     ))
@@ -341,6 +351,36 @@ pub struct CaptureSettings {
     pub quads: Vec<ChromeQuad>,
     /// The positioned proportional text labels.
     pub labels: Vec<ProseLabel>,
+    /// How much of the page fill shows over what is beneath, `0..=1`.
+    pub fill_alpha: f32,
+    /// How much of the content over the fill shows, `0..=1`.
+    pub content_alpha: f32,
+}
+
+/// The settings view's scene: its quads, the fill and the content faded as `settings` says.
+fn settings_scene<'a>(settings: &CaptureSettings, theme: &Theme, scale: f32) -> Scene<'a> {
+    Scene {
+        quads: settings_quads(
+            settings.panel,
+            settings.nav_divider_x,
+            &settings.quads,
+            (settings.fill_alpha, settings.content_alpha),
+            theme,
+            scale,
+        ),
+        quad_clip: None,
+        rows: &[],
+        left: settings.panel.x,
+        top: settings.panel.y,
+        clip: (
+            settings.panel.x,
+            settings.panel.y,
+            settings.panel.w,
+            settings.panel.h,
+        ),
+        prose: crate::prose::shown_over(&settings.labels, theme.bg_sidebar, settings.content_alpha)
+            .into_owned(),
+    }
 }
 
 /// Render the full-window `settings` view over the theme background headlessly - the
@@ -364,23 +404,7 @@ pub fn capture_settings_rgba(
     settings: &CaptureSettings,
 ) -> Vec<u8> {
     let theme = Theme::resolve(&appearance.theme);
-    let mut quads =
-        settings_frame_quads(settings.panel, settings.nav_divider_x, &theme, scale as f32);
-    quads.extend(settings.quads.iter().map(chrome_quad));
-    let scene = Scene {
-        quads,
-        quad_clip: None,
-        rows: &[],
-        left: settings.panel.x,
-        top: settings.panel.y,
-        clip: (
-            settings.panel.x,
-            settings.panel.y,
-            settings.panel.w,
-            settings.panel.h,
-        ),
-        prose: settings.labels.clone(),
-    };
+    let scene = settings_scene(settings, &theme, scale as f32);
     pollster::block_on(capture_async(
         appearance,
         width,

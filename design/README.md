@@ -82,6 +82,24 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-12 - **The right docks slide in and out, and settings fades in and out.** User
+  request: add motion elsewhere where it helps, in the spirit of the sidebar's. Opening or
+  closing the git diff dock or the session timeline slides it in or out at the window's right
+  edge over `PANEL` (320ms, the guide's "Sidebar, timeline slide"), decelerating as it opens
+  and accelerating as it closes (§03). The panes follow its edge on screen, but each shell is
+  re-fitted once, to where the panes come to rest. A dock that closes slides out as it was
+  last painted. A switch from one dock to the other while one is open is a cut, as their
+  content differs, and so is widening a dock to the full window or narrowing it back. Opening
+  settings fades it in over `BASE` (180ms): its page covers the terminal over the first 35% of
+  the fade, then its content comes in over the page. Closing it fades back over `FAST`
+  (120ms), as an exit is quicker (§03), from the view as last painted. The content fades as
+  one layer: each color is mixed toward the page's, so no surface shows through the one over
+  it. A fade or a slide turned back part way runs back from where it shows. The 2026-07-13
+  concern was latency, so only paint moves: a dock or the settings view takes input, and
+  gives it back, at once. Motion is not a setting, so it has no config key.
+  _(was: the right docks and settings showed and hid at once; dock slides were deferred on
+  2026-07-13)_
+
 - 2026-11-12 - **The sidebar slides in and out, and its rows glide to where they go.** User
   request: animate the sidebar's modes in the spirit of the workspace swoosh - showing and
   hiding it, and its rows moving, coming and going. Showing or hiding it (`⌘B`) slides the

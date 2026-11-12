@@ -3136,6 +3136,8 @@ mod tests {
                     nav_divider_x: paint.nav_divider_x,
                     quads: paint.quads,
                     labels: paint.labels,
+                    fill_alpha: 1.0,
+                    content_alpha: 1.0,
                 };
                 let rgba = skelly_render::capture_settings_rgba(
                     &config.appearance,

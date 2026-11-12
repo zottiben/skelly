@@ -1464,54 +1464,6 @@ fn push_label(
     });
 }
 
-/// Write `frames` side by side to `path` as one PNG strip, for a capture of the sidebar's motion:
-/// each frame is the sidebar as painted (`None` while hidden) and the panes beside it, rendered
-/// `size` physical px in the theme `theme`.
-#[cfg(test)]
-pub(crate) fn capture_strip(
-    path: &str,
-    theme: &str,
-    size: (u32, u32),
-    frames: Vec<(Option<Paint>, Vec<skelly_render::CapturePane>)>,
-) {
-    use skelly_render::{CaptureSidebar, Chrome};
-
-    let appearance = skelly_config::Appearance {
-        theme: theme.into(),
-        ..Default::default()
-    };
-    let (w, h) = size;
-    let count = frames.len();
-    let row = (w * 4) as usize;
-    let mut strip = vec![0_u8; row * h as usize * count];
-    for (k, (paint, panes)) in frames.into_iter().enumerate() {
-        let sidebar = paint.map(|paint| CaptureSidebar {
-            panel: paint.panel,
-            quads: paint.quads,
-            labels: paint.labels,
-        });
-        let chrome = Chrome {
-            sidebar: sidebar.as_ref(),
-            ..Chrome::default()
-        };
-        let rgba = skelly_render::capture_panes_rgba(&appearance, w, h, 2.0, &panes, &chrome);
-        for y in 0..h as usize {
-            let to = (y * count + k) * row;
-            strip[to..to + row].copy_from_slice(&rgba[y * row..(y + 1) * row]);
-        }
-    }
-    let file = std::fs::File::create(path).unwrap();
-    let width = w * u32::try_from(count).unwrap();
-    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, h);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder
-        .write_header()
-        .unwrap()
-        .write_image_data(&strip)
-        .unwrap();
-}
-
 #[cfg(test)]
 mod tests {
     use super::{build, hit, GroupSpan, Hit, Sidebar, UtilAction, View, UTIL_ICONS};

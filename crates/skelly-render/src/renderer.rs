@@ -607,25 +607,32 @@ impl Renderer {
     }
 
     /// Set the full-window settings view to draw over everything next frame, or clear
-    /// it with `None` (closed). Builds the nav/content panel fills, the active-category
-    /// and focused-control highlights, and the divider; the text colors come baked into
-    /// `settings.rows`. Drawn on top so it never unmounts the panes beneath (AGENTS Hard
-    /// rule 4).
+    /// it with `None` (closed). Builds the page fill and the nav divider under the view's
+    /// quads and labels. While the view fades, the page fill shows part way over the terminal,
+    /// and the rest part way over the page, as one layer.
+    /// Drawn on top so it never unmounts the panes beneath (AGENTS Hard rule 4).
     pub fn set_settings(&mut self, settings: Option<&SettingsView>) {
         let Some(view) = settings else {
             self.settings.clear();
             return;
         };
         let scale = self.settings.text.scale();
-        let mut quads =
-            crate::cells::settings_frame_quads(view.panel, view.nav_divider_x, &self.theme, scale);
-        quads.extend(view.quads.iter().map(chrome_quad));
+        let quads = crate::cells::settings_quads(
+            view.panel,
+            view.nav_divider_x,
+            view.quads,
+            (view.fill_alpha, view.content_alpha),
+            &self.theme,
+            scale,
+        );
+        let labels =
+            crate::prose::shown_over(view.labels, self.theme.bg_sidebar, view.content_alpha);
         self.settings.set_paint(
             &self.device,
             &self.queue,
             (self.config.width, self.config.height),
             &quads,
-            view.labels,
+            &labels,
             view.panel,
         );
     }

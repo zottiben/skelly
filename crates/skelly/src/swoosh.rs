@@ -382,7 +382,7 @@ mod tests {
                 })
                 .collect();
             let path = format!("/tmp/skelly-swoosh-{name}.png");
-            sidebar::capture_strip(&path, name, FRAME, frames);
+            crate::capture::capture_strip(&path, name, FRAME, frames);
         }
     }
 }

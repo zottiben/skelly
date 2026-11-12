@@ -219,8 +219,7 @@ mod tests {
     use crate::motion;
     use crate::sidebar::{self, Paint, View};
     use skelly_render::{
-        CapturePane, ChromeQuad, CursorShape, FontRole, GridCell, ProseLabel, PxRect, Srgb,
-        TextMeasure, Theme,
+        CapturePane, ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme,
     };
     use std::time::{Duration, Instant};
 
@@ -517,31 +516,7 @@ mod tests {
             w: w - spot.footprint - 2.0 * pad,
             h: h - spot.top - pad,
         };
-        let lines = [
-            "~/src/skelly  main",
-            "$ cargo test -p skelly",
-            "test result: ok",
-        ];
-        let cell = |c| GridCell {
-            c,
-            fg: theme.fg_primary,
-            bg: None,
-            bold: false,
-            italic: false,
-            underline: false,
-        };
-        CapturePane {
-            rect,
-            origin: (rect.x + crate::PANE_INSET * SCALE, rect.y + 12.0 * SCALE),
-            rows: lines
-                .iter()
-                .map(|line| line.chars().map(cell).collect())
-                .collect(),
-            cursor: (0, 0),
-            cursor_shape: CursorShape::Hidden,
-            focused: true,
-            logo: None,
-        }
+        crate::capture::capture_pane(rect, SCALE, theme)
     }
 
     /// Frames of the sidebar showing, the full panel closing to the rail, and the rail hovered
@@ -590,7 +565,7 @@ mod tests {
                     })
                     .collect();
                 let path = format!("/tmp/skelly-drawer-{label}-{name}.png");
-                sidebar::capture_strip(&path, name, SIZE, frames);
+                crate::capture::capture_strip(&path, name, SIZE, frames);
             }
         }
     }

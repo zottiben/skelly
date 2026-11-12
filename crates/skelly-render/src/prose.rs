@@ -9,9 +9,12 @@
 //!
 //! Each label owns a small `glyphon` buffer, and - like the terminal layer - re-shapes
 //! only when its content fingerprint changes, so an unchanged chrome repaint (an
-//! animation frame, an idle redraw) costs microseconds. The binary lays chrome out with
-//! the matching GPU-free [`TextMeasure`], so hit-testing and rendering agree on widths.
+//! animation frame, an idle redraw) costs microseconds. Color is applied when drawing, not
+//! shaping, so a label changing color, or a layer fading, re-shapes nothing. The binary lays
+//! chrome out with the matching GPU-free [`TextMeasure`], so hit-testing and rendering agree on
+//! widths.
 
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -168,11 +171,7 @@ impl ProseLayer {
             // is kept for callers' layout math, not for constraining the buffer).
             buf.buffer.set_size(None, Some(line_px.max(1.0)));
             let weight = Weight(label.weight.unwrap_or_else(|| role.weight()));
-            let attrs = role_attrs(role, weight).color(Color::rgb(
-                label.color.r,
-                label.color.g,
-                label.color.b,
-            ));
+            let attrs = role_attrs(role, weight);
             buf.buffer
                 .set_text(&label.text, &attrs, Shaping::Advanced, None);
             buf.buffer.shape_until_scroll(font_system, false);
@@ -298,16 +297,32 @@ fn letter_spacing(role: FontRole) -> Option<LetterSpacing> {
 
 /// A fingerprint of everything that affects a label's shaped glyphs, so an unchanged label
 /// skips the (comparatively expensive) re-shape on a later frame - matching the terminal
-/// layer's shape-skip. Position is *not* included (it is applied cheaply every frame).
+/// layer's shape-skip. Position and color are *not* included (both are applied cheaply every
+/// frame).
 fn label_fingerprint(label: &ProseLabel, scale: f32) -> u64 {
     let mut hasher = DefaultHasher::new();
     label.text.hash(&mut hasher);
     label.role.hash(&mut hasher);
-    label.color.hash(&mut hasher);
     label.weight.hash(&mut hasher);
     label.max_w.to_bits().hash(&mut hasher);
     scale.to_bits().hash(&mut hasher);
     hasher.finish()
+}
+
+/// `labels` shown `shown` (`0..=1`) of the way over the opaque `page` they sit on: each color
+/// mixed toward the page's, as the quads beneath them are, so a fading layer shows nothing of
+/// what is under its page. Borrowed as they are once fully shown.
+pub(crate) fn shown_over(labels: &[ProseLabel], page: Srgb, shown: f32) -> Cow<'_, [ProseLabel]> {
+    if shown >= 1.0 {
+        return Cow::Borrowed(labels);
+    }
+    labels
+        .iter()
+        .map(|label| ProseLabel {
+            color: label.color.over(page, shown),
+            ..label.clone()
+        })
+        .collect()
 }
 
 /// Round a clip coordinate to `i32` for a glyph clip bound (small, may be negative off the
@@ -383,8 +398,11 @@ impl TextMeasure {
 
 #[cfg(test)]
 mod tests {
-    use super::TextMeasure;
+    use std::borrow::Cow;
+
+    use super::{shown_over, ProseLabel, TextMeasure};
     use crate::fonts::FontRole;
+    use crate::theme::Srgb;
 
     #[test]
     fn measures_proportional_widths_that_scale_and_grow_with_text() {
@@ -429,5 +447,37 @@ mod tests {
         let m = TextMeasure::new(2.0);
         assert!((m.line_height(FontRole::Body) - 14.0 * 1.6 * 2.0).abs() < 1e-3);
         assert!((m.line_height(FontRole::Label) - 13.0 * 1.4 * 2.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn labels_shown_part_way_mix_toward_their_page() {
+        let page = Srgb { r: 0, g: 0, b: 0 };
+        let labels = [ProseLabel {
+            text: "Theme".into(),
+            x: 10.0,
+            y: 20.0,
+            role: FontRole::Label,
+            color: Srgb {
+                r: 200,
+                g: 100,
+                b: 50,
+            },
+            weight: None,
+            max_w: 100.0,
+        }];
+        assert!(
+            matches!(shown_over(&labels, page, 1.0), Cow::Borrowed(_)),
+            "fully shown, the labels are drawn as they are"
+        );
+        let half = shown_over(&labels, page, 0.5);
+        assert_eq!(
+            half[0].color,
+            Srgb {
+                r: 100,
+                g: 50,
+                b: 25
+            }
+        );
+        assert_eq!(half[0].text, "Theme");
     }
 }

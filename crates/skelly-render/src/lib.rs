@@ -306,6 +306,12 @@ pub struct SettingsView<'a> {
     pub quads: &'a [ChromeQuad],
     /// The positioned proportional text labels (nav, headings, rows, key hints).
     pub labels: &'a [ProseLabel],
+    /// How much of the page fill shows over the terminal, `0..=1`: below `1` only while the
+    /// view fades in or out.
+    pub fill_alpha: f32,
+    /// How much of the content over the fill (the nav divider, quads and labels) shows,
+    /// `0..=1`.
+    pub content_alpha: f32,
 }
 
 /// The shape to draw the focused pane's cursor as, honoring the running program's `DECSCUSR`

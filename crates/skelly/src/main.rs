@@ -11,13 +11,17 @@
 //! never leak up.
 
 mod basepicker;
+#[cfg(test)]
+mod capture;
 mod cheatsheet;
 mod cli;
 mod confirm;
 mod contextmenu;
 mod deadpane;
+mod dockslide;
 mod drawer;
 mod emptystate;
+mod fade;
 mod gitdock;
 mod glide;
 mod mcp;
@@ -702,6 +706,8 @@ struct App {
     /// workspace, whether the rail, the scale and the panel's height, as bits): a paint for the
     /// same that puts them anywhere else glides them.
     sidebar_rest: Option<((usize, bool, u32, u32), glide::Rest)>,
+    /// The right dock sliding and the settings view fading, with their last paint.
+    layers: LayerMotion,
     /// Current surface size in physical px.
     size: (u32, u32),
     scale: f64,
@@ -871,6 +877,7 @@ impl App {
             drawer: None,
             glide: None,
             sidebar_rest: None,
+            layers: LayerMotion::default(),
             size: (0, 0),
             scale: 1.0,
             modifiers: ModifiersState::empty(),
@@ -939,14 +946,20 @@ impl App {
     /// the window top; when the sidebar is hidden or the slim rail (narrower than the lights),
     /// the panes reserve the title strip so the top-left pane never sits under the lights.
     fn viewport_rect(&self) -> Rect {
-        self.viewport_beside(self.sidebar_spot())
+        self.viewport_beside(self.sidebar_spot(), self.right_dock_width_px())
     }
 
-    /// The pane area beside a sidebar shown at `spot`: where the panes rest beside the sidebar
-    /// at rest, and where they are shown while it moves.
-    fn viewport_beside(&self, spot: drawer::Spot) -> Rect {
+    /// The pane area as shown at `now`: at rest, or beside a sidebar or a right dock on the
+    /// move.
+    fn shown_viewport(&self, now: Instant) -> Rect {
+        self.viewport_beside(self.shown_spot(now), self.shown_dock_edge(now).reserve)
+    }
+
+    /// The pane area beside a sidebar shown at `spot` and a right dock keeping `dock` px from
+    /// the panes: where the panes rest beside both at rest, and where they are shown while
+    /// either moves.
+    fn viewport_beside(&self, spot: drawer::Spot, dock: f32) -> Rect {
         let pad = WINDOW_PAD * scale32(self.scale);
-        let dock = self.right_dock_width_px();
         let w = dim_f32(self.size.0);
         let h = dim_f32(self.size.1);
         Rect::new(
@@ -1098,6 +1111,39 @@ impl App {
             w: panel.w,
             h: (panel.y + panel.h - top).max(1.0),
         }
+    }
+
+    /// Where the right dock's edge rests: in by the open dock's panel, keeping its width from the
+    /// panes.
+    fn dock_rest_edge(&self) -> dockslide::Edge {
+        dockslide::Edge {
+            inset: dim_f32(self.size.0) - self.dock_panel_rect().x,
+            reserve: self.right_dock_width_px(),
+        }
+    }
+
+    /// Where the right dock's edge is shown at `now`: at rest, or on its way there.
+    fn shown_dock_edge(&self, now: Instant) -> dockslide::Edge {
+        let rest = self.dock_rest_edge();
+        self.layers
+            .dock_slide
+            .as_ref()
+            .map_or(rest, |slide| slide.edge(now, rest))
+    }
+
+    /// Slide the right dock's edge from `from`, where it was shown, to where it now rests, as a
+    /// dock opens or closes (one that closed slides out as last painted). A swap between the two
+    /// docks at rest is a cut, as their content differs. The shells were re-fitted to the rest
+    /// already; only the paint moves.
+    fn start_dock_slide(&mut self, from: dockslide::Edge) {
+        let to = self.dock_rest_edge();
+        let swap = self.layers.dock_slide.is_none() && from.inset > 0.0 && to.inset > 0.0;
+        self.layers.dock_slide = (from != to && !swap).then(|| {
+            let leaving = (to.inset <= 0.0)
+                .then(|| self.layers.dock_painted.take())
+                .flatten();
+            dockslide::Slide::start(Instant::now(), motion::PANEL, from, to, leaving)
+        });
     }
 
     /// The expand/collapse toggle's rect (physical px), or `None` when no dock is open. It always
@@ -1289,7 +1335,7 @@ impl App {
     /// Each pane the active tab shows through `shot` (its resting layout when `None`), with its
     /// rectangle - which, mid-motion, may reach past the viewport.
     fn shown_layout(&self, shot: Option<zoom::Shot>, now: Instant) -> Vec<(PaneId, Rect)> {
-        let viewport = self.viewport_beside(self.shown_spot(now));
+        let viewport = self.shown_viewport(now);
         let tree = &self.active_tab().tree;
         shot.map_or_else(
             || tree.layout(viewport),
@@ -1310,7 +1356,7 @@ impl App {
     fn pane_at_pointer(&self) -> Option<(PaneId, Rect)> {
         let (px, py) = point_f32(self.pointer);
         let now = Instant::now();
-        let viewport = self.viewport_beside(self.shown_spot(now));
+        let viewport = self.shown_viewport(now);
         let inside = |r: &Rect| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h;
         if !inside(&viewport) {
             return None;
@@ -1930,7 +1976,7 @@ impl App {
     fn build_pane_layer(&mut self, now: Instant) -> (Vec<PaneFrame>, PaneLayer, PaneOverlayPaint) {
         let shot = self.moving_shot(now);
         let layout = self.shown_layout(shot, now);
-        let viewport = self.viewport_beside(self.shown_spot(now));
+        let viewport = self.shown_viewport(now);
         let layer = PaneLayer {
             zone: Some(PxRect {
                 x: viewport.x,
@@ -1957,8 +2003,7 @@ impl App {
         let (frames, pane_layer, pane_overlay) = self.build_pane_layer(redraw_start);
         let views: Vec<PaneView> = frames.iter().map(PaneFrame::view).collect();
         let sidebar = self.sidebar_frame(redraw_start);
-        let git_dock = self.git_dock.open.then(|| self.build_git_dock_frame());
-        let timeline = self.timeline.open.then(|| self.build_timeline_frame());
+        let dock = self.dock_frame(redraw_start);
         // The first-run onboarding modal (design §10.1) reuses the overlay pass and takes
         // precedence over everything else while it is up.
         let onboarding = self
@@ -1996,7 +2041,7 @@ impl App {
         let confirm = (show_overlay && !self.palette.open)
             .then(|| self.build_confirm_frame())
             .flatten();
-        let settings = self.settings.open.then(|| self.build_settings_frame());
+        let settings = self.settings_frame(redraw_start);
 
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_panes(&views, pane_layer);
@@ -2009,24 +2054,7 @@ impl App {
                 })),
                 None => renderer.set_sidebar(None),
             }
-            match &git_dock {
-                Some(frame) => renderer.set_git_dock(Some(&GitDockView {
-                    panel: frame.panel,
-                    clip: frame.clip,
-                    quads: &frame.quads,
-                    labels: &frame.labels,
-                })),
-                None => renderer.set_git_dock(None),
-            }
-            match &timeline {
-                Some(frame) => renderer.set_timeline(Some(&TimelineView {
-                    panel: frame.panel,
-                    clip: frame.clip,
-                    quads: &frame.quads,
-                    labels: &frame.labels,
-                })),
-                None => renderer.set_timeline(None),
-            }
+            set_dock_layers(renderer, dock.as_ref());
             // Overlay precedence: onboarding (first run) > cheatsheet > context menu > base
             // drop-down > palette > confirm (mutually exclusive in practice; the order guards
             // accidental overlaps).
@@ -2053,18 +2081,23 @@ impl App {
                 None => renderer.set_overlay(None),
             }
             match &settings {
-                Some(frame) => renderer.set_settings(Some(&SettingsView {
-                    panel: frame.panel,
-                    nav_divider_x: frame.nav_divider_x,
-                    quads: &frame.quads,
-                    labels: &frame.labels,
-                })),
+                Some((frame, (fill_alpha, content_alpha))) => {
+                    renderer.set_settings(Some(&SettingsView {
+                        panel: frame.panel,
+                        nav_divider_x: frame.nav_divider_x,
+                        quads: &frame.quads,
+                        labels: &frame.labels,
+                        fill_alpha: *fill_alpha,
+                        content_alpha: *content_alpha,
+                    }));
+                }
                 None => renderer.set_settings(None),
             }
             if let Err(err) = renderer.render() {
                 tracing::error!(%err, "frame render failed");
             }
         }
+        self.keep_painted(dock, settings.map(|(frame, _)| frame), redraw_start);
         tracing::debug!(micros = redraw_start.elapsed().as_micros(), "redraw");
     }
 
@@ -2512,6 +2545,40 @@ impl App {
         paint
     }
 
+    /// Keep what was painted at `now`, the open right `dock` and the `settings` view, so one that
+    /// closes leaves as it was.
+    fn keep_painted(
+        &mut self,
+        dock: Option<(dockslide::Dock, dockslide::Frame)>,
+        settings: Option<SettingsFrame>,
+        now: Instant,
+    ) {
+        let inset = self.shown_dock_edge(now).inset;
+        self.layers.dock_painted = dock
+            .filter(|_| self.git_dock.open || self.timeline.open)
+            .map(|(dock, frame)| dockslide::Painted { dock, frame, inset });
+        self.layers.settings_painted = settings;
+    }
+
+    /// The settings view as shown at `now`, with how much of its page and of its content show:
+    /// laid out afresh while open, or as last painted while it fades out; `None` once it has
+    /// gone.
+    fn settings_frame(&mut self, now: Instant) -> Option<(SettingsFrame, (f32, f32))> {
+        let frame = if self.settings.open {
+            self.build_settings_frame()
+        } else if self.layers.settings_fade.is_some() {
+            self.layers.settings_painted.take()?
+        } else {
+            return None;
+        };
+        let alphas = self
+            .layers
+            .settings_fade
+            .as_ref()
+            .map_or((1.0, 1.0), |fade| fade::alphas(fade.shown(now)));
+        Some((frame, alphas))
+    }
+
     /// Lay out the settings view: a full-window panel, its nav + control grid rendered
     /// in UI tokens and clipped to the window.
     fn build_settings_frame(&mut self) -> SettingsFrame {
@@ -2551,10 +2618,25 @@ impl App {
         }
     }
 
+    /// The right dock as shown at `now`: the open one, laid out at rest and shifted to where its
+    /// edge is shown, or the one that closed, sliding out; `None` when neither shows.
+    fn dock_frame(&mut self, now: Instant) -> Option<(dockslide::Dock, dockslide::Frame)> {
+        let shown = self.shown_dock_edge(now).inset;
+        let (dock, mut frame) = if self.git_dock.open {
+            (dockslide::Dock::Git, self.build_git_dock_frame())
+        } else if self.timeline.open {
+            (dockslide::Dock::Timeline, self.build_timeline_frame())
+        } else {
+            return self.layers.dock_slide.as_ref()?.leaving(shown);
+        };
+        frame.shift(self.dock_rest_edge().inset - shown);
+        Some((dock, frame))
+    }
+
     /// Lay out the git dock (design §10.6): a fixed-width panel on the right edge, its
     /// status bar + file list + selected-file diff + commit box as a proportional display
     /// list clipped to the panel.
-    fn build_git_dock_frame(&mut self) -> GitDockFrame {
+    fn build_git_dock_frame(&mut self) -> dockslide::Frame {
         let scale = scale32(self.scale);
         // The opaque fill/divider span the full panel; the content is inset below the title strip.
         let panel = self.dock_panel_rect();
@@ -2570,7 +2652,7 @@ impl App {
                 self.request_redraw();
             }
         }
-        GitDockFrame {
+        dockslide::Frame {
             panel,
             clip: self.dock_clip_rect(),
             quads: paint.quads,
@@ -2580,7 +2662,7 @@ impl App {
 
     /// Lay out the session-timeline dock on the right edge (design §10.5): the status
     /// banner + event list + foot as a proportional display list clipped to the panel.
-    fn build_timeline_frame(&mut self) -> TimelineFrame {
+    fn build_timeline_frame(&mut self) -> dockslide::Frame {
         let scale = scale32(self.scale);
         // The opaque fill/divider span the full panel; the content is inset below the title strip.
         let panel = self.dock_panel_rect();
@@ -2594,7 +2676,7 @@ impl App {
             .timeline
             .build(log, content, scale, &self.theme, &mut self.measure);
         self.push_dock_button(&mut paint.quads, &mut paint.labels, scale);
-        TimelineFrame {
+        dockslide::Frame {
             panel,
             clip: self.dock_clip_rect(),
             quads: paint.quads,
@@ -2639,12 +2721,37 @@ impl App {
         });
     }
 
-    /// Open the settings view (`⌘,` or the palette command).
+    /// Open the settings view (`⌘,` or the palette command), fading it in; it takes input at
+    /// once.
     fn open_settings(&mut self) {
         self.cancel_dictation("Capture cancelled: settings opened");
         self.end_conversation();
+        if !self.settings.open {
+            self.fade_settings(1.0, motion::BASE);
+        }
         self.settings.open();
         self.request_redraw();
+    }
+
+    /// Close the settings view, fading it out; the terminal takes input at once.
+    fn close_settings(&mut self) {
+        if self.settings.open {
+            self.settings.close();
+            self.fade_settings(0.0, motion::FAST);
+        }
+        self.request_redraw();
+    }
+
+    /// Fade the settings view toward showing `to` (`0` gone, `1` shown) at the pace of `whole`
+    /// for the whole way, from where a fade in flight shows it.
+    fn fade_settings(&mut self, to: f32, whole: Duration) {
+        let now = Instant::now();
+        let from = self
+            .layers
+            .settings_fade
+            .as_ref()
+            .map_or(1.0 - to, |fade| fade.shown(now));
+        self.layers.settings_fade = Some(fade::Fade::start(now, from, to, whole));
     }
 
     /// Persist the config to disk after a settings edit - the file is the source of
@@ -2977,6 +3084,7 @@ impl App {
     /// selected file's diff; either way the pane viewport changes width, so re-fit the
     /// shells and repaint.
     fn toggle_git_dock(&mut self) {
+        let from = self.shown_dock_edge(Instant::now());
         if self.git_dock.open {
             self.git_dock.close();
             self.set_git_repo(None);
@@ -2994,6 +3102,7 @@ impl App {
         self.dock_full_width = false;
         self.sync_poll_cadence();
         self.sync_layout();
+        self.start_dock_slide(from);
         self.request_redraw();
     }
 
@@ -3001,6 +3110,7 @@ impl App {
     /// 4), records the session-start event if it has not been yet, and snaps to now; either
     /// way the pane viewport changes width, so re-fit the shells and repaint.
     fn toggle_timeline(&mut self) {
+        let from = self.shown_dock_edge(Instant::now());
         if self.timeline.open {
             self.close_timeline();
         } else {
@@ -3023,6 +3133,7 @@ impl App {
         self.dock_full_width = false;
         self.sync_poll_cadence();
         self.sync_layout();
+        self.start_dock_slide(from);
         self.request_redraw();
     }
 
@@ -5421,8 +5532,7 @@ impl App {
         if self.modifiers.super_key() {
             if let Key::Character(ch) = key_event.logical_key.as_ref() {
                 if ch == "," {
-                    self.settings.close();
-                    self.request_redraw();
+                    self.close_settings();
                     return;
                 }
                 if ch.eq_ignore_ascii_case("q") {
@@ -5467,10 +5577,7 @@ impl App {
             return;
         }
         match key_event.logical_key.as_ref() {
-            Key::Named(NamedKey::Escape) => {
-                self.settings.close();
-                self.request_redraw();
-            }
+            Key::Named(NamedKey::Escape) => self.close_settings(),
             Key::Named(NamedKey::ArrowUp) => {
                 self.settings.move_selection(-1);
                 self.request_redraw();
@@ -6667,7 +6774,7 @@ impl App {
         };
         let written = match target {
             Target::Close => {
-                self.settings.close();
+                self.close_settings();
                 None
             }
             Target::Category(index) => {
@@ -7018,28 +7125,47 @@ struct OnboardingFrame {
     labels: Vec<skelly_render::ProseLabel>,
 }
 
+/// Hand the right `dock` as shown, if any, to its layer, and clear the other dock's.
+fn set_dock_layers(renderer: &mut Renderer, dock: Option<&(dockslide::Dock, dockslide::Frame)>) {
+    match dock {
+        Some((dockslide::Dock::Git, frame)) => renderer.set_git_dock(Some(&GitDockView {
+            panel: frame.panel,
+            clip: frame.clip,
+            quads: &frame.quads,
+            labels: &frame.labels,
+        })),
+        _ => renderer.set_git_dock(None),
+    }
+    match dock {
+        Some((dockslide::Dock::Timeline, frame)) => renderer.set_timeline(Some(&TimelineView {
+            panel: frame.panel,
+            clip: frame.clip,
+            quads: &frame.quads,
+            labels: &frame.labels,
+        })),
+        _ => renderer.set_timeline(None),
+    }
+}
+
+/// The right dock's and the settings view's motion: each layer's move in flight, and its last
+/// paint, which a layer that closes leaves as.
+#[derive(Default)]
+struct LayerMotion {
+    /// The right dock's edge moving to where it rests (a dock opening or closing), while it
+    /// moves.
+    dock_slide: Option<dockslide::Slide>,
+    /// The open right dock as last painted, so a dock that closes slides out as it was.
+    dock_painted: Option<dockslide::Painted>,
+    /// The settings view fading in or out, while it fades.
+    settings_fade: Option<fade::Fade>,
+    /// The settings view as last painted, so a view that closes fades out as it was.
+    settings_painted: Option<SettingsFrame>,
+}
+
 /// Owned settings-view frame data the borrowed [`SettingsView`] points at.
 struct SettingsFrame {
     panel: PxRect,
     nav_divider_x: f32,
-    quads: Vec<skelly_render::ChromeQuad>,
-    labels: Vec<skelly_render::ProseLabel>,
-}
-
-/// Owned git-dock frame data the borrowed [`GitDockView`] points at.
-struct GitDockFrame {
-    panel: PxRect,
-    /// The label clip (panel widened left for the edge-straddling toggle glyph).
-    clip: PxRect,
-    quads: Vec<skelly_render::ChromeQuad>,
-    labels: Vec<skelly_render::ProseLabel>,
-}
-
-/// Owned timeline-dock frame data the borrowed [`TimelineView`] points at.
-struct TimelineFrame {
-    panel: PxRect,
-    /// The label clip (panel widened left for the edge-straddling toggle glyph).
-    clip: PxRect,
     quads: Vec<skelly_render::ChromeQuad>,
     labels: Vec<skelly_render::ProseLabel>,
 }
@@ -7756,6 +7882,26 @@ impl App {
             self.glide = None;
             self.request_redraw();
         }
+        // The right dock's slide and the settings view's fade: drop each at rest, with what it
+        // slid or faded out, painting the settled frame once.
+        if self
+            .layers
+            .dock_slide
+            .as_ref()
+            .is_some_and(|slide| slide.done(now))
+        {
+            self.layers.dock_slide = None;
+            self.request_redraw();
+        }
+        if self
+            .layers
+            .settings_fade
+            .as_ref()
+            .is_some_and(|fade| fade.done(now))
+        {
+            self.layers.settings_fade = None;
+            self.request_redraw();
+        }
         self.palette_anim.is_some()
             || self.confirm_anim.is_some()
             || fading
@@ -7763,6 +7909,8 @@ impl App {
             || self.swoosh.is_some()
             || self.drawer.is_some()
             || self.glide.is_some()
+            || self.layers.dock_slide.is_some()
+            || self.layers.settings_fade.is_some()
     }
 }
 

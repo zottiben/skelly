@@ -53,6 +53,13 @@ pub(crate) const SHADOW_E4: Shadow = Shadow {
 pub(crate) const RADIUS_LG: f32 = 10.0;
 
 impl Quad {
+    /// This quad drawn `opacity` (`0..=1`) of the way over what is beneath it, for a layer
+    /// that fades.
+    pub(crate) fn faded(mut self, opacity: f32) -> Self {
+        self.color[3] *= opacity.clamp(0.0, 1.0);
+        self
+    }
+
     /// A sharp-cornered quad at pixel `(x, y)` of size `(w, h)` filled with linear
     /// `color` - the flat fill used for cell backgrounds, dividers, cursors, and
     /// flush surfaces (`params` all zero, so the shader returns the fill directly).
@@ -386,34 +393,40 @@ pub fn logo_chrome_quads(
     ]
 }
 
-/// Build the full-window settings frame: one `bg.sidebar` fill over the panel - the page the
-/// nav and the content's section cards sit on - and a `border.subtle` hairline between the nav
-/// and the content at `nav_divider_x`. The nav pills, the cards, the rows and all text are
-/// supplied by the binary as a proportional display list drawn on top. Shared by the windowed
-/// [`Renderer`](crate::Renderer) and the headless capture.
-pub(crate) fn settings_frame_quads(
+/// The full-window settings view's quads: one `bg.sidebar` fill over the panel - the page the
+/// nav and the content's section cards sit on - a `border.subtle` hairline between the nav and
+/// the content at `nav_divider_x`, and the binary's `content` quads (nav pills, cards, rows,
+/// widgets) over them. While the view fades, the page shows `fill` of the way over the
+/// terminal, and the rest shows `shown` of the way over the page: each color is mixed toward
+/// the page's, so the content fades as one layer and never shows a quad through the one over
+/// it. Shared by the windowed [`Renderer`](crate::Renderer) and the headless capture.
+pub(crate) fn settings_quads(
     panel: crate::PxRect,
     nav_divider_x: f32,
+    content: &[crate::ChromeQuad],
+    (fill, shown): (f32, f32),
     theme: &crate::theme::Theme,
     scale: f32,
 ) -> Vec<Quad> {
+    let page = theme.bg_sidebar;
     let stroke = scale.max(1.0);
-    vec![
-        Quad::new(
-            panel.x,
-            panel.y,
-            panel.w,
-            panel.h,
-            theme.bg_sidebar.to_linear(),
-        ),
+    let mut quads = vec![
+        Quad::new(panel.x, panel.y, panel.w, panel.h, page.to_linear()).faded(fill),
         Quad::new(
             nav_divider_x,
             panel.y,
             stroke,
             panel.h,
-            theme.border_subtle.to_linear(),
+            theme.border_subtle.over(page, shown).to_linear(),
         ),
-    ]
+    ];
+    quads.extend(content.iter().map(|quad| {
+        chrome_quad(&crate::ChromeQuad {
+            color: quad.color.over(page, shown),
+            ..*quad
+        })
+    }));
+    quads
 }
 
 /// Build the generic right-dock frame chrome, shared by the migrated proportional docks:
@@ -824,8 +837,8 @@ fn fs_main(in: VOut) -> @location(0) vec4<f32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{grid_quads, logo_quads, push_outline, Quad};
-    use crate::{GridCell, PxRect, Srgb, Theme};
+    use super::{grid_quads, logo_quads, push_outline, settings_quads, Quad};
+    use crate::{ChromeQuad, GridCell, PxRect, Srgb, Theme};
 
     fn plain(c: char) -> GridCell {
         GridCell {
@@ -1096,5 +1109,60 @@ mod tests {
             "blur recorded for the shader"
         );
         assert!(rect_eq(q.color, [0.0, 0.0, 0.0, 0.52]), "e4 is 52% black");
+    }
+
+    #[test]
+    fn a_fading_settings_view_mixes_its_content_toward_the_page_as_one_layer() {
+        let theme = Theme::resolve("ossein-dark");
+        let page = theme.bg_sidebar;
+        let panel = PxRect {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 600.0,
+        };
+        let card = PxRect {
+            x: 100.0,
+            y: 100.0,
+            w: 200.0,
+            h: 100.0,
+        };
+        let card_fill = theme.bg_base.to_srgb();
+        let content = [
+            ChromeQuad::fill(card, card_fill),
+            ChromeQuad::tint(card, theme.accent, 0.3, 0.0),
+        ];
+        let with_alpha = |color: Srgb, alpha: f32| {
+            let mut linear = color.to_linear();
+            linear[3] = alpha;
+            linear
+        };
+        let quads = settings_quads(panel, 200.0, &content, (0.5, 0.25), &theme, 2.0);
+        assert!(
+            rect_eq(quads[0].color, with_alpha(page, 0.5)),
+            "the page fades over the terminal"
+        );
+        assert!(
+            rect_eq(
+                quads[1].color,
+                theme.border_subtle.over(page, 0.25).to_linear()
+            ),
+            "the nav divider comes in over the page"
+        );
+        assert!(
+            rect_eq(quads[2].color, card_fill.over(page, 0.25).to_linear()),
+            "a card stays opaque, so nothing shows through it"
+        );
+        assert!(
+            rect_eq(
+                quads[3].color,
+                with_alpha(theme.accent.over(page, 0.25), 0.3)
+            ),
+            "a tint keeps its own alpha"
+        );
+        let rest = settings_quads(panel, 200.0, &content, (1.0, 1.0), &theme, 2.0);
+        assert!(rect_eq(rest[0].color, page.to_linear()));
+        assert!(rect_eq(rest[2].color, card_fill.to_linear()));
+        assert!(rect_eq(rest[3].color, with_alpha(theme.accent, 0.3)));
     }
 }

@@ -639,7 +639,7 @@ mod tests {
                     })
                     .collect();
                 let path = format!("/tmp/skelly-glide-{label}-{name}.png");
-                sidebar::capture_strip(&path, name, (520, 840), frames);
+                crate::capture::capture_strip(&path, name, (520, 840), frames);
             }
         }
     }
