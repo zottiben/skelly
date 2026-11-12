@@ -16,8 +16,10 @@ mod cli;
 mod confirm;
 mod contextmenu;
 mod deadpane;
+mod drawer;
 mod emptystate;
 mod gitdock;
+mod glide;
 mod mcp;
 #[cfg(target_os = "macos")]
 mod menu;
@@ -260,6 +262,9 @@ enum TabAction {
 /// running in the background. (The sidebar that lists tabs is a later slice; today
 /// tabs are created, closed, and switched from the keyboard and command palette.)
 struct Tab {
+    /// A key no other tab or group of this run has, so the sidebar can follow the tab's row as
+    /// tabs come, go and move.
+    key: u64,
     /// The tiling model; every leaf maps to a live terminal in `panes`.
     tree: PaneTree,
     /// One live shell per pane.
@@ -318,11 +323,30 @@ enum RenameTarget {
 /// tabs ("Groups map to a working directory or project"). Collapsing hides its children in the
 /// sidebar but keeps their shells running. Groups belong to a workspace.
 struct TabGroup {
+    /// A key no other tab or group of this run has (see [`Tab::key`]).
+    key: u64,
     /// The header name (e.g. `skelly · main`), shown uppercased-ish in a mono label.
     name: String,
     /// Whether the group is collapsed - its member tabs are hidden from the list (their shells
     /// stay alive), leaving just the header + count.
     collapsed: bool,
+}
+
+impl TabGroup {
+    /// A group named `name`, with a fresh key.
+    fn new(name: String, collapsed: bool) -> Self {
+        Self {
+            key: next_key(),
+            name,
+            collapsed,
+        }
+    }
+}
+
+/// A key no earlier call returned, for a tab or a group.
+fn next_key() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// The sidebar's ordered tab layout (design §08 #4/#5): the pinned tabs, the unpinned tabs in
@@ -338,6 +362,7 @@ struct TabLayout {
 /// One group's span over the ordered unpinned list: the header name + collapsed flag and the
 /// `[start, start + len)` range of member positions within `TabLayout::ordered`.
 struct GroupSpanData {
+    key: u64,
     name: String,
     collapsed: bool,
     start: usize,
@@ -349,6 +374,7 @@ impl Tab {
     /// pristine so it shows the empty state until the first command runs.
     fn new() -> Self {
         Self {
+            key: next_key(),
             tree: PaneTree::new(),
             panes: HashMap::new(),
             voice_bridges: HashMap::new(),
@@ -667,6 +693,15 @@ struct App {
     chip_swipe: f64,
     /// The sidebar's rows sliding from the workspace left to the active one, while they move.
     swoosh: Option<swoosh::Swoosh>,
+    /// The sidebar's edge moving to where it rests (shown or hidden, the rail or the full
+    /// panel), while it moves.
+    drawer: Option<drawer::Drawer>,
+    /// The sidebar's list rows gliding to where they rest after a change, while they move.
+    glide: Option<glide::Glide>,
+    /// The sidebar's list rows as last painted at rest, with what they were painted for (the
+    /// workspace, whether the rail, the scale and the panel's height, as bits): a paint for the
+    /// same that puts them anywhere else glides them.
+    sidebar_rest: Option<((usize, bool, u32, u32), glide::Rest)>,
     /// Current surface size in physical px.
     size: (u32, u32),
     scale: f64,
@@ -833,6 +868,9 @@ impl App {
             chip_seen: None,
             chip_swipe: 0.0,
             swoosh: None,
+            drawer: None,
+            glide: None,
+            sidebar_rest: None,
             size: (0, 0),
             scale: 1.0,
             modifiers: ModifiersState::empty(),
@@ -901,24 +939,71 @@ impl App {
     /// the window top; when the sidebar is hidden or the slim rail (narrower than the lights),
     /// the panes reserve the title strip so the top-left pane never sits under the lights.
     fn viewport_rect(&self) -> Rect {
-        let scale = scale32(self.scale);
-        let pad = WINDOW_PAD * scale;
-        let sidebar = self.sidebar_footprint_px();
+        self.viewport_beside(self.sidebar_spot())
+    }
+
+    /// The pane area beside a sidebar shown at `spot`: where the panes rest beside the sidebar
+    /// at rest, and where they are shown while it moves.
+    fn viewport_beside(&self, spot: drawer::Spot) -> Rect {
+        let pad = WINDOW_PAD * scale32(self.scale);
         let dock = self.right_dock_width_px();
         let w = dim_f32(self.size.0);
         let h = dim_f32(self.size.1);
-        // Reserve the traffic-light strip at the top only when the sidebar doesn't cover it.
-        let top = if sidebar < TRAFFIC_LIGHT_WIDTH * scale {
+        Rect::new(
+            spot.footprint + pad,
+            spot.top,
+            (w - spot.footprint - dock - 2.0 * pad).max(1.0),
+            (h - spot.top - pad).max(1.0),
+        )
+    }
+
+    /// Where the sidebar rests: its painted width, the strip it keeps from the panes, and the
+    /// pane viewport's top, which reserves the traffic-light strip only when the sidebar does
+    /// not cover it.
+    fn sidebar_spot(&self) -> drawer::Spot {
+        let scale = scale32(self.scale);
+        let pad = WINDOW_PAD * scale;
+        let footprint = self.sidebar_footprint_px();
+        let top = if footprint < TRAFFIC_LIGHT_WIDTH * scale {
             pad.max(self.content_top())
         } else {
             pad
         };
-        Rect::new(
-            sidebar + pad,
+        drawer::Spot {
+            edge: self.sidebar_width_px(),
+            footprint,
             top,
-            (w - sidebar - dock - 2.0 * pad).max(1.0),
-            (h - top - pad).max(1.0),
-        )
+        }
+    }
+
+    /// Where the sidebar is shown at `now`: at rest, or on its way there.
+    fn shown_spot(&self, now: Instant) -> drawer::Spot {
+        let rest = self.sidebar_spot();
+        self.drawer
+            .as_ref()
+            .map_or(rest, |drawer| drawer.spot(now, rest))
+    }
+
+    /// What the sidebar shows at rest.
+    fn sidebar_mode_now(&self) -> drawer::Mode {
+        if !self.sidebar.visible() {
+            drawer::Mode::Hidden
+        } else if self.sidebar_rail_now() {
+            drawer::Mode::Rail
+        } else {
+            drawer::Mode::Full
+        }
+    }
+
+    /// Move the sidebar's edge over `duration` from `from`, the spot it was shown at while it
+    /// showed `was`, to where it now rests. The shells were re-fitted to the rest already; only
+    /// the paint moves.
+    fn start_drawer(&mut self, from: drawer::Spot, was: drawer::Mode, duration: Duration) {
+        let to = self.sidebar_spot();
+        let prev = self.drawer.as_ref().map(drawer::Drawer::look);
+        let look = drawer::Look::between(prev, was, self.sidebar_mode_now());
+        self.drawer =
+            (from != to).then(|| drawer::Drawer::start(Instant::now(), duration, from, to, look));
     }
 
     /// The sidebar's **painted / hit** width in physical px, or `0.0` when hidden. The panel
@@ -968,8 +1053,8 @@ impl App {
     }
 
     /// The open right dock's panel rect (physical px). Normally right-anchored at `dock_width`;
-    /// when [`dock_full_width`](Self::dock_full_width) it spans from the sidebar to the right edge,
-    /// overlaying the panes. `w = 0` when no dock is open.
+    /// when [`dock_full_width`](Self::dock_full_width) it spans from the sidebar as shown to the
+    /// right edge, overlaying the panes. `w = 0` when no dock is open.
     fn dock_panel_rect(&self) -> PxRect {
         let (surface_w, surface_h) = (dim_f32(self.size.0), dim_f32(self.size.1));
         if !(self.git_dock.open || self.timeline.open) {
@@ -981,7 +1066,7 @@ impl App {
             };
         }
         if self.dock_full_width {
-            let x = self.sidebar_footprint_px();
+            let x = self.shown_spot(Instant::now()).footprint;
             PxRect {
                 x,
                 y: 0.0,
@@ -1006,7 +1091,7 @@ impl App {
     /// full-width dock covers the panes with no sliver; only the content is inset.
     fn dock_content_rect(&self) -> PxRect {
         let panel = self.dock_panel_rect();
-        let top = self.viewport_rect().y;
+        let top = self.shown_spot(Instant::now()).top;
         PxRect {
             x: panel.x,
             y: top,
@@ -1136,10 +1221,15 @@ impl App {
             self.config.sidebar.width = width;
             SidebarMode::Fixed
         };
+        let (from, was) = (self.shown_spot(Instant::now()), self.sidebar_mode_now());
         self.sidebar.set_mode(mode);
         self.config.sidebar.mode = mode;
         self.rail_expanded = false;
         self.sync_layout();
+        // Within a mode the edge follows the pointer; crossing into another snaps it there.
+        if self.sidebar_mode_now() != was {
+            self.start_drawer(from, was, motion::BASE);
+        }
         self.request_redraw();
     }
 
@@ -1198,8 +1288,8 @@ impl App {
 
     /// Each pane the active tab shows through `shot` (its resting layout when `None`), with its
     /// rectangle - which, mid-motion, may reach past the viewport.
-    fn shown_layout(&self, shot: Option<zoom::Shot>) -> Vec<(PaneId, Rect)> {
-        let viewport = self.viewport_rect();
+    fn shown_layout(&self, shot: Option<zoom::Shot>, now: Instant) -> Vec<(PaneId, Rect)> {
+        let viewport = self.viewport_beside(self.shown_spot(now));
         let tree = &self.active_tab().tree;
         shot.map_or_else(
             || tree.layout(viewport),
@@ -1209,7 +1299,8 @@ impl App {
 
     /// The rectangle of pane `id` as the active tab shows it now, if it is visible.
     fn pane_rect(&self, id: PaneId) -> Option<Rect> {
-        self.shown_layout(self.moving_shot(Instant::now()))
+        let now = Instant::now();
+        self.shown_layout(self.moving_shot(now), now)
             .into_iter()
             .find(|(pid, _)| *pid == id)
             .map(|(_, rect)| rect)
@@ -1218,12 +1309,13 @@ impl App {
     /// The active tab's pane whose rectangle contains the pointer, with that rectangle.
     fn pane_at_pointer(&self) -> Option<(PaneId, Rect)> {
         let (px, py) = point_f32(self.pointer);
-        let viewport = self.viewport_rect();
+        let now = Instant::now();
+        let viewport = self.viewport_beside(self.shown_spot(now));
         let inside = |r: &Rect| px >= r.x && px < r.x + r.w && py >= r.y && py < r.y + r.h;
         if !inside(&viewport) {
             return None;
         }
-        self.shown_layout(self.moving_shot(Instant::now()))
+        self.shown_layout(self.moving_shot(now), now)
             .into_iter()
             .find(|(_, r)| inside(r))
     }
@@ -1837,8 +1929,8 @@ impl App {
     /// moving camera (ADR-0011) places each pane's grid and its status line together.
     fn build_pane_layer(&mut self, now: Instant) -> (Vec<PaneFrame>, PaneLayer, PaneOverlayPaint) {
         let shot = self.moving_shot(now);
-        let layout = self.shown_layout(shot);
-        let viewport = self.viewport_rect();
+        let layout = self.shown_layout(shot, now);
+        let viewport = self.viewport_beside(self.shown_spot(now));
         let layer = PaneLayer {
             zone: Some(PxRect {
                 x: viewport.x,
@@ -2252,19 +2344,88 @@ impl App {
         (unpinned, pinned)
     }
 
-    /// The sidebar as shown at `now`: at rest, or with its rows mid-swoosh; `None` while hidden.
+    /// The sidebar as shown at `now`: at rest, with its rows mid-glide or mid-swoosh, or with its
+    /// edge on the move; `None` while hidden.
     fn sidebar_frame(&mut self, now: Instant) -> Option<sidebar::Paint> {
+        if let Some(drawer) = &self.drawer {
+            let (look, edge) = (drawer.look(), drawer.spot(now, self.sidebar_spot()).edge);
+            // Rows glide only at rest; the next paint at rest starts them afresh.
+            self.glide = None;
+            self.sidebar_rest = None;
+            if edge <= 0.0 {
+                return None;
+            }
+            let scale = scale32(self.scale);
+            let (narrow, wide) = (
+                RAIL_WIDTH * scale,
+                f32::from(self.config.sidebar.width) * scale,
+            );
+            let mut paint =
+                self.build_sidebar_paint(look.rail, if look.rail { narrow } else { wide });
+            let mut rail = look.fades.then(|| self.build_sidebar_paint(true, narrow));
+            if let Some(swoosh) = &self.swoosh {
+                for paint in std::iter::once(&mut paint).chain(rail.as_mut()) {
+                    swoosh.apply(paint, now);
+                }
+            }
+            if let Some(drawer) = &self.drawer {
+                drawer.fit(&mut paint, edge);
+                if let Some(rail) = rail {
+                    drawer.blend(
+                        &mut paint,
+                        rail,
+                        edge,
+                        (narrow, wide),
+                        self.theme.bg_sidebar,
+                    );
+                }
+            }
+            return Some(paint);
+        }
         if !self.sidebar.visible() {
+            self.glide = None;
+            self.sidebar_rest = None;
             return None;
         }
         let mut paint = self.build_sidebar_frame();
+        self.glide_rows(&paint, now);
+        if let Some(glide) = &self.glide {
+            glide.apply(&mut paint, now, self.theme.bg_sidebar);
+        }
         if let Some(swoosh) = &self.swoosh {
             swoosh.apply(&mut paint, now);
         }
         Some(paint)
     }
 
+    /// Glide the sidebar's list rows when `paint` puts them anywhere but where they last rested:
+    /// a tab added, closed, moved or pinned, a group folded, the active tab changed. A paint for
+    /// another workspace (which swooshes instead), look, scale or height starts afresh.
+    fn glide_rows(&mut self, paint: &sidebar::Paint, now: Instant) {
+        let painted_for = (
+            self.active_workspace,
+            self.sidebar_rail_now(),
+            scale32(self.scale).to_bits(),
+            paint.panel.h.to_bits(),
+        );
+        match &self.sidebar_rest {
+            Some((was, rest)) if *was == painted_for && self.swoosh.is_none() => {
+                if !rest.holds(paint) {
+                    self.glide = glide::Glide::start(self.glide.as_ref(), rest, paint, now);
+                }
+            }
+            _ => self.glide = None,
+        }
+        self.sidebar_rest = Some((painted_for, glide::Rest::of(paint)));
+    }
+
+    /// The sidebar at rest.
     fn build_sidebar_frame(&mut self) -> sidebar::Paint {
+        self.build_sidebar_paint(self.sidebar_rail_now(), self.sidebar_width_px())
+    }
+
+    /// The sidebar showing the rail, or the full panel, `width` physical px wide.
+    fn build_sidebar_paint(&mut self, rail: bool, width: f32) -> sidebar::Paint {
         let scale = scale32(self.scale);
         // The sidebar bg fills the whole column (traffic lights sit on it); its content clears
         // the control strip via `top_inset` (logical px, macOS only).
@@ -2294,6 +2455,7 @@ impl App {
             None => {}
         }
         let list_running: Vec<bool> = layout.ordered.iter().map(|&i| running[i]).collect();
+        let tab_keys: Vec<u64> = layout.ordered.iter().map(|&i| self.tabs[i].key).collect();
         let pinned_glyphs: Vec<char> = layout
             .pinned
             .iter()
@@ -2309,6 +2471,7 @@ impl App {
             .spans
             .iter()
             .map(|s| sidebar::GroupSpan {
+                key: s.key,
                 name: &s.name,
                 collapsed: s.collapsed,
                 start: s.start,
@@ -2331,13 +2494,14 @@ impl App {
             groups: &groups,
             tab_running: &list_running,
             tab_titles: &list_titles,
-            rail: self.sidebar_rail_now(),
+            tab_keys: &tab_keys,
+            rail,
             top_inset: self.content_top() / scale,
         };
         let panel = PxRect {
             x: 0.0,
             y: 0.0,
-            w: self.sidebar_width_px(),
+            w: width,
             h: dim_f32(self.size.1),
         };
         let paint = sidebar::build(&view, panel, scale, &self.theme, &mut self.measure);
@@ -2575,20 +2739,34 @@ impl App {
     /// Show or hide the sidebar (`⌘B`). The pane viewport changes width, so re-fit the
     /// shells; the chosen mode persists (design §08, Hard rule 1).
     fn toggle_sidebar(&mut self) {
+        let (from, was) = (self.shown_spot(Instant::now()), self.sidebar_mode_now());
         self.sidebar.toggle();
         self.rail_expanded = false;
         self.persist_sidebar_mode();
         self.sync_layout();
+        self.start_drawer(from, was, motion::PANEL);
         self.request_redraw();
     }
 
     /// Cycle the sidebar between the full panel and the slim icon rail (`⇧⌘B`, design
     /// §08). The viewport changes width, so re-fit the shells; the mode persists.
     fn cycle_sidebar_mode(&mut self) {
+        let (from, was) = (self.shown_spot(Instant::now()), self.sidebar_mode_now());
         self.sidebar.cycle_rail();
         self.rail_expanded = false;
         self.persist_sidebar_mode();
         self.sync_layout();
+        self.start_drawer(from, was, motion::PANEL);
+        self.request_redraw();
+    }
+
+    /// Hover the rail open over the panes, or let it close (design §08, "56px · hover to
+    /// expand"), its edge moving at the guide's base pace: quicker than a panel slide, as it
+    /// follows the pointer.
+    fn set_rail_expanded(&mut self, expanded: bool) {
+        let (from, was) = (self.shown_spot(Instant::now()), self.sidebar_mode_now());
+        self.rail_expanded = expanded;
+        self.start_drawer(from, was, motion::BASE);
         self.request_redraw();
     }
 
@@ -3404,6 +3582,7 @@ impl App {
             .spans
             .iter()
             .map(|s| sidebar::GroupSpan {
+                key: s.key,
                 name: &s.name,
                 collapsed: s.collapsed,
                 start: s.start,
@@ -3426,6 +3605,7 @@ impl App {
             groups: &groups,
             tab_running: &[],
             tab_titles: &[],
+            tab_keys: &[],
             rail: self.sidebar_rail_now(),
             top_inset: self.content_top() / scale,
         };
@@ -4001,10 +4181,7 @@ impl App {
         let name = self
             .group_label()
             .unwrap_or_else(|| format!("Group {}", self.groups.len() + 1));
-        self.groups.push(TabGroup {
-            name,
-            collapsed: false,
-        });
+        self.groups.push(TabGroup::new(name, false));
         let gi = self.groups.len() - 1;
         if let Some(tab) = self.tabs.get_mut(self.active) {
             tab.group = Some(gi);
@@ -4101,6 +4278,7 @@ impl App {
                     .filter(|&i| self.tabs[i].group == Some(gi)),
             );
             spans.push(GroupSpanData {
+                key: group.key,
                 name: group.name.clone(),
                 collapsed: group.collapsed,
                 start,
@@ -4929,10 +5107,7 @@ impl App {
             let groups = wss
                 .groups
                 .into_iter()
-                .map(|g| TabGroup {
-                    name: g.name,
-                    collapsed: g.collapsed,
-                })
+                .map(|g| TabGroup::new(g.name, g.collapsed))
                 .collect();
             let mut tabs: Vec<Tab> = wss
                 .tabs
@@ -6211,8 +6386,7 @@ impl App {
             let (px, _) = point_f32(self.pointer);
             let within = px < self.sidebar_width_px();
             if within != self.rail_expanded {
-                self.rail_expanded = within;
-                self.request_redraw();
+                self.set_rail_expanded(within);
             }
         }
         // Hover tooltips (design §09): track the icon-only element under the pointer + when the
@@ -7349,8 +7523,7 @@ impl ApplicationHandler<Wakeup> for App {
             WindowEvent::CursorLeft { .. } => {
                 // The pointer left the window - collapse a hover-expanded rail (design §08).
                 if self.rail_expanded {
-                    self.rail_expanded = false;
-                    self.request_redraw();
+                    self.set_rail_expanded(false);
                 }
             }
             WindowEvent::MouseInput {
@@ -7569,9 +7742,18 @@ impl App {
             self.request_redraw();
         }
         let zooming = zoom.is_some_and(|motion| motion.gliding(now));
-        // The sidebar's workspace swoosh: drop it at rest, painting the settled rows once.
+        // The sidebar's workspace swoosh, its edge and its rows: drop each at rest, painting the
+        // settled sidebar once.
         if self.swoosh.as_ref().is_some_and(|swoosh| swoosh.done(now)) {
             self.swoosh = None;
+            self.request_redraw();
+        }
+        if self.drawer.as_ref().is_some_and(|drawer| drawer.done(now)) {
+            self.drawer = None;
+            self.request_redraw();
+        }
+        if self.glide.as_ref().is_some_and(|glide| glide.done(now)) {
+            self.glide = None;
             self.request_redraw();
         }
         self.palette_anim.is_some()
@@ -7579,6 +7761,8 @@ impl App {
             || fading
             || zooming
             || self.swoosh.is_some()
+            || self.drawer.is_some()
+            || self.glide.is_some()
     }
 }
 
@@ -7869,6 +8053,7 @@ fn take_group(
         .partition(|t| t.group == Some(gi));
     *tabs = kept;
     let group = TabGroup {
+        key: groups[gi].key,
         name: groups[gi].name.clone(),
         collapsed: groups[gi].collapsed,
     };
@@ -9276,10 +9461,7 @@ mod tests {
 
     #[test]
     fn removing_a_group_keeps_its_tabs_and_reindexes_the_later_groups() {
-        let group = |name: &str| TabGroup {
-            name: name.to_owned(),
-            collapsed: false,
-        };
+        let group = |name: &str| TabGroup::new(name.to_owned(), false);
         let mut groups = vec![group("a"), group("b"), group("c")];
         let mut tabs: Vec<Tab> = [Some(0), Some(1), None, Some(2), Some(1)]
             .into_iter()
@@ -9320,10 +9502,7 @@ mod tests {
     }
 
     fn named(name: &str) -> TabGroup {
-        TabGroup {
-            name: name.to_owned(),
-            collapsed: false,
-        }
+        TabGroup::new(name.to_owned(), false)
     }
 
     #[test]

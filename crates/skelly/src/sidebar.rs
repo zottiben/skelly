@@ -160,6 +160,9 @@ pub(crate) struct View<'a> {
     pub(crate) tab_running: &'a [bool],
     /// Each tab's title (design §10.3), one per tab; a missing entry falls back to `Tab N`.
     pub(crate) tab_titles: &'a [String],
+    /// Each tab's stable key, one per tab, so a change of rows tells a tab that moved from one
+    /// that came or went; a missing entry falls back to the tab's position.
+    pub(crate) tab_keys: &'a [u64],
     /// Whether the sidebar is the slim icon rail.
     pub(crate) rail: bool,
     /// The macOS control-strip inset in **logical** px (0 elsewhere); content clears it.
@@ -169,6 +172,8 @@ pub(crate) struct View<'a> {
 /// One collapsible group's span over the ordered tab list (design §08 #5): the header name +
 /// collapsed flag and the `[start, start + len)` range of member tab positions.
 pub(crate) struct GroupSpan<'a> {
+    /// The group's stable key (see [`View::tab_keys`]).
+    pub(crate) key: u64,
     /// The header name (e.g. `skelly · main`), rendered in a mono micro label.
     pub(crate) name: &'a str,
     /// Whether the group is collapsed (its member tab rows are hidden - header only).
@@ -525,7 +530,36 @@ fn utility_slots(panel: PxRect, scale: f32) -> Vec<(UtilAction, PxRect)> {
         .collect()
 }
 
-/// The sidebar's finished proportional display list plus the panel it clips to.
+/// What one row of the workspace's list shows, so a change of rows can tell the rows that
+/// moved from the ones that came or went.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Key {
+    /// The pinned-tab grid.
+    Pinned,
+    /// The header of the group with this key.
+    Group(u64),
+    /// The tab with this key.
+    Tab(u64),
+    /// The `↑ N more` line.
+    Above,
+    /// The `↓ N more` line.
+    Below,
+    /// The new-tab action.
+    NewTab,
+}
+
+/// One row of the list as painted: what it shows, its top (physical px), and its quads and
+/// labels in [`Paint`].
+#[derive(Clone, PartialEq, Debug)]
+pub(crate) struct Span {
+    pub(crate) key: Key,
+    pub(crate) top: f32,
+    pub(crate) quads: Range<usize>,
+    pub(crate) labels: Range<usize>,
+}
+
+/// The sidebar's finished proportional display list plus the panel it clips to. The right-edge
+/// divider is always the last quad.
 pub(crate) struct Paint {
     /// The sidebar rectangle (`x = 0`, full height), physical px.
     pub(crate) panel: PxRect,
@@ -540,6 +574,11 @@ pub(crate) struct Paint {
     pub(crate) list_quads: Range<usize>,
     /// The labels of the same rows.
     pub(crate) list_labels: Range<usize>,
+    /// Each row of the list, top to bottom.
+    pub(crate) rows: Vec<Span>,
+    /// The active tab's marks (its pill and bar, no labels) when it is in the list; they are
+    /// not part of its row, so they can glide on their own when the active tab changes.
+    pub(crate) pill: Option<Span>,
 }
 
 /// Build the sidebar's display list for `view`, filling `panel` (physical px) at DPI `scale`,
@@ -608,24 +647,14 @@ pub(crate) fn build(
         scale,
         theme,
     };
-    // The slim rail lays the tab list out flat (numbered), so groups only shape the full panel.
-    let layout_groups: &[GroupSpan] = if view.rail { &[] } else { view.groups };
-    let mut list = (quads.len(), labels.len());
-    for row in rows_layout(
-        view.tab_count,
-        view.active_tab,
-        panel.h / scale,
+    let list = push_list(
+        &mut quads,
+        &mut labels,
+        view,
+        &ctx,
+        measure,
         view.top_inset + brand_block_h(view) + chips_block,
-        layout_groups,
-        pinned_block_h(view, panel, scale),
-    ) {
-        push_row(&mut quads, &mut labels, row, &ctx, measure);
-        // The command well is the same in every workspace, so the list starts after it.
-        if matches!(row.kind, RowKind::Command) {
-            list = (quads.len(), labels.len());
-        }
-    }
-    let (list_quads, list_labels) = (list.0..quads.len(), list.1..labels.len());
+    );
 
     // The bottom-anchored utility bar (design §08 #7) - full panel only; the slim rail has no
     // room for it (its actions stay reachable via keys / the palette).
@@ -650,9 +679,96 @@ pub(crate) fn build(
         quads,
         labels,
         chip_first,
-        list_quads,
-        list_labels,
+        list_quads: list.quads,
+        list_labels: list.labels,
+        rows: list.rows,
+        pill: list.pill,
     }
+}
+
+/// The list as [`push_list`] pushed it: its quads and labels, each of its rows, and the active
+/// tab's marks.
+struct List {
+    quads: Range<usize>,
+    labels: Range<usize>,
+    rows: Vec<Span>,
+    pill: Option<Span>,
+}
+
+/// Push the command well and then the list's rows from `top` (logical px), keeping each row's
+/// span, and the active tab's marks apart from its row.
+fn push_list(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    view: &View,
+    ctx: &RowCtx,
+    measure: &mut TextMeasure,
+    top: f32,
+) -> List {
+    let (panel, scale) = (ctx.panel, ctx.scale);
+    // The slim rail lays the tab list out flat (numbered), so groups only shape the full panel.
+    let layout_groups: &[GroupSpan] = if view.rail { &[] } else { view.groups };
+    let mut list = (quads.len(), labels.len());
+    let (mut rows, mut pill) = (Vec::new(), None);
+    for row in rows_layout(
+        view.tab_count,
+        view.active_tab,
+        panel.h / scale,
+        top,
+        layout_groups,
+        pinned_block_h(view, panel, scale),
+    ) {
+        let top = panel.y + row.top * scale;
+        let key = row_key(view, row.kind);
+        if let (Some(key), RowKind::Tab(index)) = (key, row.kind) {
+            if index == view.active_tab {
+                let start = quads.len();
+                push_active_marks(quads, panel, top, row.height * scale, scale, ctx.theme);
+                pill = Some(Span {
+                    key,
+                    top,
+                    quads: start..quads.len(),
+                    labels: labels.len()..labels.len(),
+                });
+            }
+        }
+        let start = (quads.len(), labels.len());
+        push_row(quads, labels, row, ctx, measure);
+        // The command well is the same in every workspace, so the list starts after it.
+        if matches!(row.kind, RowKind::Command) {
+            list = (quads.len(), labels.len());
+        } else if let Some(key) = key {
+            rows.push(Span {
+                key,
+                top,
+                quads: start.0..quads.len(),
+                labels: start.1..labels.len(),
+            });
+        }
+    }
+    List {
+        quads: list.0..quads.len(),
+        labels: list.1..labels.len(),
+        rows,
+        pill,
+    }
+}
+
+/// The key of a list row of `kind`; `None` for the command well, which is not in the list.
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "a usize position always fits a u64 key"
+)]
+fn row_key(view: &View, kind: RowKind) -> Option<Key> {
+    Some(match kind {
+        RowKind::Command => return None,
+        RowKind::Pinned => Key::Pinned,
+        RowKind::GroupHeader(gi) => Key::Group(view.groups.get(gi).map_or(gi as u64, |g| g.key)),
+        RowKind::Tab(index) => Key::Tab(view.tab_keys.get(index).copied().unwrap_or(index as u64)),
+        RowKind::OverflowUp(_) => Key::Above,
+        RowKind::OverflowDown(_) => Key::Below,
+        RowKind::NewTab => Key::NewTab,
+    })
 }
 
 /// The shared per-row context for [`push_row`] - everything but the row itself.
@@ -669,8 +785,9 @@ struct RowCtx<'a> {
     theme: &'a Theme,
 }
 
-/// Render one laid-out row into `quads` + `labels`: the group header, a tab (with its active
-/// marks + prompt/dot + label), an overflow indicator, or the new-tab action.
+/// Render one laid-out row into `quads` + `labels`: the group header, a tab (its prompt/dot +
+/// label; [`push_list`] draws the active tab's marks), an overflow indicator, or the new-tab
+/// action.
 #[allow(clippy::too_many_lines, reason = "one straight-line per-row renderer")]
 fn push_row(
     quads: &mut Vec<ChromeQuad>,
@@ -758,10 +875,8 @@ fn push_row(
             }
         }
         RowKind::Tab(index) => {
+            // The active tab's marks are drawn by `build`, before the row.
             let is_active = index == ctx.active;
-            if is_active {
-                push_active_marks(quads, ctx.panel, top, height, ctx.scale, ctx.theme);
-            }
             let color = if is_active {
                 ctx.theme.fg_primary
             } else {
@@ -1349,6 +1464,54 @@ fn push_label(
     });
 }
 
+/// Write `frames` side by side to `path` as one PNG strip, for a capture of the sidebar's motion:
+/// each frame is the sidebar as painted (`None` while hidden) and the panes beside it, rendered
+/// `size` physical px in the theme `theme`.
+#[cfg(test)]
+pub(crate) fn capture_strip(
+    path: &str,
+    theme: &str,
+    size: (u32, u32),
+    frames: Vec<(Option<Paint>, Vec<skelly_render::CapturePane>)>,
+) {
+    use skelly_render::{CaptureSidebar, Chrome};
+
+    let appearance = skelly_config::Appearance {
+        theme: theme.into(),
+        ..Default::default()
+    };
+    let (w, h) = size;
+    let count = frames.len();
+    let row = (w * 4) as usize;
+    let mut strip = vec![0_u8; row * h as usize * count];
+    for (k, (paint, panes)) in frames.into_iter().enumerate() {
+        let sidebar = paint.map(|paint| CaptureSidebar {
+            panel: paint.panel,
+            quads: paint.quads,
+            labels: paint.labels,
+        });
+        let chrome = Chrome {
+            sidebar: sidebar.as_ref(),
+            ..Chrome::default()
+        };
+        let rgba = skelly_render::capture_panes_rgba(&appearance, w, h, 2.0, &panes, &chrome);
+        for y in 0..h as usize {
+            let to = (y * count + k) * row;
+            strip[to..to + row].copy_from_slice(&rgba[y * row..(y + 1) * row]);
+        }
+    }
+    let file = std::fs::File::create(path).unwrap();
+    let width = w * u32::try_from(count).unwrap();
+    let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, h);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    encoder
+        .write_header()
+        .unwrap()
+        .write_image_data(&strip)
+        .unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::{build, hit, GroupSpan, Hit, Sidebar, UtilAction, View, UTIL_ICONS};
@@ -1380,6 +1543,7 @@ mod tests {
             groups: &[],
             tab_running: &[],
             tab_titles: &[],
+            tab_keys: &[],
             rail,
             top_inset: 0.0,
         }
@@ -1518,6 +1682,7 @@ mod tests {
             groups,
             tab_running: &[],
             tab_titles: &[],
+            tab_keys: &[],
             rail: false,
             top_inset: 0.0,
         }
@@ -1529,6 +1694,7 @@ mod tests {
         let mut m = TextMeasure::new(2.0);
         // Positions 0,1 are ungrouped; 2,3 belong to group "proj".
         let expanded = [GroupSpan {
+            key: 0,
             name: "proj",
             collapsed: false,
             start: 2,
@@ -1547,6 +1713,7 @@ mod tests {
 
         // Collapsing the group hides its two member rows (header + count still shown).
         let collapsed = [GroupSpan {
+            key: 0,
             name: "proj",
             collapsed: true,
             start: 2,
@@ -1574,6 +1741,7 @@ mod tests {
     #[test]
     fn hit_maps_group_headers_and_members_in_order() {
         let groups = [GroupSpan {
+            key: 0,
             name: "proj",
             collapsed: false,
             start: 2,
@@ -1605,6 +1773,7 @@ mod tests {
 
         // A collapsed group's member rows are not hittable at all.
         let collapsed = [GroupSpan {
+            key: 0,
             name: "proj",
             collapsed: true,
             start: 2,
@@ -1639,6 +1808,7 @@ mod tests {
             groups: &[],
             tab_running: &[],
             tab_titles: &[],
+            tab_keys: &[],
             rail: false,
             top_inset: 0.0,
         };
@@ -1681,6 +1851,7 @@ mod tests {
             groups: &[],
             tab_running: &[],
             tab_titles: &[],
+            tab_keys: &[],
             rail: false,
             top_inset: 0.0,
         };
@@ -1814,6 +1985,7 @@ mod tests {
             chips: &['A', 'B'],
             pinned: &['P'],
             tab_titles: &titles,
+            tab_keys: &[],
             top_inset: 38.0,
             ..view(2, 1, false)
         };

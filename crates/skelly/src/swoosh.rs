@@ -199,6 +199,8 @@ mod tests {
             chip_first: None,
             list_quads: 1..2,
             list_labels: 1..2,
+            rows: Vec::new(),
+            pill: None,
         }
     }
 
@@ -333,7 +335,7 @@ mod tests {
     #[ignore = "manual GPU capture: writes /tmp/skelly-swoosh-<theme>.png"]
     fn capture_workspace_swoosh() {
         use crate::sidebar::{self, View};
-        use skelly_render::{CaptureSidebar, Chrome, TextMeasure, Theme};
+        use skelly_render::{TextMeasure, Theme};
 
         const SCALE: f32 = 2.0;
         const FRAME: (u32, u32) = (680, 900);
@@ -348,10 +350,6 @@ mod tests {
         let second = ["docs", "api"].map(String::from);
         for name in ["ossein-dark", "ossein-light"] {
             let theme = Theme::resolve(name);
-            let appearance = skelly_config::Appearance {
-                theme: name.into(),
-                ..Default::default()
-            };
             let mut measure = TextMeasure::new(SCALE);
             let mut paint = |titles: &[String], chip: usize, pinned: &[char]| {
                 let view = View {
@@ -366,6 +364,7 @@ mod tests {
                     groups: &[],
                     tab_running: &[],
                     tab_titles: titles,
+                    tab_keys: &[],
                     rail: false,
                     top_inset: 38.0,
                 };
@@ -374,38 +373,16 @@ mod tests {
             let first_rows = Rows::of(&paint(&first, 0, &['N', 'S']));
             let t0 = Instant::now();
             let swoosh = Swoosh::start(None, t0, 0, first_rows, 1, panel.w);
-            let frames = [0, 16, 33, 66, 120, 320];
-            let (w, h) = FRAME;
-            let mut strip = vec![0_u8; (w * h * 4) as usize * frames.len()];
-            for (k, ms) in frames.into_iter().enumerate() {
-                let mut live = paint(&second, 1, &[]);
-                swoosh.apply(&mut live, t0 + Duration::from_millis(ms));
-                let sidebar = CaptureSidebar {
-                    panel,
-                    quads: live.quads,
-                    labels: live.labels,
-                };
-                let chrome = Chrome {
-                    sidebar: Some(&sidebar),
-                    ..Chrome::default()
-                };
-                let rgba = skelly_render::capture_panes_rgba(&appearance, w, h, 2.0, &[], &chrome);
-                let row = (w * 4) as usize;
-                for y in 0..h as usize {
-                    let to = (y * frames.len() + k) * row;
-                    strip[to..to + row].copy_from_slice(&rgba[y * row..(y + 1) * row]);
-                }
-            }
-            let file = std::fs::File::create(format!("/tmp/skelly-swoosh-{name}.png")).unwrap();
-            let width = w * u32::try_from(frames.len()).unwrap();
-            let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), width, h);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            encoder
-                .write_header()
-                .unwrap()
-                .write_image_data(&strip)
-                .unwrap();
+            let frames = [0, 16, 33, 66, 120, 320]
+                .into_iter()
+                .map(|ms| {
+                    let mut live = paint(&second, 1, &[]);
+                    swoosh.apply(&mut live, t0 + Duration::from_millis(ms));
+                    (Some(live), Vec::new())
+                })
+                .collect();
+            let path = format!("/tmp/skelly-swoosh-{name}.png");
+            sidebar::capture_strip(&path, name, FRAME, frames);
         }
     }
 }

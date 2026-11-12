@@ -82,6 +82,29 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-12 - **The sidebar slides in and out, and its rows glide to where they go.** User
+  request: animate the sidebar's modes in the spirit of the workspace swoosh - showing and
+  hiding it, and its rows moving, coming and going. Showing or hiding it (`⌘B`) slides the
+  panel, or the rail, in or out at the window's left edge over `PANEL` (320ms), decelerating
+  as it opens and accelerating as it closes (§03). Switching between the full panel and the
+  rail (`⇧⌘B`) moves the edge over `PANEL` too, and hovering the rail open, or a drag of the
+  edge snapping it to another mode, over `BASE` (180ms), as they follow the pointer. These
+  uncover or cover the panel in place: the rail's content fades out near the rail's width,
+  then the full panel's fades in, never both at once, so each move starts and ends on the
+  sidebar as it shows at rest. The panes, and a full-width dock, follow the edge on screen,
+  but each shell is re-fitted once, to where the panes come to rest, so a terminal never
+  reflows frame by frame. In the list, when a tab is added, closed, moved or pinned, or a
+  group folded, the rows that stay glide to their new places over `BASE` on the standard
+  curve, a new row fades in where it rests, and a row that went fades out where it was over
+  `FAST` (120ms), quickest at first, so the rows moving into its place pass over little of
+  it. The active tab's pill glides from the tab it marked to the one it marks. A change during
+  a move continues it from where everything is shown. The 2026-07-13 concern was latency, so
+  only paint moves: a toggle, a switch, a new tab or a close takes effect at once, and a click
+  in the sidebar acts on a row at its resting place. Motion is not a setting, so it has no
+  config key.
+  _(was: the sidebar showed, hid, changed width and changed its rows at once; sidebar slides
+  were deferred on 2026-07-13)_
+
 - 2026-11-12 - **Settings is a page of named sections, and themes are picked from preview
   cards.** User request: a complete, modern redesign of the settings view that is easy to scan
   and navigate, with a small example card for each theme. The nav follows §10.9: a 184px
