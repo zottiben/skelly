@@ -6469,9 +6469,9 @@ impl App {
     }
 
     /// A left press or release over the settings view (design §10.9): run the widget under the
-    /// pointer - switch category, focus a row, flip a toggle, choose a segment, step a cycler, set
-    /// (and start dragging) a slider, or open a text edit. An open text edit commits first, as a
-    /// blur would; an invalid draft stays open with its error toast and swallows the click.
+    /// pointer - switch category, focus a row, flip a toggle, choose a segment or a theme card,
+    /// set (and start dragging) a slider, or open a text edit. An open text edit commits first,
+    /// as a blur would; an invalid draft stays open with its error toast and swallows the click.
     fn on_settings_click(&mut self, state: ElementState) {
         use settings::Target;
         if state == ElementState::Released {
@@ -6508,10 +6508,9 @@ impl App {
                 self.settings.select(index);
                 self.settings.activate(&mut self.config)
             }
-            Target::Segment { index, option } => {
+            Target::Choose { index, option } => {
                 self.settings.choose(&mut self.config, index, option)
             }
-            Target::Cycle { index, delta } => self.settings.step(&mut self.config, index, delta),
             Target::Slider { index, x, w } => {
                 self.settings.drag = Some(target);
                 self.settings

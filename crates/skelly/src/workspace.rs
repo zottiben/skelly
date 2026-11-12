@@ -7,7 +7,9 @@
 
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, TextMeasure, Theme};
 
-use crate::settings::{hover_fill, push_row};
+use crate::settings::{
+    card_fill, hover_fill, page_fill, push_row, CARD_RADIUS, PILL_INSET, PILL_RADIUS, ROW_PAD_X,
+};
 
 /// The icons a workspace can wear. The first eight are the geometric marks every workspace
 /// got by position before icons were pickable (so a restored legacy session looks unchanged);
@@ -95,9 +97,9 @@ pub(crate) fn step_icon(icon: char, delta: i32) -> char {
 }
 
 /// Page layout constants in **logical** px (multiplied by the DPI scale).
-const ROW_H: f32 = 40.0;
+const ROW_H: f32 = 48.0;
 /// A group row sits a step shorter under its workspace.
-const GROUP_ROW_H: f32 = 32.0;
+const GROUP_ROW_H: f32 = 40.0;
 /// The workspace chip, matching the sidebar's 26px tiles.
 const CHIP: f32 = 26.0;
 const CHIP_RADIUS: f32 = 7.0;
@@ -285,13 +287,10 @@ pub(crate) struct Page<'a> {
     pub(crate) reveal: bool,
 }
 
-/// Where the page lays out (physical px): the content column, plus the band the row fills
-/// span (from the nav divider to the panel's right edge, like the settings rows).
+/// Where the page lays out (physical px): the content column, which the list's card spans.
 pub(crate) struct Area {
     pub(crate) x: f32,
     pub(crate) right: f32,
-    pub(crate) band_x: f32,
-    pub(crate) band_right: f32,
     pub(crate) top: f32,
     /// The lowest y the page draws to; the rows scroll within what the picker leaves.
     pub(crate) bottom: f32,
@@ -305,10 +304,11 @@ pub(crate) struct Out<'a> {
 }
 
 impl Page<'_> {
-    /// Lay the page out: every workspace row (chip, name, tab count) with its group rows
-    /// indented beneath, "New workspace", then the icon picker for the focused row's
-    /// workspace. The focused and hovered rows show their Rename / Remove buttons. Rows that
-    /// do not fit above the picker scroll; returns the first row drawn, the scroll to keep.
+    /// Lay the page out: a card listing every workspace row (chip, name, tab count) with its
+    /// group rows indented beneath and "New workspace" last, then the icon picker for the
+    /// focused row's workspace. The focused and hovered rows show their Rename / Remove
+    /// buttons. Rows that do not fit above the picker scroll; returns the first row drawn, the
+    /// scroll to keep.
     pub(crate) fn build(
         &self,
         area: &Area,
@@ -320,26 +320,36 @@ impl Page<'_> {
         let rows = rows(self.entries);
         let selected = self.selected.min(rows.len() - 1);
         let heights: Vec<f32> = rows.iter().map(|&row| row_height(row) * scale).collect();
-        // A list taller than its room scrolls between `↑ N more` / `↓ N more` lines.
+        // A list taller than its room scrolls, with a `↑ N more` line in the gap above it and
+        // a `↓ N more` line under it.
         let indicator = IND_H * scale;
-        let (mut top, mut bottom) = (area.top, area.bottom - picker_height(scale));
+        let (top, mut bottom) = (area.top, area.bottom - picker_height(scale));
         let overflow = heights.iter().sum::<f32>() > bottom - top;
         if overflow {
-            top += indicator;
             bottom -= indicator;
         }
         let first = first_row(&heights, bottom - top, self.first, selected, self.reveal);
+        let mut placed = Vec::new();
         let mut y = top;
-        let mut last = first;
         for (i, row) in rows.iter().copied().enumerate().skip(first) {
-            let row_h = row_height(row);
             // Rows past the viewport are scrolled out; the first one always draws.
-            if i > first && y + row_h * scale > bottom {
+            if i > first && y + heights[i] > bottom {
                 break;
             }
-            last = i;
+            placed.push((i, row, y));
+            y += heights[i];
+        }
+        let card = PxRect {
+            x: area.x,
+            y: top,
+            w: area.right - area.x,
+            h: y - top,
+        };
+        let (ring, fill) = (theme.border_subtle, card_fill(theme));
+        push_ringed(out.quads, card, ring, fill, CARD_RADIUS * scale, scale);
+        let last = placed.last().map_or(first, |&(i, _, _)| i);
+        for (i, row, y) in placed {
             self.push_list_row(i, row, y, selected, area, scale, theme, measure, out);
-            y += row_h * scale;
         }
         if overflow {
             let hidden = (first, rows.len() - 1 - last);
@@ -348,7 +358,7 @@ impl Page<'_> {
                 measure,
                 hidden,
                 area.x,
-                (area.top, y),
+                (area.top - indicator, y),
                 scale,
                 theme,
             );
@@ -360,8 +370,8 @@ impl Page<'_> {
         first
     }
 
-    /// Row `i` (`row`) at `y`: its band (filled when focused or hovered, and its click
-    /// target), then its content, with Rename / Remove on the focused or hovered row.
+    /// Row `i` (`row`) at `y` across the card: its click target and, when focused or hovered,
+    /// its pill, then its content, with Rename / Remove on the focused or hovered row.
     #[allow(clippy::too_many_arguments, reason = "one focused row builder")]
     fn push_list_row(
         &self,
@@ -378,20 +388,26 @@ impl Page<'_> {
         let row_h = row_height(row);
         let hovered = self.hover.and_then(Target::row);
         let band = PxRect {
-            x: area.band_x,
+            x: area.x,
             y,
-            w: area.band_right - area.band_x,
+            w: area.right - area.x,
             h: row_h * scale,
         };
         let focused = i == selected;
+        let card = card_fill(theme);
+        let pill = PxRect {
+            x: band.x + PILL_INSET * scale,
+            y: band.y + PILL_INSET * scale,
+            w: band.w - 2.0 * PILL_INSET * scale,
+            h: band.h - 2.0 * PILL_INSET * scale,
+        };
+        let radius = PILL_RADIUS * scale;
         if focused {
-            out.quads.push(ChromeQuad::fill(
-                band,
-                theme.accent_subtle_on(theme.bg_elevated),
-            ));
+            let fill = theme.accent_subtle_on(card);
+            out.quads.push(ChromeQuad::rounded(pill, fill, radius));
         } else if hovered == Some(i) || (row == Row::Add && self.hover == Some(Target::Add)) {
             out.quads
-                .push(ChromeQuad::fill(band, hover_fill(theme, theme.bg_elevated)));
+                .push(ChromeQuad::rounded(pill, hover_fill(theme, card), radius));
         }
         out.targets.push((
             band,
@@ -403,17 +419,19 @@ impl Page<'_> {
         ));
         let editing = self.editing.filter(|_| focused);
         let buttons = (focused || hovered == Some(i)) && editing.is_none();
+        let (left, right) = (area.x + ROW_PAD_X * scale, area.right - ROW_PAD_X * scale);
         match row {
             Row::Workspace(w) => {
-                self.push_workspace(w, i, y, editing, buttons, area, scale, theme, measure, out);
+                let x = (left, right);
+                self.push_workspace(w, i, y, editing, buttons, x, scale, theme, measure, out);
             }
             Row::Group { workspace, group } => {
                 let entry = &self.entries[workspace].groups[group];
-                let x = area.x + (CHIP + NAME_GAP) * scale;
+                let x = left + (CHIP + NAME_GAP) * scale;
                 let right = if buttons {
-                    push_buttons(i, true, area.right, y, row_h, scale, theme, measure, out)
+                    push_buttons(i, true, right, y, row_h, scale, theme, measure, out)
                 } else {
-                    area.right
+                    right
                 };
                 push_name(
                     &entry.name,
@@ -429,7 +447,7 @@ impl Page<'_> {
                 );
             }
             Row::Add => {
-                let chip = chip_rect(area.x, y, ROW_H, scale);
+                let chip = chip_rect(left, y, ROW_H, scale);
                 out.quads.push(ChromeQuad::rounded(
                     chip,
                     theme.bg_surface,
@@ -451,8 +469,9 @@ impl Page<'_> {
         }
     }
 
-    /// One workspace row: its chip (the active workspace's ringed in accent), its name (or the
-    /// rename draft), its tab count, and the row buttons when shown.
+    /// One workspace row between `x = (left, right)`: its chip (the active workspace's ringed
+    /// in accent), its name (or the rename draft), its tab count, and the row buttons when
+    /// shown.
     #[allow(clippy::too_many_arguments, reason = "one focused row builder")]
     fn push_workspace(
         &self,
@@ -461,31 +480,22 @@ impl Page<'_> {
         y: f32,
         editing: Option<&str>,
         buttons: bool,
-        area: &Area,
+        x: (f32, f32),
         scale: f32,
         theme: &Theme,
         measure: &mut TextMeasure,
         out: &mut Out<'_>,
     ) {
+        let (left, right) = x;
         let entry = &self.entries[w];
-        let chip = chip_rect(area.x, y, ROW_H, scale);
-        push_tile(
-            entry.icon,
-            chip,
-            entry.active,
-            false,
-            scale,
-            theme,
-            measure,
-            out,
-        );
+        let chip = chip_rect(left, y, ROW_H, scale);
+        let look = (entry.active, false, card_fill(theme));
+        push_tile(entry.icon, chip, look, scale, theme, measure, out);
         let right = if buttons {
             let removable = removable(self.entries, Row::Workspace(w));
-            push_buttons(
-                row, removable, area.right, y, ROW_H, scale, theme, measure, out,
-            )
+            push_buttons(row, removable, right, y, ROW_H, scale, theme, measure, out)
         } else {
-            area.right
+            right
         };
         let mut meta = tabs_label(entry.tabs);
         if entry.active {
@@ -544,16 +554,8 @@ impl Page<'_> {
                 h: TILE * scale,
             };
             let hovered = self.hover == Some(Target::Icon(icon));
-            push_tile(
-                icon,
-                tile,
-                icon == entry.icon,
-                hovered,
-                scale,
-                theme,
-                measure,
-                out,
-            );
+            let look = (icon == entry.icon, hovered, page_fill(theme));
+            push_tile(icon, tile, look, scale, theme, measure, out);
             out.targets.push((tile, Target::Icon(icon)));
         }
     }
@@ -578,27 +580,26 @@ fn chip_rect(x: f32, top: f32, row_h: f32, scale: f32) -> PxRect {
     }
 }
 
-/// An icon tile: `accent`@0.4 ring over an `accent.subtle` fill with an accent glyph when
-/// `chosen` (the sidebar's active-chip look), else a `bg.surface` tile (washed when
-/// `hovered`) with a muted glyph.
-#[allow(clippy::too_many_arguments, reason = "one focused tile builder")]
+/// An icon tile drawn on the surface `look.2`: `accent`@0.4 ring over an `accent.subtle` fill
+/// with an accent glyph when chosen (`look.0`, the sidebar's active-chip look), else a
+/// `bg.surface` tile (washed when hovered, `look.1`) with a muted glyph.
 fn push_tile(
     icon: char,
     tile: PxRect,
-    chosen: bool,
-    hovered: bool,
+    look: (bool, bool, skelly_render::Srgb),
     scale: f32,
     theme: &Theme,
     measure: &mut TextMeasure,
     out: &mut Out<'_>,
 ) {
+    let (chosen, hovered, on) = look;
     let radius = CHIP_RADIUS * scale;
     if chosen {
         push_ringed(
             out.quads,
             tile,
-            theme.accent.over(theme.bg_elevated, 0.4),
-            theme.accent_subtle_on(theme.bg_elevated),
+            theme.accent.over(on, 0.4),
+            theme.accent_subtle_on(on),
             radius,
             scale,
         );
@@ -615,7 +616,7 @@ fn push_tile(
 }
 
 /// A rounded `fill` inside a 1px `ring` (the ring drawn behind, the fill inset by the stroke).
-fn push_ringed(
+pub(crate) fn push_ringed(
     quads: &mut Vec<ChromeQuad>,
     rect: PxRect,
     ring: skelly_render::Srgb,
@@ -863,8 +864,6 @@ mod tests {
         let area = Area {
             x: 234.0,
             right: 1180.0,
-            band_x: 210.0,
-            band_right: 1200.0,
             top: 64.0,
             bottom: 900.0,
         };
@@ -940,8 +939,6 @@ mod tests {
         let area = Area {
             x: 234.0,
             right: 1180.0,
-            band_x: 210.0,
-            band_right: 1200.0,
             top: 0.0,
             bottom: picker_height(1.0) + 2.0 * ROW_H + 2.0 * IND_H,
         };

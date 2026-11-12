@@ -51,9 +51,10 @@ chasing 1:1 parity. This skill loads it into a `claude-in-chrome` tab reliably.
   `06 Space · radius · motion`, `07 Iconography`, `08 Window anatomy`, `09 Components`,
   `10 Screens`, `11 Keybindings`, `12 Flows & states`. Click a nav item (or scroll) to jump.
 - To compare a surface: screenshot the guide section, then render the matching Skelly capture
-  (see the build-state memory's capture cheatsheet - `pane_capture`, `settings_capture`,
-  `git_dock_capture`, `timeline_capture`, `empty_state_capture`, etc.) and diff them by eye for
-  tokens, radii, elevation, spacing, and typography.
+  (see the build-state memory's capture cheatsheet - `pane_capture`, `git_dock_capture`,
+  `timeline_capture`, `empty_state_capture`, the settings module's ignored
+  `capture_settings_pages` test, etc.) and diff them by eye for tokens, radii, elevation,
+  spacing, and typography.
 - The guide's raw design data (the authoritative token/scale/spacing/radii/elevation/motion/icon
   arrays) lives in the HTML's JS at roughly lines 1540-1720 - `read_page` or grep the file when
   you need exact values rather than the rendered view.

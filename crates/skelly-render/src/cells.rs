@@ -386,11 +386,11 @@ pub fn logo_chrome_quads(
     ]
 }
 
-/// Build the full-window settings frame: the `bg.elevated` content panel fill, a `bg.base`
-/// fill over the left category-nav strip up to `nav_divider_x`, and the `border` divider
-/// between nav and content. The active-category highlight, the focused-control highlight, and
-/// all text are supplied by the binary as a proportional display list drawn on top. Shared by
-/// the windowed [`Renderer`](crate::Renderer) and the headless capture.
+/// Build the full-window settings frame: one `bg.sidebar` fill over the panel - the page the
+/// nav and the content's section cards sit on - and a `border.subtle` hairline between the nav
+/// and the content at `nav_divider_x`. The nav pills, the cards, the rows and all text are
+/// supplied by the binary as a proportional display list drawn on top. Shared by the windowed
+/// [`Renderer`](crate::Renderer) and the headless capture.
 pub(crate) fn settings_frame_quads(
     panel: crate::PxRect,
     nav_divider_x: f32,
@@ -404,21 +404,14 @@ pub(crate) fn settings_frame_quads(
             panel.y,
             panel.w,
             panel.h,
-            theme.bg_elevated.to_linear(),
-        ),
-        Quad::new(
-            panel.x,
-            panel.y,
-            (nav_divider_x - panel.x).max(0.0),
-            panel.h,
-            theme.bg_base.to_array(),
+            theme.bg_sidebar.to_linear(),
         ),
         Quad::new(
             nav_divider_x,
             panel.y,
             stroke,
             panel.h,
-            theme.border.to_linear(),
+            theme.border_subtle.to_linear(),
         ),
     ]
 }

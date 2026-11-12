@@ -82,6 +82,28 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-12 - **Settings is a page of named sections, and themes are picked from preview
+  cards.** User request: a complete, modern redesign of the settings view that is easy to scan
+  and navigate, with a small example card for each theme. The nav follows §10.9: a 184px
+  column of pills, each with a codicon from the bundled Nerd font, the active one on
+  `accent.subtle` with an `accent` icon, and a hairline before Workspaces, under a "Settings"
+  title. Each page has its name over a one-line summary, then its controls in named sections
+  (Appearance: Theme, Text, Terminal, Window; Voice: Bridge, Transcription, Recording; and so
+  on), each section a `bg.base` card in a `border.subtle` ring on the `bg.sidebar` page, at
+  most 720px wide. A row shows its label over the `config.toml` key it writes, which makes
+  Hard rule 1 visible, and its §09 widget at the right; text values sit in a `bg.inset` input
+  box. Focus and hover are inset pills, as in the nav. The theme row is the guide's 4-up grid
+  of cards (two up in a narrow window, so each dark/light pair stays side by side), one per
+  theme: a 40px miniature drawn in that theme's own UI tokens - its sidebar with tabs, a
+  prompt line, a hunk header, an added and a removed line - over a strip naming it, with a
+  check and an `accent` ring on the theme in use. The guide's card shows three ANSI swatches
+  in that band; the miniature replaces them, since the UI tokens show more of the theme, need
+  no new data, and keep the UI theme apart from the ANSI palette (Hard rule 2). A click on a
+  card or `←/→` picks a theme. The footer's key hints are keycaps, and the Workspaces page
+  lists its rows in a card of the same look. Sections are layout only, not settings, so they
+  have no config key. _(was: every choice a segmented control, the theme a compact `‹ value ›`
+  cycler, and the theme cards deferred for want of per-theme swatch data)_
+
 - 2026-11-12 - **A review comment can be on a run of lines, picked by dragging or with `⇧V`.**
   User request: click and drag across diff rows to comment on several lines at once, as on
   GitHub. A press on a line's row or its `+` starts a pick; dragging stretches it to the line

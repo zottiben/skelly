@@ -5,10 +5,9 @@
 //!
 //! The live binary drives the dock from its real `timeline` module over a
 //! `skelly_session::Timeline`; examples cannot import the binary crate, so this hand-builds
-//! a representative grid (as `settings_capture` does) purely to exercise the
-//! `timeline_quads` render path. It shows a REWOUND state - the selection is on a past
-//! commit, so the accent viewing bar, the viewing banner, and the dimmed future events are
-//! all visible. An optional second arg picks the theme (`ossein-light`).
+//! a representative grid purely to exercise the `timeline_quads` render path. It shows a
+//! REWOUND state - the selection is on a past commit, so the accent viewing bar, the viewing
+//! banner, and the dimmed future events are all visible. An optional second arg picks the theme (`ossein-light`).
 //! Run: `cargo run -p skelly --example timeline_capture -- timeline.png [theme]`.
 #![allow(
     clippy::cast_precision_loss,

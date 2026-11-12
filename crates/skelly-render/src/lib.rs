@@ -300,11 +300,11 @@ pub struct TimelineView<'a> {
 pub struct SettingsView<'a> {
     /// The settings panel rectangle on the surface (usually the whole window).
     pub panel: PxRect,
-    /// The x of the nav/content divider (physical px); the nav strip fills to its left.
+    /// The x of the nav/content divider (physical px), where the frame draws its hairline.
     pub nav_divider_x: f32,
-    /// The content quads over the frame (active-category fill + bar, focused-control fill).
+    /// The quads over the frame: nav pills, section cards, row washes and widgets.
     pub quads: &'a [ChromeQuad],
-    /// The positioned proportional text labels (nav categories, control label/value, footer).
+    /// The positioned proportional text labels (nav, headings, rows, key hints).
     pub labels: &'a [ProseLabel],
 }
 

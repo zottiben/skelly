@@ -9,13 +9,13 @@
 //! control declares its key path (for the round-trip contract) and a getter/setter
 //! pair, so reading and writing always go through the config, never a shadow copy.
 //!
-//! Keyboard- and mouse-driven: a left category nav, a right control list, `↑/↓` to move between
-//! controls, `←/→` (and Enter) to change a value, or a click on any nav row or widget. Each
-//! control renders its §09 widget - a toggle switch, a segmented control, a compact `‹ value ›`
-//! cycler, or a slider (see [`push_control`]) - so the view matches the guide's §10.9 controls.
-//! [`Settings::build`] records a [`Target`] for every clickable rect it draws, so a click lands
-//! on exactly what is on screen. The theme picker cycles (it has too many / too-long options to
-//! fit a segmented control; the guide's swatch *cards* remain a visual follow-up). Deferred: the
+//! Keyboard- and mouse-driven: a left category nav, and a content column of named sections,
+//! each a card of control rows. `↑/↓` moves between controls, `←/→` (and Enter) changes a
+//! value, and a click lands on any nav pill, row or widget. A row shows its label over the
+//! `config.toml` key it owns, and its §09 widget at the right - a toggle switch, a segmented
+//! control, a slider, or a text box (see [`push_control`]). The theme picker is the guide's
+//! §10.9 grid of preview cards ([`ThemeCard`]). [`Settings::build`] records a [`Target`] for
+//! every clickable rect it draws, so a click lands on exactly what is on screen. Deferred: the
 //! keybindings / advanced categories (they need the `[keys]` registry).
 //!
 //! The nav ends with the Workspaces page ([`crate::workspace`]): a manager over the session
@@ -26,20 +26,39 @@ use skelly_render::{
     ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme, THEMES, THEME_LABELS,
 };
 
-use crate::workspace;
+use crate::workspace::{self, push_ringed};
 
-/// Settings-view layout constants in **logical** px (multiplied by the DPI scale). Tuned to
-/// the guide's settings screen: a left category nav strip and a right control panel.
-const NAV_WIDTH: f32 = 210.0;
-/// Content pad from the window edges (top / bottom / right), the guide's content pad.
+/// Settings-view layout constants in **logical** px (multiplied by the DPI scale), after the
+/// guide's §10.9 screen: a 184px category nav beside a content column of section cards.
+const NAV_WIDTH: f32 = 184.0;
+/// Pad from the panel's top, right and bottom edges.
 const PAD: f32 = 20.0;
-/// Left inset of a nav label (leaving room for the active accent bar).
-const NAV_PAD: f32 = 16.0;
-/// Left inset of the content column (label + control), from the nav/content divider.
-const CONTENT_PAD: f32 = 24.0;
-/// Header-row height (the category heading).
-const HEADER_H: f32 = 44.0;
-/// The header close button: a square of this side, vertically centered in the header.
+/// The nav pills' inset from the nav's edges.
+const NAV_INSET: f32 = 8.0;
+/// A nav pill's height, the gap between pills, and its corner radius.
+const NAV_ROW_H: f32 = 32.0;
+const NAV_ROW_GAP: f32 = 2.0;
+const NAV_RADIUS: f32 = 7.0;
+/// A nav pill's icon inset, and the icon column (the 16px glyph plus its 9px gap).
+const NAV_ICON_X: f32 = 11.0;
+const NAV_ICON_W: f32 = 25.0;
+/// The gap on each side of the hairline that sets the Workspaces page apart.
+const NAV_SEP_GAP: f32 = 8.0;
+/// The content column's inset from the nav divider, and its widest; a wider area centers it.
+const CONTENT_PAD: f32 = 32.0;
+const COLUMN_MAX_W: f32 = 720.0;
+/// The header block (the category name over its summary line), and the gap below it, which
+/// holds a scrolled page's `↑ N more` line.
+const HEADER_H: f32 = 50.0;
+const HEADER_GAP: f32 = 22.0;
+/// The header's first row, which centers the category name, the esc hint, the close button and
+/// the nav's "Settings" title on one line.
+const NAME_ROW_H: f32 = 28.0;
+/// The gap between the name row and the summary line under it.
+const SUMMARY_GAP: f32 = 2.0;
+/// The gap between the nav's title and its first pill.
+const NAV_TITLE_GAP: f32 = 14.0;
+/// The header close button: a square of this side, on the name row.
 const CLOSE_SIDE: f32 = 28.0;
 /// The close button's corner radius.
 const CLOSE_RADIUS: f32 = 6.0;
@@ -48,10 +67,34 @@ const CLOSE_GAP: f32 = 8.0;
 /// The close button's glyph: the guide's `close` icon (`✕`), as the bundled Nerd Font's codicon
 /// so it reads at icon size (the mono face's `✕` is too small to fill the button).
 const CLOSE_ICON: &str = "\u{ea76}";
-/// Category nav row height.
-const NAV_ROW_H: f32 = 32.0;
-/// Control row height (tall enough to seat the §09 widgets).
-const CTRL_ROW_H: f32 = 40.0;
+/// The gap above a section (except a page's first), and its label line.
+const SECTION_GAP: f32 = 22.0;
+const SECTION_LABEL_H: f32 = 24.0;
+/// A section card's corner radius.
+pub(crate) const CARD_RADIUS: f32 = 10.0;
+/// A control row in a card: its height, its side pad, and the inset + radius of the focus or
+/// hover pill drawn inside it.
+const ROW_H: f32 = 56.0;
+pub(crate) const ROW_PAD_X: f32 = 16.0;
+pub(crate) const PILL_INSET: f32 = 4.0;
+pub(crate) const PILL_RADIUS: f32 = 7.0;
+/// The gap between a row's label and the config key beneath it, and the least gap between
+/// either and the widget at the row's right.
+const KEY_GAP: f32 = 1.0;
+const LABEL_GAP: f32 = 16.0;
+/// The theme grid: the gap between cards, a card's height and its name strip's, and the
+/// narrowest a card gets before the grid drops from four columns to two.
+const THEME_GAP: f32 = 9.0;
+const THEME_CARD_H: f32 = 66.0;
+const THEME_STRIP_H: f32 = 26.0;
+const THEME_CARD_MIN_W: f32 = 140.0;
+/// A theme card's corner radius.
+const THEME_RADIUS: f32 = 9.0;
+/// A text value's input box: its widest, its height, its text inset, and its corner radius.
+const INPUT_W: f32 = 300.0;
+const INPUT_H: f32 = 30.0;
+const INPUT_PAD_X: f32 = 10.0;
+const INPUT_RADIUS: f32 = 6.0;
 /// Toggle-switch dimensions (design §09: 38x22 pill, 18px knob, 2px inset).
 const TOGGLE_W: f32 = 38.0;
 const TOGGLE_H: f32 = 22.0;
@@ -68,20 +111,47 @@ const SLIDER_W: f32 = 116.0;
 const SLIDER_TRACK_H: f32 = 6.0;
 const SLIDER_KNOB: f32 = 14.0;
 const SLIDER_VALUE_GAP: f32 = 12.0;
-/// The footer hint line.
-const FOOTER: &str = "up/down move   left/right change   enter edit   tab category   esc close";
-/// The footer hint line on the Workspaces page.
-const WORKSPACES_FOOTER: &str =
-    "up/down move   left/right icon   enter rename   delete remove   tab category   esc close";
-/// The Workspaces page's nav entry, after every config category.
-const WORKSPACES_NAV: (char, &str) = ('*', "Workspaces");
+/// A key-hint row: a keycap's height, its side pad, the gap to its action, and the gap
+/// between hints.
+const HINT_H: f32 = 22.0;
+const HINT_KEY_PAD: f32 = 6.0;
+const HINT_KEY_GAP: f32 = 6.0;
+const HINT_GAP: f32 = 16.0;
+/// The gap between the page body and the footer's key hints.
+const FOOTER_GAP: f32 = 14.0;
+/// The footer's key hints on a config page.
+const FOOTER_HINTS: &[(&str, &str)] = &[
+    ("\u{2191}\u{2193}", "move"),
+    ("\u{2190}\u{2192}", "change"),
+    ("enter", "edit"),
+    ("tab", "category"),
+    ("esc", "close"),
+];
+/// The footer's key hints on the Workspaces page.
+const WORKSPACES_HINTS: &[(&str, &str)] = &[
+    ("\u{2191}\u{2193}", "move"),
+    ("\u{2190}\u{2192}", "icon"),
+    ("enter", "rename"),
+    ("delete", "remove"),
+    ("tab", "category"),
+    ("esc", "close"),
+];
+/// The Workspaces page's nav entry (codicon `multiple-windows`), after every config category.
+const WORKSPACES_NAV: (&str, &str) = ("\u{eb23}", "Workspaces");
+/// The Workspaces page's summary line.
+const WORKSPACES_ABOUT: &str = "Workspaces and their groups, kept in the session layout";
+/// The theme card's selected mark (codicon `check`).
+const CHECK_ICON: &str = "\u{eab2}";
 
 /// One editable control. It maps to exactly one `config.toml` key (Hard rule 1):
 /// `key` is the dotted TOML path (also what the round-trip test asserts against), and
 /// [`Kind`] carries the getter/setter that read and write only that key.
 struct Control {
-    /// The human label, shown left in the content column.
+    /// The human label, shown at the left of its row.
     label: &'static str,
+    /// The section the control sits in: a page's controls run in section order, and a new
+    /// section name starts a new card under its own label.
+    section: &'static str,
     /// The `config.toml` key path this control owns, e.g. `appearance.font_size`.
     key: &'static str,
     /// How the value is displayed and changed.
@@ -111,10 +181,8 @@ enum Kind {
         get: fn(&Config) -> usize,
         /// Write the chosen option index (already clamped to `options`).
         set: fn(&mut Config, usize),
-        /// Render as a compact `‹ value ›` cycler rather than an all-options segmented control -
-        /// for choices with many / long options (the theme picker) that would otherwise overflow
-        /// the row. `←/→` still cycles either way.
-        cycle: bool,
+        /// How the options draw.
+        look: Look,
     },
     /// An integer (or scaled-fraction) value stepped between `min..=max`.
     Range {
@@ -133,6 +201,16 @@ enum Kind {
         /// Write the new value (raw units, already clamped).
         set: fn(&mut Config, i32),
     },
+}
+
+/// How a [`Kind::Choice`] draws its options.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Look {
+    /// A §09 segmented control holding every option.
+    Segments,
+    /// The §10.9 theme grid: the options are [`THEME_LABELS`], each drawn as a preview card
+    /// of the [`THEMES`] entry at its index.
+    Themes,
 }
 
 impl Kind {
@@ -215,10 +293,12 @@ impl Kind {
 
 /// A settings category, shown in the left nav with its icon and label.
 struct Category {
-    /// A quiet leading glyph (kept ASCII-safe so any monospace font renders it).
-    icon: char,
+    /// Its nav glyph: a codicon from the bundled Nerd font, drawn with [`FontRole::Icon`].
+    icon: &'static str,
     /// The category name, shown in the nav and as the content heading.
     label: &'static str,
+    /// The one-line summary under the heading.
+    about: &'static str,
     /// The controls listed when this category is active.
     controls: &'static [Control],
 }
@@ -234,11 +314,13 @@ struct Category {
 )]
 static CATEGORIES: &[Category] = &[
     Category {
-        icon: '#',
+        icon: "\u{eac6}", // color-mode
         label: "Appearance",
+        about: "Theme, text and the terminal window",
         controls: &[
             Control {
                 label: "Theme",
+                section: "Theme",
                 key: "appearance.theme",
                 kind: Kind::Choice {
                     options: &THEME_LABELS,
@@ -250,12 +332,12 @@ static CATEGORIES: &[Category] = &[
                             .unwrap_or(0)
                     },
                     set: |c, i| THEMES[i].0.clone_into(&mut c.appearance.theme),
-                    // Many, long options - render compactly so it never overflows the row.
-                    cycle: true,
+                    look: Look::Themes,
                 },
             },
             Control {
                 label: "Font size",
+                section: "Text",
                 key: "appearance.font_size",
                 kind: Kind::Range {
                     min: 8,
@@ -269,6 +351,7 @@ static CATEGORIES: &[Category] = &[
             },
             Control {
                 label: "Line height",
+                section: "Text",
                 key: "appearance.line_height",
                 kind: Kind::Range {
                     min: 8,
@@ -281,7 +364,26 @@ static CATEGORIES: &[Category] = &[
                 },
             },
             Control {
+                label: "Font ligatures",
+                section: "Text",
+                key: "appearance.ligatures",
+                kind: Kind::Toggle {
+                    get: |c| c.appearance.ligatures,
+                    set: |c, v| c.appearance.ligatures = v,
+                },
+            },
+            Control {
+                label: "Bold uses bright colors",
+                section: "Text",
+                key: "appearance.bold_is_bright",
+                kind: Kind::Toggle {
+                    get: |c| c.appearance.bold_is_bright,
+                    set: |c, v| c.appearance.bold_is_bright = v,
+                },
+            },
+            Control {
                 label: "Cursor style",
+                section: "Terminal",
                 key: "appearance.cursor",
                 kind: Kind::Choice {
                     options: &["Block", "Bar", "Underline"],
@@ -297,40 +399,21 @@ static CATEGORIES: &[Category] = &[
                             _ => CursorStyle::Block,
                         };
                     },
-                    cycle: false,
+                    look: Look::Segments,
                 },
             },
             Control {
-                label: "Font ligatures",
-                key: "appearance.ligatures",
+                label: "Show pane status line",
+                section: "Terminal",
+                key: "appearance.show_status_line",
                 kind: Kind::Toggle {
-                    get: |c| c.appearance.ligatures,
-                    set: |c, v| c.appearance.ligatures = v,
-                },
-            },
-            Control {
-                label: "Bold uses bright colors",
-                key: "appearance.bold_is_bright",
-                kind: Kind::Toggle {
-                    get: |c| c.appearance.bold_is_bright,
-                    set: |c, v| c.appearance.bold_is_bright = v,
-                },
-            },
-            Control {
-                label: "Background blur",
-                key: "appearance.bg_blur",
-                kind: Kind::Range {
-                    min: 0,
-                    max: 100,
-                    step: 2,
-                    divisor: 1,
-                    suffix: "",
-                    get: |c| i32::from(c.appearance.bg_blur),
-                    set: |c, v| c.appearance.bg_blur = v.clamp(0, 100) as u8,
+                    get: |c| c.appearance.show_status_line,
+                    set: |c, v| c.appearance.show_status_line = v,
                 },
             },
             Control {
                 label: "Window opacity",
+                section: "Window",
                 key: "appearance.opacity",
                 kind: Kind::Range {
                     min: 0,
@@ -343,21 +426,29 @@ static CATEGORIES: &[Category] = &[
                 },
             },
             Control {
-                label: "Show pane status line",
-                key: "appearance.show_status_line",
-                kind: Kind::Toggle {
-                    get: |c| c.appearance.show_status_line,
-                    set: |c, v| c.appearance.show_status_line = v,
+                label: "Background blur",
+                section: "Window",
+                key: "appearance.bg_blur",
+                kind: Kind::Range {
+                    min: 0,
+                    max: 100,
+                    step: 2,
+                    divisor: 1,
+                    suffix: "",
+                    get: |c| i32::from(c.appearance.bg_blur),
+                    set: |c, v| c.appearance.bg_blur = v.clamp(0, 100) as u8,
                 },
             },
         ],
     },
     Category {
-        icon: '=',
+        icon: "\u{ebf3}", // layout-sidebar-left
         label: "Sidebar",
+        about: "How the sidebar shows, and how wide it is",
         controls: &[
             Control {
                 label: "Mode",
+                section: "Display",
                 key: "sidebar.mode",
                 kind: Kind::Choice {
                     options: &["Fixed", "Auto-hide", "Hidden"],
@@ -373,11 +464,12 @@ static CATEGORIES: &[Category] = &[
                             _ => SidebarMode::Fixed,
                         };
                     },
-                    cycle: false,
+                    look: Look::Segments,
                 },
             },
             Control {
                 label: "Width",
+                section: "Display",
                 key: "sidebar.width",
                 kind: Kind::Range {
                     min: 180,
@@ -391,6 +483,7 @@ static CATEGORIES: &[Category] = &[
             },
             Control {
                 label: "Show pinned grid",
+                section: "Pinned tabs",
                 key: "sidebar.show_pinned",
                 kind: Kind::Toggle {
                     get: |c| c.sidebar.show_pinned,
@@ -400,11 +493,13 @@ static CATEGORIES: &[Category] = &[
         ],
     },
     Category {
-        icon: '+',
+        icon: "\u{eaae}", // browser
         label: "Tabs",
+        about: "What names a tab",
         controls: &[
             Control {
                 label: "Title source",
+                section: "Titles",
                 key: "tabs.title",
                 kind: Kind::Choice {
                     options: &["Directory", "Command", "Custom"],
@@ -420,11 +515,12 @@ static CATEGORIES: &[Category] = &[
                             _ => TabTitle::Cwd,
                         };
                     },
-                    cycle: false,
+                    look: Look::Segments,
                 },
             },
             Control {
                 label: "Follow directory",
+                section: "Titles",
                 key: "tabs.follow_cwd",
                 kind: Kind::Toggle {
                     get: |c| c.tabs.follow_cwd,
@@ -434,10 +530,12 @@ static CATEGORIES: &[Category] = &[
         ],
     },
     Category {
-        icon: '|',
+        icon: "\u{ebeb}", // layout
         label: "Panes",
+        about: "Where a new pane starts",
         controls: &[Control {
             label: "New panes inherit cwd",
+            section: "New panes",
             key: "panes.split_inherits_cwd",
             kind: Kind::Toggle {
                 get: |c| c.panes.split_inherits_cwd,
@@ -446,10 +544,12 @@ static CATEGORIES: &[Category] = &[
         }],
     },
     Category {
-        icon: '\u{276f}',
+        icon: "\u{ea85}", // terminal
         label: "Shell & env",
+        about: "The shell each new pane runs",
         controls: &[Control {
             label: "Shell",
+            section: "Program",
             key: "shell.program",
             kind: Kind::Choice {
                 // Index 0 = the login shell (empty `program`); the rest set it explicitly.
@@ -469,16 +569,18 @@ static CATEGORIES: &[Category] = &[
                     };
                     program.clone_into(&mut c.shell.program);
                 },
-                cycle: false,
+                look: Look::Segments,
             },
         }],
     },
     Category {
-        icon: '@',
+        icon: "\u{ea82}", // history
         label: "Session",
+        about: "The session timeline, rewind and layout restore",
         controls: &[
             Control {
                 label: "Record timeline",
+                section: "Timeline",
                 key: "session.timeline",
                 kind: Kind::Toggle {
                     get: |c| c.session.timeline,
@@ -486,29 +588,33 @@ static CATEGORIES: &[Category] = &[
                 },
             },
             Control {
-                label: "Persist layout",
-                key: "session.persist",
-                kind: Kind::Toggle {
-                    get: |c| c.session.persist,
-                    set: |c, v| c.session.persist = v,
-                },
-            },
-            Control {
                 label: "Shadow worktree",
+                section: "Timeline",
                 key: "session.shadow_worktree",
                 kind: Kind::Toggle {
                     get: |c| c.session.shadow_worktree,
                     set: |c, v| c.session.shadow_worktree = v,
                 },
             },
+            Control {
+                label: "Persist layout",
+                section: "Restore",
+                key: "session.persist",
+                kind: Kind::Toggle {
+                    get: |c| c.session.persist,
+                    set: |c, v| c.session.persist = v,
+                },
+            },
         ],
     },
     Category {
-        icon: '%',
+        icon: "\u{ea68}", // source-control
         label: "Git",
+        about: "What the git dock reviews, and how",
         controls: &[
             Control {
                 label: "Diff layout",
+                section: "Git dock",
                 key: "git.diff_view",
                 kind: Kind::Choice {
                     options: &["Unified", "Split"],
@@ -523,11 +629,12 @@ static CATEGORIES: &[Category] = &[
                             DiffView::Unified
                         };
                     },
-                    cycle: false,
+                    look: Look::Segments,
                 },
             },
             Control {
                 label: "Review",
+                section: "Git dock",
                 key: "git.diff_against",
                 kind: Kind::Choice {
                     options: &["Uncommitted", "Branch"],
@@ -542,17 +649,19 @@ static CATEGORIES: &[Category] = &[
                             DiffAgainst::Head
                         };
                     },
-                    cycle: false,
+                    look: Look::Segments,
                 },
             },
         ],
     },
     Category {
-        icon: 'v',
+        icon: "\u{ec12}", // mic
         label: "Voice",
+        about: "Local dictation and the Pi voice bridge",
         controls: &[
             Control {
                 label: "Pi voice bridge (new panes)",
+                section: "Bridge",
                 key: "voice.enabled",
                 kind: Kind::Toggle {
                     get: |c| c.voice.enabled,
@@ -561,6 +670,7 @@ static CATEGORIES: &[Category] = &[
             },
             Control {
                 label: "Whisper executable",
+                section: "Transcription",
                 key: "voice.whisper_program",
                 kind: Kind::Text {
                     get: |c| &c.voice.whisper_program,
@@ -569,6 +679,7 @@ static CATEGORIES: &[Category] = &[
             },
             Control {
                 label: "Model path",
+                section: "Transcription",
                 key: "voice.model_path",
                 kind: Kind::Text {
                     get: |c| &c.voice.model_path,
@@ -577,6 +688,7 @@ static CATEGORIES: &[Category] = &[
             },
             Control {
                 label: "Language (code or auto)",
+                section: "Transcription",
                 key: "voice.language",
                 kind: Kind::Text {
                     get: |c| &c.voice.language,
@@ -585,6 +697,7 @@ static CATEGORIES: &[Category] = &[
             },
             Control {
                 label: "Dictation shortcut",
+                section: "Recording",
                 key: "voice.dictation_shortcut",
                 kind: Kind::Text {
                     get: |c| &c.voice.dictation_shortcut,
@@ -593,6 +706,7 @@ static CATEGORIES: &[Category] = &[
             },
             Control {
                 label: "Recording limit",
+                section: "Recording",
                 key: "voice.max_recording_seconds",
                 kind: Kind::Range {
                     min: 5,
@@ -607,11 +721,13 @@ static CATEGORIES: &[Category] = &[
         ],
     },
     Category {
-        icon: 's',
+        icon: "\u{eb75}", // unmute
         label: "Speech",
+        about: "Spoken replies in a voice conversation",
         controls: &[
             Control {
                 label: "Spoken replies (voice mode)",
+                section: "Replies",
                 key: "voice.spoken_replies",
                 kind: Kind::Toggle {
                     get: |c| c.voice.spoken_replies,
@@ -619,7 +735,31 @@ static CATEGORIES: &[Category] = &[
                 },
             },
             Control {
+                label: "Speech voice (optional)",
+                section: "Replies",
+                key: "voice.speech_voice",
+                kind: Kind::Text {
+                    get: |c| &c.voice.speech_voice,
+                    set: |c, v| c.voice.speech_voice = v,
+                },
+            },
+            Control {
+                label: "Speech rate",
+                section: "Replies",
+                key: "voice.speech_rate",
+                kind: Kind::Range {
+                    min: 80,
+                    max: 400,
+                    step: 10,
+                    divisor: 1,
+                    suffix: " wpm",
+                    get: |c| i32::from(c.voice.speech_rate),
+                    set: |c, v| c.voice.speech_rate = u16::try_from(v).unwrap_or(180),
+                },
+            },
+            Control {
                 label: "Record/send shortcut",
+                section: "Turns",
                 key: "voice.turn_shortcut",
                 kind: Kind::Text {
                     get: |c| &c.voice.turn_shortcut,
@@ -628,10 +768,11 @@ static CATEGORIES: &[Category] = &[
             },
             Control {
                 label: "Busy Pi delivery",
+                section: "Turns",
                 key: "voice.busy_delivery",
                 kind: Kind::Choice {
                     options: &["Refuse", "Steer", "Follow up"],
-                    cycle: false,
+                    look: Look::Segments,
                     get: |c| match c.voice.busy_delivery {
                         skelly_config::VoiceDelivery::Idle => 0,
                         skelly_config::VoiceDelivery::Steer => 1,
@@ -644,27 +785,6 @@ static CATEGORIES: &[Category] = &[
                             _ => skelly_config::VoiceDelivery::Idle,
                         }
                     },
-                },
-            },
-            Control {
-                label: "Speech voice (optional)",
-                key: "voice.speech_voice",
-                kind: Kind::Text {
-                    get: |c| &c.voice.speech_voice,
-                    set: |c, v| c.voice.speech_voice = v,
-                },
-            },
-            Control {
-                label: "Speech rate",
-                key: "voice.speech_rate",
-                kind: Kind::Range {
-                    min: 80,
-                    max: 400,
-                    step: 10,
-                    divisor: 1,
-                    suffix: " wpm",
-                    get: |c| i32::from(c.voice.speech_rate),
-                    set: |c, v| c.voice.speech_rate = u16::try_from(v).unwrap_or(180),
                 },
             },
         ],
@@ -695,12 +815,11 @@ fn decimals_for(divisor: i32) -> usize {
     f64::from(divisor.max(1)).log10().round() as usize
 }
 
-/// The rendered settings grid plus the highlight rows, for a
-/// [`skelly_render::SettingsView`].
+/// The rendered settings view's display list, for a [`skelly_render::SettingsView`].
 pub(crate) struct Paint {
     /// The x of the nav/content divider (physical px); the nav strip fills to its left.
     pub(crate) nav_divider_x: f32,
-    /// The content quads over the frame (active-category fill + bar, focused-control fill).
+    /// The quads over the frame: nav pills, section cards, row washes and widgets.
     pub(crate) quads: Vec<ChromeQuad>,
     /// The positioned proportional text labels.
     pub(crate) labels: Vec<ProseLabel>,
@@ -723,19 +842,12 @@ pub(crate) enum Target {
     Row(usize),
     /// A toggle switch: flip it.
     Toggle(usize),
-    /// One segment of a segmented control: choose that option.
-    Segment {
+    /// One option of a choice - a segment, or a theme card: choose it.
+    Choose {
         /// The control's index.
         index: usize,
         /// The option's index.
         option: usize,
-    },
-    /// One half of a `‹ value ›` cycler: step back (`-1`) or forward (`1`), wrapping.
-    Cycle {
-        /// The control's index.
-        index: usize,
-        /// The step direction.
-        delta: i32,
     },
     /// A slider: set the value from the pointer's x along the track `[x, x + w)`.
     Slider {
@@ -757,9 +869,7 @@ impl Target {
     fn control(self) -> Option<usize> {
         match self {
             Target::Row(i) | Target::Toggle(i) | Target::Text(i) => Some(i),
-            Target::Segment { index, .. }
-            | Target::Cycle { index, .. }
-            | Target::Slider { index, .. } => Some(index),
+            Target::Choose { index, .. } | Target::Slider { index, .. } => Some(index),
             Target::Close | Target::Category(_) | Target::Workspaces(_) => None,
         }
     }
@@ -990,8 +1100,8 @@ impl Settings {
         self.editing.as_ref().map(|_| self.selected)
     }
 
-    /// Choose option `option` of the choice control at `index` (a segment click), returning
-    /// the config key it wrote.
+    /// Choose option `option` of the choice control at `index` (a segment or theme-card click),
+    /// returning the config key it wrote.
     pub(crate) fn choose(
         &mut self,
         config: &mut Config,
@@ -1004,31 +1114,6 @@ impl Settings {
             return None;
         };
         set(config, option.min(options.len().saturating_sub(1)));
-        Some(control.key)
-    }
-
-    /// Step the choice control at `index` by `delta`, wrapping (a cycler click), returning the
-    /// config key it wrote.
-    pub(crate) fn step(
-        &mut self,
-        config: &mut Config,
-        index: usize,
-        delta: i32,
-    ) -> Option<&'static str> {
-        self.select(index);
-        let control = self.controls().get(index)?;
-        let Kind::Choice {
-            options, get, set, ..
-        } = &control.kind
-        else {
-            return None;
-        };
-        let n = i32::try_from(options.len().max(1)).unwrap_or(1);
-        let cur = i32::try_from(get(config)).unwrap_or(0);
-        set(
-            config,
-            usize::try_from((cur + delta).rem_euclid(n)).unwrap_or(0),
-        );
         Some(control.key)
     }
 
@@ -1111,11 +1196,11 @@ impl Settings {
         Some(control.key)
     }
 
-    /// Build the settings view's proportional display list within `panel` (physical px) at
-    /// DPI `scale`, reading current values from `config` in `theme`'s UI tokens: the category
-    /// heading, the left category nav (active one filled + barred), the control rows for the
-    /// active category (label + value, the focused one filled with a guillemet-bracketed
-    /// accent value), and the footer. The renderer draws the panel + nav strip + divider.
+    /// Build the settings view's display list within `panel` (physical px) at DPI `scale`,
+    /// reading current values from `config` in `theme`'s UI tokens: the category nav, the
+    /// header (the category's name over its summary, the esc hint and the close button), the
+    /// active page - a config category's section cards, or the Workspaces page - and the
+    /// footer's key hints. The renderer fills the panel and draws the nav divider beneath.
     pub(crate) fn build(
         &self,
         panel: PxRect,
@@ -1125,150 +1210,103 @@ impl Settings {
         theme: &Theme,
         measure: &mut TextMeasure,
     ) -> Paint {
-        let nav_divider_x = panel.x + NAV_WIDTH * scale;
-        let content_x = nav_divider_x + CONTENT_PAD * scale;
-        let content_right = panel.x + panel.w - PAD * scale;
-        let mut quads = Vec::new();
-        let mut labels = Vec::new();
-        let mut targets = Vec::new();
-
-        let hy = panel.y + PAD * scale;
-        self.push_header(
-            &mut quads,
-            &mut labels,
-            &mut targets,
-            measure,
-            (content_x, content_right),
-            hy,
-            scale,
-            theme,
-        );
-        let body_top = hy + HEADER_H * scale;
-        self.push_nav(
-            &mut quads,
-            &mut labels,
-            &mut targets,
-            measure,
-            panel,
-            nav_divider_x,
-            body_top,
-            scale,
-            theme,
-        );
-        // The footer sits at the panel's foot; the page's rows scroll above it.
-        let fy = panel.y + panel.h - PAD * scale - FontRole::Caption.line_height_px(scale);
-        let rows_first = if self.on_workspaces_page() {
-            self.push_workspaces(
-                &mut quads,
-                &mut labels,
-                &mut targets,
-                measure,
-                workspaces,
-                (content_x, content_right, nav_divider_x),
-                (body_top, fy - PAD * scale),
-                scale,
-                theme,
-            )
-        } else {
-            self.push_controls(
-                &mut quads,
-                &mut labels,
-                &mut targets,
-                measure,
-                config,
-                (content_x, content_right, nav_divider_x),
-                (body_top, fy - PAD * scale),
-                scale,
-                theme,
-            )
+        let at = Layout::new(panel, scale);
+        let mut paint = Paint {
+            nav_divider_x: at.divider,
+            quads: Vec::new(),
+            labels: Vec::new(),
+            targets: Vec::new(),
+            rows_first: 0,
         };
-        push_row(
-            &mut labels,
+        self.push_header(&mut paint, measure, &at, scale, theme);
+        self.push_nav(&mut paint, measure, &at, scale, theme);
+        paint.rows_first = if self.on_workspaces_page() {
+            self.push_workspaces(&mut paint, measure, workspaces, &at, scale, theme)
+        } else {
+            let ctx = PageCtx::new(self.controls(), config, &at, scale, theme, measure);
+            self.push_page(&mut paint, measure, &ctx, &at)
+        };
+        let hints = if self.on_workspaces_page() {
+            WORKSPACES_HINTS
+        } else {
+            FOOTER_HINTS
+        };
+        push_key_hints(
+            &mut paint.quads,
+            &mut paint.labels,
             measure,
-            if self.on_workspaces_page() {
-                WORKSPACES_FOOTER
-            } else {
-                FOOTER
-            },
-            FontRole::Caption,
-            theme.fg_muted,
-            content_x,
-            fy,
-            0.0,
+            hints,
+            (at.left, at.footer_y),
             scale,
+            theme,
         );
-
-        Paint {
-            nav_divider_x,
-            quads,
-            labels,
-            targets,
-            rows_first,
-        }
+        paint
     }
 
-    /// Draw the header at `hy`: the active category name (heading), the `✕` close button at the
-    /// right, and an esc hint before it, which also closes unless a text edit is open. The
-    /// button stays live during an edit: the click commits the draft first, as any click does.
-    /// `x = (content_x, content_right)`.
-    #[allow(clippy::too_many_arguments, reason = "one focused header builder")]
+    /// Draw the header: the active page's name (heading) over its summary, the `✕` close button
+    /// at the panel's right on the name's line, and an esc hint before it, which also closes
+    /// unless a text edit is open. The button stays live during an edit: the click commits the
+    /// draft first, as any click does.
     fn push_header(
         &self,
-        quads: &mut Vec<ChromeQuad>,
-        labels: &mut Vec<ProseLabel>,
-        targets: &mut Vec<(PxRect, Target)>,
+        paint: &mut Paint,
         measure: &mut TextMeasure,
-        x: (f32, f32),
-        hy: f32,
+        at: &Layout,
         scale: f32,
         theme: &Theme,
     ) {
-        let (content_x, content_right) = x;
+        let (name, about) = CATEGORIES
+            .get(self.category)
+            .map_or((WORKSPACES_NAV.1, WORKSPACES_ABOUT), |c| (c.label, c.about));
+        let labels = &mut paint.labels;
+        let (h2, caption) = (FontRole::H2, FontRole::Caption);
         push_row(
             labels,
             measure,
-            nav_entries()
-                .nth(self.category)
-                .map_or(WORKSPACES_NAV.1, |(_, label)| label),
-            FontRole::H2,
+            name,
+            h2,
             theme.fg_primary,
-            content_x,
-            hy,
-            HEADER_H,
+            at.left,
+            at.top,
+            NAME_ROW_H,
             scale,
         );
+        labels.push(ProseLabel {
+            text: about.to_owned(),
+            x: at.left,
+            y: at.top + (NAME_ROW_H + SUMMARY_GAP) * scale,
+            role: caption,
+            color: theme.fg_muted,
+            weight: None,
+            max_w: f32::MAX,
+        });
         let side = CLOSE_SIDE * scale;
         let button = PxRect {
-            x: content_right - side,
-            y: hy + (HEADER_H - CLOSE_SIDE) * 0.5 * scale,
+            x: at.edge - side,
+            y: at.top + (NAME_ROW_H - CLOSE_SIDE) * 0.5 * scale,
             w: side,
             h: side,
         };
         let hovered = self.hover == Some(Target::Close);
         if hovered {
-            quads.push(ChromeQuad::rounded(
+            paint.quads.push(ChromeQuad::rounded(
                 button,
-                hover_fill(theme, theme.bg_elevated),
+                hover_fill(theme, page_fill(theme)),
                 CLOSE_RADIUS * scale,
             ));
         }
         let icon_w = measure.width(CLOSE_ICON, FontRole::Icon, None);
+        let color = if hovered {
+            theme.fg_primary
+        } else {
+            theme.fg_muted
+        };
+        let icon_x = button.x + (side - icon_w) * 0.5;
+        let icon = FontRole::Icon;
         push_row(
-            labels,
-            measure,
-            CLOSE_ICON,
-            FontRole::Icon,
-            if hovered {
-                theme.fg_primary
-            } else {
-                theme.fg_muted
-            },
-            button.x + (side - icon_w) * 0.5,
-            button.y,
-            CLOSE_SIDE,
-            scale,
+            labels, measure, CLOSE_ICON, icon, color, icon_x, button.y, CLOSE_SIDE, scale,
         );
-        targets.push((button, Target::Close));
+        paint.targets.push((button, Target::Close));
         let editing = self.editing.is_some();
         let hint = if editing {
             "enter save · esc cancel"
@@ -1276,51 +1314,33 @@ impl Settings {
             "esc to close"
         };
         let hint_right = button.x - CLOSE_GAP * scale;
+        let muted = theme.fg_muted;
         push_right(
-            labels,
-            measure,
-            hint,
-            FontRole::Caption,
-            theme.fg_muted,
-            hint_right,
-            hy,
-            HEADER_H,
-            scale,
+            labels, measure, hint, caption, muted, hint_right, button.y, CLOSE_SIDE, scale,
         );
         if !editing {
-            let w = measure.width(hint, FontRole::Caption, None);
-            targets.push((
-                PxRect {
-                    x: hint_right - w,
-                    y: hy,
-                    w,
-                    h: HEADER_H * scale,
-                },
-                Target::Close,
-            ));
+            let w = measure.width(hint, caption, None);
+            let rect = PxRect {
+                x: hint_right - w,
+                y: button.y,
+                w,
+                h: side,
+            };
+            paint.targets.push((rect, Target::Close));
         }
     }
 
     /// Draw the Workspaces page: the session's workspaces and groups, focused + hovered from
-    /// this view's state. `x = (content_x, content_right, nav_divider_x)`, `y = (top, bottom)`;
-    /// returns the first row drawn (its scroll).
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "mirrors push_controls, the other content-page builder"
-    )]
+    /// this view's state, in the content column. Returns the first row drawn (its scroll).
     fn push_workspaces(
         &self,
-        quads: &mut Vec<ChromeQuad>,
-        labels: &mut Vec<ProseLabel>,
-        targets: &mut Vec<(PxRect, Target)>,
+        paint: &mut Paint,
         measure: &mut TextMeasure,
         entries: &[workspace::Entry],
-        x: (f32, f32, f32),
-        y: (f32, f32),
+        at: &Layout,
         scale: f32,
         theme: &Theme,
     ) -> usize {
-        let (content_x, content_right, nav_divider_x) = x;
         let hover = match self.hover {
             Some(Target::Workspaces(t)) => Some(t),
             _ => None,
@@ -1334,20 +1354,18 @@ impl Settings {
             reveal: self.reveal_row,
         };
         let area = workspace::Area {
-            x: content_x,
-            right: content_right,
-            band_x: nav_divider_x,
-            band_right: content_right + PAD * scale,
-            top: y.0,
-            bottom: y.1,
+            x: at.left,
+            right: at.right,
+            top: at.body_top,
+            bottom: at.body_bottom,
         };
         let mut out = workspace::Out {
-            quads,
-            labels,
+            quads: &mut paint.quads,
+            labels: &mut paint.labels,
             targets: Vec::new(),
         };
         let first = page.build(&area, scale, theme, measure, &mut out);
-        targets.extend(
+        paint.targets.extend(
             out.targets
                 .into_iter()
                 .map(|(rect, t)| (rect, Target::Workspaces(t))),
@@ -1355,175 +1373,295 @@ impl Settings {
         first
     }
 
-    /// Draw the left category nav: each category's icon + label, the active one behind an
-    /// `accent.subtle` fill + `accent` bar, a hovered one behind a lighter wash.
-    #[allow(clippy::too_many_arguments, reason = "one focused nav builder")]
+    /// Draw the left nav: a "Settings" title on the heading's line, then a pill per page - its
+    /// codicon and name - the active one on an `accent.subtle` fill with an `accent` icon, a
+    /// hovered one on a lighter wash. A hairline sets the Workspaces page apart from the config
+    /// categories above it.
     fn push_nav(
         &self,
-        quads: &mut Vec<ChromeQuad>,
-        labels: &mut Vec<ProseLabel>,
-        targets: &mut Vec<(PxRect, Target)>,
+        paint: &mut Paint,
         measure: &mut TextMeasure,
-        panel: PxRect,
-        nav_divider_x: f32,
-        body_top: f32,
+        at: &Layout,
         scale: f32,
         theme: &Theme,
     ) {
-        let mut y = body_top;
+        let page = page_fill(theme);
+        let inset = NAV_INSET * scale;
+        let x = at.panel.x + inset;
+        let w = at.divider - at.panel.x - 2.0 * inset;
+        let title_x = x + NAV_ICON_X * scale;
+        let (title, primary) = (FontRole::Title, theme.fg_primary);
+        let labels = &mut paint.labels;
+        push_row(
+            labels, measure, "Settings", title, primary, title_x, at.top, NAME_ROW_H, scale,
+        );
+        let mut y = at.top + (NAME_ROW_H + NAV_TITLE_GAP) * scale;
         for (index, (icon, name)) in nav_entries().enumerate() {
-            let active = index == self.category;
-            let row = PxRect {
-                x: panel.x,
+            if index == CATEGORIES.len() {
+                let stroke = scale.max(1.0);
+                y += (NAV_SEP_GAP - NAV_ROW_GAP) * scale;
+                let rule = PxRect {
+                    x: title_x,
+                    y,
+                    w: x + w - title_x,
+                    h: stroke,
+                };
+                paint
+                    .quads
+                    .push(ChromeQuad::fill(rule, theme.border_subtle));
+                y += stroke + NAV_SEP_GAP * scale;
+            }
+            let pill = PxRect {
+                x,
                 y,
-                w: nav_divider_x - panel.x,
+                w,
                 h: NAV_ROW_H * scale,
             };
-            targets.push((row, Target::Category(index)));
-            if !active && self.hover == Some(Target::Category(index)) {
-                quads.push(ChromeQuad::fill(
-                    row,
-                    hover_fill(theme, theme.bg_base.to_srgb()),
-                ));
-            }
+            let active = index == self.category;
+            let radius = NAV_RADIUS * scale;
             if active {
-                let h = NAV_ROW_H * scale;
-                // accent.subtle active-row fill, composited in sRGB over the nav column
-                // (bg.base) so it reads at the guide's weight.
-                quads.push(ChromeQuad::fill(
-                    PxRect {
-                        x: panel.x,
-                        y,
-                        w: nav_divider_x - panel.x,
-                        h,
-                    },
-                    theme.accent_subtle_on(theme.bg_base.to_srgb()),
-                ));
-                quads.push(ChromeQuad::fill(
-                    PxRect {
-                        x: panel.x,
-                        y,
-                        w: (2.0 * scale).max(1.0),
-                        h,
-                    },
-                    theme.accent,
-                ));
+                let fill = theme.accent_subtle_on(page);
+                paint.quads.push(ChromeQuad::rounded(pill, fill, radius));
+            } else if self.hover == Some(Target::Category(index)) {
+                let fill = hover_fill(theme, page);
+                paint.quads.push(ChromeQuad::rounded(pill, fill, radius));
             }
-            let color = if active {
-                theme.fg_primary
-            } else {
-                theme.fg_secondary
+            let row = PxRect {
+                x: at.panel.x,
+                w: at.divider - at.panel.x,
+                ..pill
             };
-            let label = format!("{icon} {name}");
+            paint.targets.push((row, Target::Category(index)));
+            let (icon_color, color) = if active {
+                (theme.accent, theme.fg_primary)
+            } else {
+                (theme.fg_muted, theme.fg_secondary)
+            };
+            let icon_w = measure.width(icon, FontRole::Icon, None);
+            let icon_x = x + NAV_ICON_X * scale + (16.0 * scale - icon_w) * 0.5;
+            let labels = &mut paint.labels;
+            let role = FontRole::Icon;
             push_row(
-                labels,
-                measure,
-                &label,
-                FontRole::Label,
-                color,
-                panel.x + NAV_PAD * scale,
-                y,
-                NAV_ROW_H,
-                scale,
+                labels, measure, icon, role, icon_color, icon_x, y, NAV_ROW_H, scale,
             );
-            y += NAV_ROW_H * scale;
+            let label_x = x + (NAV_ICON_X + NAV_ICON_W) * scale;
+            let role = FontRole::Label;
+            push_row(
+                labels, measure, name, role, color, label_x, y, NAV_ROW_H, scale,
+            );
+            y += (NAV_ROW_H + NAV_ROW_GAP) * scale;
         }
     }
 
-    /// Draw the active category's control rows: each label + value, the focused one behind an
-    /// `accent.subtle` fill. Rows that do not fit in `y = (top, bottom)` scroll, as on the
-    /// Workspaces page; returns the first row drawn, the scroll to keep.
-    /// `x = (content_x, content_right, nav_divider_x)`.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "one focused control-list builder"
-    )]
-    fn push_controls(
+    /// Draw the active category's page: its controls as section cards, each section under its
+    /// label, the theme picker as a grid of preview cards. A page taller than the body scrolls
+    /// by whole [`Unit`]s, with a `↑ N more` line in the header gap and a `↓ N more` line under
+    /// the last unit, as the Workspaces page does; returns the first unit drawn, the scroll to
+    /// keep.
+    fn push_page(
         &self,
-        quads: &mut Vec<ChromeQuad>,
-        labels: &mut Vec<ProseLabel>,
-        targets: &mut Vec<(PxRect, Target)>,
+        paint: &mut Paint,
         measure: &mut TextMeasure,
-        config: &Config,
-        x: (f32, f32, f32),
-        y: (f32, f32),
-        scale: f32,
-        theme: &Theme,
+        ctx: &PageCtx<'_>,
+        at: &Layout,
     ) -> usize {
-        let (content_x, content_right, nav_divider_x) = x;
-        let controls = self.controls();
-        let row_h = CTRL_ROW_H * scale;
-        let heights = vec![row_h; controls.len()];
-        // A category taller than its room scrolls between `↑ N more` / `↓ N more` lines.
-        let (mut top, mut bottom) = y;
+        let scale = ctx.scale;
+        let units = units(ctx.controls, ctx.cols, scale);
+        let focus_line = match ctx.controls.get(self.selected).map(|c| &c.kind) {
+            Some(Kind::Choice {
+                get,
+                look: Look::Themes,
+                ..
+            }) => get(ctx.config) / ctx.cols,
+            _ => 0,
+        };
+        let selected = units
+            .iter()
+            .position(|u| u.control == self.selected && u.line == focus_line)
+            .unwrap_or(0);
+        let heights: Vec<f32> = units.iter().map(|u| u.h).collect();
+        let indicator = workspace::IND_H * scale;
+        let (top, mut bottom) = (at.body_top, at.body_bottom);
         let overflow = heights.iter().sum::<f32>() > bottom - top;
         if overflow {
-            top += workspace::IND_H * scale;
-            bottom -= workspace::IND_H * scale;
+            bottom -= indicator;
         }
         let first = workspace::first_row(
             &heights,
             bottom - top,
             self.rows_first,
-            self.selected,
+            selected,
             self.reveal_row,
         );
+        let mut placed = Vec::new();
         let mut y = top;
-        let mut last = first;
-        let hovered = self.hover.and_then(Target::control);
-        // One readout column for every slider in the category, sized to the widest value any
-        // of them can show, so the tracks line up and never shift while a value changes.
-        let readout_w = controls
-            .iter()
-            .filter_map(|c| c.kind.readout_width(measure))
-            .fold(0.0, f32::max);
-        for (index, control) in controls.iter().enumerate().skip(first) {
-            // Rows past the viewport are scrolled out; the first one always draws.
-            if index > first && y + row_h > bottom {
+        for (i, unit) in units.iter().enumerate().skip(first) {
+            // Units past the viewport are scrolled out; the first one always draws.
+            if i > first && y + unit.h > bottom {
                 break;
             }
-            last = index;
-            let focused = index == self.selected;
-            let row = PxRect {
-                x: nav_divider_x,
-                y,
-                w: content_right + PAD * scale - nav_divider_x,
-                h: CTRL_ROW_H * scale,
-            };
-            targets.push((row, Target::Row(index)));
-            if focused {
-                // accent.subtle selected-row band, composited in sRGB over the content surface
-                // (bg.elevated) to match the guide's weight.
-                quads.push(ChromeQuad::fill(
-                    row,
-                    theme.accent_subtle_on(theme.bg_elevated),
-                ));
-            } else if hovered == Some(index) {
-                quads.push(ChromeQuad::fill(row, hover_fill(theme, theme.bg_elevated)));
+            placed.push((*unit, y));
+            y += unit.h;
+        }
+        push_section_cards(&mut paint.quads, ctx, &placed);
+        for (n, &(unit, y)) in placed.iter().enumerate() {
+            if unit.head > 0.0 {
+                push_section_label(paint, measure, ctx, unit, y);
             }
-            push_control(
-                quads,
-                labels,
-                targets,
-                index,
-                measure,
-                control,
-                config,
-                focused,
-                self.editing.as_deref().filter(|_| focused),
-                (content_x, content_right, readout_w),
-                y,
-                scale,
-                theme,
-            );
-            y += row_h;
+            let top = y + unit.head;
+            if unit.cards {
+                self.push_theme_line(paint, measure, ctx, unit, top);
+            } else {
+                let rule = n > 0 && unit.head == 0.0;
+                self.push_control_row(paint, measure, ctx, unit.control, (top, rule));
+            }
         }
         if overflow {
-            let hidden = (first, controls.len().saturating_sub(last + 1));
-            let above = top - workspace::IND_H * scale;
-            workspace::push_more(labels, measure, hidden, content_x, (above, y), scale, theme);
+            // A control counts as hidden when any of its units is: a theme grid scrolled
+            // part-way is still "more".
+            let shown = first + placed.len();
+            let hidden = (controls_in(&units[..first]), controls_in(&units[shown..]));
+            let above = top - indicator;
+            workspace::push_more(
+                &mut paint.labels,
+                measure,
+                hidden,
+                at.left,
+                (above, y),
+                scale,
+                ctx.theme,
+            );
         }
         first
+    }
+
+    /// One control's row at `at = (top, rule)` inside its section card: the focus or hover pill,
+    /// a hairline above it when `rule` (unless it or the row above is lit), the label over its
+    /// config key at the left, clipped short of the widget at the right.
+    fn push_control_row(
+        &self,
+        paint: &mut Paint,
+        measure: &mut TextMeasure,
+        ctx: &PageCtx<'_>,
+        index: usize,
+        at: (f32, bool),
+    ) {
+        let (top, rule) = at;
+        let (scale, theme) = (ctx.scale, ctx.theme);
+        let rect = PxRect {
+            x: ctx.left,
+            y: top,
+            w: ctx.right - ctx.left,
+            h: ROW_H * scale,
+        };
+        paint.targets.push((rect, Target::Row(index)));
+        let hovered = self.hover.and_then(Target::control);
+        let lit = |i: usize| i == self.selected || hovered == Some(i);
+        let card = card_fill(theme);
+        let pill = inset(rect, PILL_INSET * scale);
+        if index == self.selected {
+            let fill = theme.accent_subtle_on(card);
+            paint
+                .quads
+                .push(ChromeQuad::rounded(pill, fill, PILL_RADIUS * scale));
+        } else if hovered == Some(index) {
+            let fill = hover_fill(theme, card);
+            paint
+                .quads
+                .push(ChromeQuad::rounded(pill, fill, PILL_RADIUS * scale));
+        }
+        if rule && !lit(index) && !lit(index.saturating_sub(1)) {
+            let line = PxRect {
+                x: rect.x + ROW_PAD_X * scale,
+                y: top,
+                w: rect.w - 2.0 * ROW_PAD_X * scale,
+                h: scale.max(1.0),
+            };
+            paint
+                .quads
+                .push(ChromeQuad::fill(line, theme.border_subtle));
+        }
+        let focused = index == self.selected;
+        let editing = self.editing.as_deref().filter(|_| focused);
+        let right = rect.x + rect.w - ROW_PAD_X * scale;
+        let widget_x = push_control(paint, measure, ctx, index, editing, (right, top));
+        let control = &ctx.controls[index];
+        let x = rect.x + ROW_PAD_X * scale;
+        let room = (widget_x - LABEL_GAP * scale - x).max(0.0);
+        let label_h = measure.line_height(FontRole::Label);
+        let key_h = measure.line_height(FontRole::Mono);
+        let y = top + (rect.h - label_h - KEY_GAP * scale - key_h) * 0.5;
+        paint.labels.push(ProseLabel {
+            text: control.label.to_owned(),
+            x,
+            y,
+            role: FontRole::Label,
+            color: theme.fg_primary,
+            weight: None,
+            max_w: room,
+        });
+        paint.labels.push(ProseLabel {
+            text: control.key.to_owned(),
+            x,
+            y: y + label_h + KEY_GAP * scale,
+            role: FontRole::Mono,
+            color: theme.fg_muted,
+            weight: None,
+            max_w: room,
+        });
+    }
+
+    /// One line of the theme grid at `top`: a preview card per theme on it, each a click target
+    /// that picks the theme.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "the grid has a handful of columns"
+    )]
+    fn push_theme_line(
+        &self,
+        paint: &mut Paint,
+        measure: &mut TextMeasure,
+        ctx: &PageCtx<'_>,
+        unit: Unit,
+        top: f32,
+    ) {
+        let index = unit.control;
+        let Kind::Choice { options, get, .. } = &ctx.controls[index].kind else {
+            return;
+        };
+        let chosen = get(ctx.config);
+        let (scale, cols) = (ctx.scale, ctx.cols);
+        let gap = THEME_GAP * scale;
+        let w = (ctx.right - ctx.left - gap * (cols - 1) as f32) / cols as f32;
+        let start = unit.line * cols;
+        for option in start..(start + cols).min(options.len()) {
+            let rect = PxRect {
+                x: ctx.left + (option - start) as f32 * (w + gap),
+                y: top,
+                w,
+                h: THEME_CARD_H * scale,
+            };
+            let card = ThemeCard {
+                id: THEMES[option].0,
+                name: options[option],
+                selected: option == chosen,
+                focused: index == self.selected,
+                hovered: self.hover == Some(Target::Choose { index, option }),
+            };
+            let strip = THEME_STRIP_H * scale;
+            let on = page_fill(ctx.theme);
+            let quads = &mut paint.quads;
+            card.push(
+                quads,
+                &mut paint.labels,
+                measure,
+                (rect, strip),
+                on,
+                scale,
+                ctx.theme,
+            );
+            paint.targets.push((rect, Target::Choose { index, option }));
+        }
     }
 }
 
@@ -1533,12 +1671,255 @@ impl Default for Settings {
     }
 }
 
+/// Where the view lays out, physical px.
+struct Layout {
+    /// The whole settings panel.
+    panel: PxRect,
+    /// The nav/content divider's x.
+    divider: f32,
+    /// The content column's left and right edges.
+    left: f32,
+    right: f32,
+    /// The content area's right edge, where the close button ends (past the column's right
+    /// when a wide window centers the column).
+    edge: f32,
+    /// The top of the heading's line.
+    top: f32,
+    /// The page body's top and bottom.
+    body_top: f32,
+    body_bottom: f32,
+    /// The top of the footer's key-hint line.
+    footer_y: f32,
+}
+
+impl Layout {
+    fn new(panel: PxRect, scale: f32) -> Self {
+        let divider = panel.x + NAV_WIDTH * scale;
+        let area_left = divider + CONTENT_PAD * scale;
+        let edge = panel.x + panel.w - PAD * scale;
+        let spare = (edge - area_left - COLUMN_MAX_W * scale).max(0.0) * 0.5;
+        let top = panel.y + PAD * scale;
+        let footer_y = panel.y + panel.h - (PAD + HINT_H) * scale;
+        Self {
+            panel,
+            divider,
+            left: area_left + spare,
+            right: edge - spare,
+            edge,
+            top,
+            body_top: top + (HEADER_H + HEADER_GAP) * scale,
+            body_bottom: footer_y - FOOTER_GAP * scale,
+            footer_y,
+        }
+    }
+}
+
+/// What a config page draws with: its controls, the config they read, the content column, and
+/// the shared widths worked out once per paint.
+struct PageCtx<'a> {
+    controls: &'static [Control],
+    config: &'a Config,
+    theme: &'a Theme,
+    scale: f32,
+    /// The content column's left and right edges.
+    left: f32,
+    right: f32,
+    /// The theme grid's column count.
+    cols: usize,
+    /// One readout column for every slider on the page, sized to the widest value any of them
+    /// can show, so the tracks line up and never shift while a value changes.
+    readout_w: f32,
+}
+
+impl<'a> PageCtx<'a> {
+    fn new(
+        controls: &'static [Control],
+        config: &'a Config,
+        at: &Layout,
+        scale: f32,
+        theme: &'a Theme,
+        measure: &mut TextMeasure,
+    ) -> Self {
+        let readout_w = controls
+            .iter()
+            .filter_map(|c| c.kind.readout_width(measure))
+            .fold(0.0, f32::max);
+        Self {
+            controls,
+            config,
+            theme,
+            scale,
+            left: at.left,
+            right: at.right,
+            cols: theme_columns(at.right - at.left, scale),
+            readout_w,
+        }
+    }
+}
+
+/// One block of a config page, top to bottom: a control's row, or one line of the theme grid.
+/// The page scrolls by whole units.
+#[derive(Clone, Copy)]
+struct Unit {
+    /// The control it draws.
+    control: usize,
+    /// Its line of the theme grid (`0` for a row).
+    line: usize,
+    /// Whether it is a line of theme cards rather than a control row.
+    cards: bool,
+    /// The section label (and the gap above it) drawn over it, physical px; `0` mid-section.
+    head: f32,
+    /// Its full height, `head` included, physical px.
+    h: f32,
+}
+
+/// A page's units for `controls`, with the theme grid `cols` cards wide.
+fn units(controls: &[Control], cols: usize, scale: f32) -> Vec<Unit> {
+    let mut out = Vec::new();
+    for (i, control) in controls.iter().enumerate() {
+        let opens = i == 0 || controls[i - 1].section != control.section;
+        let head = match (opens, i) {
+            (false, _) => 0.0,
+            (true, 0) => SECTION_LABEL_H * scale,
+            (true, _) => (SECTION_GAP + SECTION_LABEL_H) * scale,
+        };
+        if let Kind::Choice {
+            options,
+            look: Look::Themes,
+            ..
+        } = control.kind
+        {
+            let lines = options.len().div_ceil(cols);
+            for line in 0..lines {
+                let head = if line == 0 { head } else { 0.0 };
+                let gap = if line + 1 < lines { THEME_GAP } else { 0.0 };
+                out.push(Unit {
+                    control: i,
+                    line,
+                    cards: true,
+                    head,
+                    h: head + (THEME_CARD_H + gap) * scale,
+                });
+            }
+        } else {
+            out.push(Unit {
+                control: i,
+                line: 0,
+                cards: false,
+                head,
+                h: head + ROW_H * scale,
+            });
+        }
+    }
+    out
+}
+
+/// The section label over `unit` (whose top is `y`): the section's name in uppercase
+/// `micro`, and, over the theme grid (which has no row to show it), its config key at the
+/// right.
+fn push_section_label(
+    paint: &mut Paint,
+    measure: &mut TextMeasure,
+    ctx: &PageCtx<'_>,
+    unit: Unit,
+    y: f32,
+) {
+    let control = &ctx.controls[unit.control];
+    let micro = measure.line_height(FontRole::Micro);
+    // The label sits on the bottom of its line, a small gap above the card.
+    let line_bottom = y + unit.head - 8.0 * ctx.scale;
+    paint.labels.push(ProseLabel {
+        text: control.section.to_uppercase(),
+        x: ctx.left + 2.0 * ctx.scale,
+        y: line_bottom - micro,
+        role: FontRole::Micro,
+        color: ctx.theme.fg_muted,
+        weight: None,
+        max_w: f32::MAX,
+    });
+    if unit.cards {
+        let mono = measure.line_height(FontRole::Mono);
+        let w = measure.width(control.key, FontRole::Mono, None);
+        paint.labels.push(ProseLabel {
+            text: control.key.to_owned(),
+            x: ctx.right - w,
+            y: line_bottom - micro * 0.5 - mono * 0.5,
+            role: FontRole::Mono,
+            color: ctx.theme.fg_muted,
+            weight: None,
+            max_w: f32::MAX,
+        });
+    }
+}
+
+/// How many controls `units` draw (a control's units are adjacent).
+fn controls_in(units: &[Unit]) -> usize {
+    let mut controls: Vec<usize> = units.iter().map(|u| u.control).collect();
+    controls.dedup();
+    controls.len()
+}
+
+/// The theme grid's columns in a content column `width` wide: four, or two where four would
+/// squeeze a card below its narrowest. An even count keeps each dark/light pair side by side.
+fn theme_columns(width: f32, scale: f32) -> usize {
+    let four = 4.0 * THEME_CARD_MIN_W + 3.0 * THEME_GAP;
+    if width >= four * scale {
+        4
+    } else {
+        2
+    }
+}
+
+/// The card behind each run of placed control rows that share a section: a `bg.base` fill in
+/// a `border.subtle` ring, spanning the rows drawn (a scrolled section's card starts at its
+/// first visible row).
+fn push_section_cards(quads: &mut Vec<ChromeQuad>, ctx: &PageCtx<'_>, placed: &[(Unit, f32)]) {
+    let scale = ctx.scale;
+    let mut run: Option<(f32, f32)> = None;
+    let mut flush = |run: &mut Option<(f32, f32)>| {
+        if let Some((top, bottom)) = run.take() {
+            let card = PxRect {
+                x: ctx.left,
+                y: top,
+                w: ctx.right - ctx.left,
+                h: bottom - top,
+            };
+            let (ring, fill) = (ctx.theme.border_subtle, card_fill(ctx.theme));
+            push_ringed(quads, card, ring, fill, CARD_RADIUS * scale, scale);
+        }
+    };
+    for &(unit, y) in placed {
+        if unit.cards || unit.head > 0.0 {
+            flush(&mut run);
+        }
+        if !unit.cards {
+            let top = y + unit.head;
+            let bottom = top + ROW_H * scale;
+            run = Some(run.map_or((top, bottom), |(t, _)| (t, bottom)));
+        }
+    }
+    flush(&mut run);
+}
+
 /// Every nav entry as `(icon, label)`: the config categories, then the Workspaces page.
-fn nav_entries() -> impl Iterator<Item = (char, &'static str)> {
+fn nav_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
     CATEGORIES
         .iter()
         .map(|c| (c.icon, c.label))
         .chain(std::iter::once(WORKSPACES_NAV))
+}
+
+/// The settings page's surface, under the nav and the content alike: `bg.sidebar`, which the
+/// renderer fills the panel with (`cells::settings_frame_quads`). Washes over the page
+/// composite over it.
+pub(crate) fn page_fill(theme: &Theme) -> Srgb {
+    theme.bg_sidebar
+}
+
+/// A section card's surface: `bg.base`, the surface the §09 widgets are drawn for, a step off
+/// the page.
+pub(crate) fn card_fill(theme: &Theme) -> Srgb {
+    theme.bg_base.to_srgb()
 }
 
 /// A lighter wash than the focused row's `accent.subtle` band, for the row under the pointer.
@@ -1546,194 +1927,222 @@ pub(crate) fn hover_fill(theme: &Theme, base: Srgb) -> Srgb {
     theme.accent.over(base, theme.accent_subtle_alpha * 0.45)
 }
 
-/// Push one control row: its `label` at the content inset and its value rendered as the §09
-/// widget for its [`Kind`] - a toggle switch, a segmented control, or a slider - right-aligned
-/// to `content_right`, recording the widget's click [`Target`]s. The focused row's fill (drawn
-/// by the caller) is the focus cue.
-#[allow(
-    clippy::too_many_arguments,
-    clippy::too_many_lines,
-    clippy::cast_precision_loss,
-    reason = "one focused control-row builder; range bounds are small config values (u8/u16)"
-)]
+/// `rect` shrunk by `d` on every side.
+fn inset(rect: PxRect, d: f32) -> PxRect {
+    PxRect {
+        x: rect.x + d,
+        y: rect.y + d,
+        w: (rect.w - 2.0 * d).max(0.0),
+        h: (rect.h - 2.0 * d).max(0.0),
+    }
+}
+
+/// Push control `index`'s §09 widget for its [`Kind`] - a toggle switch, a segmented control,
+/// a slider, or a text box - right-anchored at `at = (right, top)` in its row, recording the
+/// widget's click [`Target`]s. `editing` is the row's open text draft. Returns the widget's
+/// left edge, where the row's label must stop.
 fn push_control(
-    quads: &mut Vec<ChromeQuad>,
-    labels: &mut Vec<ProseLabel>,
-    targets: &mut Vec<(PxRect, Target)>,
-    index: usize,
+    paint: &mut Paint,
     measure: &mut TextMeasure,
-    control: &Control,
-    config: &Config,
-    focused: bool,
+    ctx: &PageCtx<'_>,
+    index: usize,
     editing: Option<&str>,
-    x: (f32, f32, f32),
-    top: f32,
-    scale: f32,
-    theme: &Theme,
-) {
-    let (content_x, content_right, readout_w) = x;
-    push_row(
-        labels,
-        measure,
-        control.label,
-        FontRole::Label,
-        if focused {
-            theme.fg_primary
-        } else {
-            theme.fg_secondary
-        },
-        content_x,
-        top,
-        CTRL_ROW_H,
-        scale,
-    );
+    at: (f32, f32),
+) -> f32 {
+    let (right, top) = at;
+    let (scale, theme, config) = (ctx.scale, ctx.theme, ctx.config);
+    let control = &ctx.controls[index];
     match &control.kind {
         Kind::Text { get, .. } => {
+            let placeholder = if control.key == "voice.speech_voice" {
+                "(system default)"
+            } else {
+                "(not set)"
+            };
             let value = editing.unwrap_or_else(|| get(config));
-            let value =
-                if editing.is_none() && value.is_empty() && control.key == "voice.speech_voice" {
-                    "(system default)"
-                } else {
-                    value
-                };
-            let display = text_value(value, editing.is_some());
-            let left = content_x + (content_right - content_x) * 0.52;
-            targets.push((
-                PxRect {
-                    x: left,
-                    y: top,
-                    w: content_right - left,
-                    h: CTRL_ROW_H * scale,
-                },
-                Target::Text(index),
-            ));
-            push_row(
-                labels,
+            let max_w = (right - ctx.left) * 0.5;
+            let text = (value, placeholder);
+            let rect = push_input(
+                paint,
                 measure,
-                &display,
-                FontRole::Label,
-                if focused {
-                    theme.accent
-                } else {
-                    theme.fg_secondary
-                },
-                left,
-                top,
-                CTRL_ROW_H,
+                text,
+                editing.is_some(),
+                (right, top, max_w),
                 scale,
+                theme,
             );
-            if let Some(label) = labels.last_mut() {
-                label.max_w = (content_right - left).max(0.0);
-            }
+            let target = PxRect {
+                x: rect.x,
+                y: top,
+                w: right - rect.x,
+                h: ROW_H * scale,
+            };
+            paint.targets.push((target, Target::Text(index)));
+            rect.x
         }
         Kind::Toggle { get, .. } => {
-            let rect = push_toggle(quads, get(config), content_right, top, scale, theme);
-            targets.push((rect, Target::Toggle(index)));
+            let rect = push_toggle(&mut paint.quads, get(config), right, top, scale, theme);
+            paint.targets.push((rect, Target::Toggle(index)));
+            rect.x
         }
+        Kind::Choice {
+            look: Look::Themes, ..
+        } => right,
         Kind::Choice {
             options,
             get,
-            cycle,
+            look: Look::Segments,
             ..
         } => {
             let selected = get(config).min(options.len().saturating_sub(1));
-            if *cycle {
-                let rect = push_cycle(
-                    labels,
-                    measure,
-                    options.get(selected).copied().unwrap_or(""),
-                    content_right,
-                    top,
-                    scale,
-                    theme,
-                    focused,
-                );
-                let half = rect.w * 0.5;
-                for (x, delta) in [(rect.x, -1), (rect.x + half, 1)] {
-                    targets.push((
-                        PxRect {
-                            x,
-                            y: top,
-                            w: half,
-                            h: CTRL_ROW_H * scale,
-                        },
-                        Target::Cycle { index, delta },
-                    ));
-                }
-            } else {
-                let segments = push_segmented(
-                    quads,
-                    labels,
-                    measure,
-                    options,
-                    selected,
-                    content_right,
-                    top,
-                    scale,
-                    theme,
-                );
-                targets.extend(
-                    segments
-                        .into_iter()
-                        .enumerate()
-                        .map(|(option, rect)| (rect, Target::Segment { index, option })),
-                );
-            }
-        }
-        Kind::Range { min, max, get, .. } => {
-            let fraction = if max > min {
-                (get(config) - min) as f32 / (max - min) as f32
-            } else {
-                0.0
-            };
-            let track = push_slider(
-                quads,
-                labels,
+            let segments = push_segmented(
+                &mut paint.quads,
+                &mut paint.labels,
                 measure,
-                &control.kind.value(config),
-                fraction.clamp(0.0, 1.0),
-                content_right,
-                readout_w,
+                options,
+                selected,
+                right,
                 top,
                 scale,
                 theme,
             );
-            // The grab area spans the row's height and half a knob past each end, so the
-            // extremes are as easy to hit as the middle.
-            let slop = SLIDER_KNOB * scale * 0.5;
-            targets.push((
-                PxRect {
-                    x: track.x - slop,
-                    y: top,
-                    w: track.w + 2.0 * slop,
-                    h: CTRL_ROW_H * scale,
-                },
-                Target::Slider {
-                    index,
-                    x: track.x,
-                    w: track.w,
-                },
-            ));
+            let left = segments.first().map_or(right, |r| r.x - SEG_PAD * scale);
+            paint.targets.extend(
+                segments
+                    .into_iter()
+                    .enumerate()
+                    .map(|(option, rect)| (rect, Target::Choose { index, option })),
+            );
+            left
         }
+        Kind::Range { .. } => push_range(paint, measure, ctx, index, at),
     }
 }
 
-/// Keep the end of a long path visible; the row clips to its value column.
-fn text_value(value: &str, editing: bool) -> String {
-    let value = if value.is_empty() { "(not set)" } else { value };
-    let tail: String = value
-        .chars()
-        .rev()
-        .take(36)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect();
-    if editing {
-        format!("{tail}▏")
+/// Control `index`'s slider, right-anchored at `at = (right, top)` in its row, with its grab
+/// target. Returns where the grab area starts, where the row's label must stop.
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "range bounds are small config values (u8/u16)"
+)]
+fn push_range(
+    paint: &mut Paint,
+    measure: &mut TextMeasure,
+    ctx: &PageCtx<'_>,
+    index: usize,
+    at: (f32, f32),
+) -> f32 {
+    let (right, top) = at;
+    let (scale, config) = (ctx.scale, ctx.config);
+    let kind = &ctx.controls[index].kind;
+    let Kind::Range { min, max, get, .. } = kind else {
+        return right;
+    };
+    let fraction = if max > min {
+        (get(config) - min) as f32 / (max - min) as f32
     } else {
-        format!("‹ {tail} ›")
+        0.0
+    };
+    let track = push_slider(
+        &mut paint.quads,
+        &mut paint.labels,
+        measure,
+        &kind.value(config),
+        fraction.clamp(0.0, 1.0),
+        right,
+        ctx.readout_w,
+        top,
+        scale,
+        ctx.theme,
+    );
+    // The grab area spans the row's height and half a knob past each end, so the extremes are
+    // as easy to hit as the middle.
+    let slop = SLIDER_KNOB * scale * 0.5;
+    let grab = PxRect {
+        x: track.x - slop,
+        y: top,
+        w: track.w + 2.0 * slop,
+        h: ROW_H * scale,
+    };
+    let target = Target::Slider {
+        index,
+        x: track.x,
+        w: track.w,
+    };
+    paint.targets.push((grab, target));
+    grab.x
+}
+
+/// A text value's input box, right-anchored at `at = (right, top, max_w)` in its row: a
+/// `bg.inset` well in a `border` ring (`accent` while editing, with a caret), the `text.0` value
+/// in mono - its tail when it does not fit, so a long path keeps its file name - or the muted
+/// `text.1` placeholder when empty. Returns the box.
+fn push_input(
+    paint: &mut Paint,
+    measure: &mut TextMeasure,
+    text: (&str, &str),
+    editing: bool,
+    at: (f32, f32, f32),
+    scale: f32,
+    theme: &Theme,
+) -> PxRect {
+    let (value, placeholder) = text;
+    let (right, top, max_w) = at;
+    let w = max_w.min(INPUT_W * scale);
+    let h = INPUT_H * scale;
+    let rect = PxRect {
+        x: right - w,
+        y: top + (ROW_H * scale - h) * 0.5,
+        w,
+        h,
+    };
+    let ring = if editing { theme.accent } else { theme.border };
+    push_ringed(
+        &mut paint.quads,
+        rect,
+        ring,
+        theme.bg_inset,
+        INPUT_RADIUS * scale,
+        scale,
+    );
+    let (shown, color) = if editing {
+        (format!("{value}\u{258f}"), theme.fg_primary)
+    } else if value.is_empty() {
+        (placeholder.to_owned(), theme.fg_muted)
+    } else {
+        (value.to_owned(), theme.fg_primary)
+    };
+    let pad = INPUT_PAD_X * scale;
+    let room = (w - 2.0 * pad).max(0.0);
+    let line = measure.line_height(FontRole::Mono);
+    paint.labels.push(ProseLabel {
+        text: tail_fit(&shown, room, measure),
+        x: rect.x + pad,
+        y: rect.y + (h - line) * 0.5,
+        role: FontRole::Mono,
+        color,
+        weight: None,
+        max_w: room,
+    });
+    rect
+}
+
+/// `text` if it fits `room` in mono, else its tail behind an ellipsis: the end of a path (its
+/// file name) and an edit's caret matter most.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "a mono character count that fits a box, small and non-negative"
+)]
+fn tail_fit(text: &str, room: f32, measure: &mut TextMeasure) -> String {
+    if measure.width(text, FontRole::Mono, None) <= room {
+        return text.to_owned();
     }
+    let char_w = measure.width("0", FontRole::Mono, None).max(1.0);
+    let keep = ((room / char_w).floor() as usize).saturating_sub(1);
+    let count = text.chars().count();
+    let tail: String = text.chars().skip(count.saturating_sub(keep)).collect();
+    format!("\u{2026}{tail}")
 }
 
 /// A §09 toggle switch, right-anchored: a 38x22 pill (`accent` on / `border` off) with an
@@ -1741,15 +2150,15 @@ fn text_value(value: &str, editing: bool) -> String {
 fn push_toggle(
     quads: &mut Vec<ChromeQuad>,
     on: bool,
-    content_right: f32,
+    right: f32,
     top: f32,
     scale: f32,
     theme: &Theme,
 ) -> PxRect {
     let w = TOGGLE_W * scale;
     let h = TOGGLE_H * scale;
-    let x = content_right - w;
-    let y = top + (CTRL_ROW_H * scale - h) * 0.5;
+    let x = right - w;
+    let y = top + (ROW_H * scale - h) * 0.5;
     let track = if on { theme.accent } else { theme.border };
     quads.push(ChromeQuad::rounded(PxRect { x, y, w, h }, track, h * 0.5));
     let knob = TOGGLE_KNOB * scale;
@@ -1770,48 +2179,9 @@ fn push_toggle(
     PxRect { x, y, w, h }
 }
 
-/// A compact cycler, right-anchored: the current option in `‹ value ›` guillemets - for choices
-/// with many / long options that would overflow a segmented control. `←/→` cycles the value.
-/// Returns the label's rect (its left half steps back, its right half forward).
-#[allow(clippy::too_many_arguments, reason = "one focused cycler builder")]
-fn push_cycle(
-    labels: &mut Vec<ProseLabel>,
-    measure: &mut TextMeasure,
-    value: &str,
-    content_right: f32,
-    top: f32,
-    scale: f32,
-    theme: &Theme,
-    focused: bool,
-) -> PxRect {
-    let color = if focused {
-        theme.accent
-    } else {
-        theme.fg_primary
-    };
-    let text = format!("\u{2039} {value} \u{203A}");
-    let w = measure.width(&text, FontRole::Label, None);
-    let line = measure.line_height(FontRole::Label);
-    labels.push(ProseLabel {
-        text,
-        x: content_right - w,
-        y: top + (CTRL_ROW_H * scale - line) * 0.5,
-        role: FontRole::Label,
-        color,
-        weight: None,
-        max_w: f32::MAX,
-    });
-    PxRect {
-        x: content_right - w,
-        y: top,
-        w,
-        h: CTRL_ROW_H * scale,
-    }
-}
-
-/// A §09 segmented control, right-anchored: a `bg.inset` container (with a `border.subtle`
-/// ring) holding one padded segment per option; the selected one gets a `bg.elevated` fill.
-/// Returns each segment's rect, in option order.
+/// A §09 segmented control, right-anchored: a `bg.inset` container in a `border` ring holding
+/// one padded segment per option; the selected one gets a `bg.elevated` fill. Returns each
+/// segment's rect, in option order.
 #[allow(
     clippy::too_many_arguments,
     reason = "one focused segmented-control builder"
@@ -1822,7 +2192,7 @@ fn push_segmented(
     measure: &mut TextMeasure,
     options: &[&str],
     selected: usize,
-    content_right: f32,
+    right: f32,
     top: f32,
     scale: f32,
     theme: &Theme,
@@ -1837,19 +2207,23 @@ fn push_segmented(
         .map(|o| measure.width(o, FontRole::Caption, None) + 2.0 * item_pad)
         .collect();
     let total: f32 = widths.iter().sum::<f32>() + 2.0 * pad;
-    let cx = content_right - total;
-    let cy = top + (CTRL_ROW_H * scale - (seg_h + 2.0 * pad)) * 0.5;
-    // Container.
-    quads.push(ChromeQuad::rounded(
-        PxRect {
-            x: cx,
-            y: cy,
-            w: total,
-            h: seg_h + 2.0 * pad,
-        },
+    let cx = right - total;
+    let cy = top + (ROW_H * scale - (seg_h + 2.0 * pad)) * 0.5;
+    let container = PxRect {
+        x: cx,
+        y: cy,
+        w: total,
+        h: seg_h + 2.0 * pad,
+    };
+    let radius = SEG_RADIUS * scale;
+    push_ringed(
+        quads,
+        container,
+        theme.border,
         theme.bg_inset,
-        SEG_RADIUS * scale,
-    ));
+        radius,
+        scale,
+    );
     let mut x = cx + pad;
     let mut rects = Vec::with_capacity(options.len());
     for (i, option) in options.iter().enumerate() {
@@ -1901,20 +2275,21 @@ fn push_slider(
     measure: &mut TextMeasure,
     value: &str,
     fraction: f32,
-    content_right: f32,
+    right: f32,
     readout_w: f32,
     top: f32,
     scale: f32,
     theme: &Theme,
 ) -> PxRect {
+    let row_h = ROW_H * scale;
     // The value readout (mono accent), right-aligned.
     let value_w = measure.width(value, FontRole::Mono, None);
     let column_w = readout_w.max(value_w);
     let vline = measure.line_height(FontRole::Mono);
     labels.push(ProseLabel {
         text: value.to_owned(),
-        x: content_right - value_w,
-        y: top + (CTRL_ROW_H * scale - vline) * 0.5,
+        x: right - value_w,
+        y: top + (row_h - vline) * 0.5,
         role: FontRole::Mono,
         color: theme.accent,
         weight: None,
@@ -1923,8 +2298,8 @@ fn push_slider(
     // The track, to the left of the value.
     let track_w = SLIDER_W * scale;
     let track_h = SLIDER_TRACK_H * scale;
-    let track_x = content_right - column_w - SLIDER_VALUE_GAP * scale - track_w;
-    let track_y = top + (CTRL_ROW_H * scale - track_h) * 0.5;
+    let track_x = right - column_w - SLIDER_VALUE_GAP * scale - track_w;
+    let track_y = top + (row_h - track_h) * 0.5;
     quads.push(ChromeQuad::rounded(
         PxRect {
             x: track_x,
@@ -1949,7 +2324,7 @@ fn push_slider(
     quads.push(ChromeQuad::rounded(
         PxRect {
             x: track_x + track_w * fraction - knob * 0.5,
-            y: top + (CTRL_ROW_H * scale - knob) * 0.5,
+            y: top + (row_h - knob) * 0.5,
             w: knob,
             h: knob,
         },
@@ -1964,8 +2339,199 @@ fn push_slider(
     }
 }
 
+/// A theme's preview card (§10.9): a miniature of the theme in its own tokens - a sidebar strip
+/// with its tabs, and lines of text in its ink, accent and diff colors - over a `bg.surface`
+/// strip naming it, ringed in accent with a check when it is the theme in use.
+struct ThemeCard<'a> {
+    /// The theme's config name, which resolves its tokens.
+    id: &'a str,
+    /// Its display name.
+    name: &'a str,
+    /// Whether it is the theme in use.
+    selected: bool,
+    /// Whether its picker has keyboard focus (the selected card's ring turns solid and thick).
+    focused: bool,
+    /// Whether the pointer is over it.
+    hovered: bool,
+}
+
+impl ThemeCard<'_> {
+    /// Draw the card in `at = (rect, strip_h)` - its name strip `strip_h` tall - on the surface
+    /// `on` (which the selected ring blends over), in the active `theme`'s chrome.
+    #[allow(clippy::too_many_arguments, reason = "one focused card builder")]
+    fn push(
+        &self,
+        quads: &mut Vec<ChromeQuad>,
+        labels: &mut Vec<ProseLabel>,
+        measure: &mut TextMeasure,
+        at: (PxRect, f32),
+        on: Srgb,
+        scale: f32,
+        theme: &Theme,
+    ) {
+        let (rect, strip_h) = at;
+        let stroke = scale.max(1.0);
+        let (ring, ring_w) = match (self.selected, self.focused) {
+            (true, true) => (theme.accent, 2.0 * stroke),
+            (true, false) => (theme.accent.over(on, 0.6), stroke),
+            (false, _) if self.hovered => (theme.border_strong, stroke),
+            (false, _) => (theme.border, stroke),
+        };
+        let radius = THEME_RADIUS * scale;
+        quads.push(ChromeQuad::rounded(rect, ring, radius));
+        let inner = inset(rect, ring_w);
+        let radius = (radius - ring_w).max(0.0);
+        let card = Theme::resolve(self.id);
+        quads.push(ChromeQuad::rounded(inner, card.bg_base.to_srgb(), radius));
+        let band = PxRect {
+            h: (inner.h - strip_h).max(0.0),
+            ..inner
+        };
+        push_preview(quads, band, radius, &card, scale);
+        // The name strip, square-topped under the preview.
+        let strip = PxRect {
+            y: band.y + band.h,
+            h: inner.h - band.h,
+            ..inner
+        };
+        quads.push(ChromeQuad::rounded(strip, theme.bg_surface, radius));
+        let top = PxRect {
+            h: radius.min(strip.h),
+            ..strip
+        };
+        quads.push(ChromeQuad::fill(top, theme.bg_surface));
+        let pad = 9.0 * scale;
+        let check_w = if self.selected {
+            let w = measure.width(CHECK_ICON, FontRole::Icon, None);
+            let line = measure.line_height(FontRole::Icon);
+            labels.push(ProseLabel {
+                text: CHECK_ICON.to_owned(),
+                x: strip.x + strip.w - pad - w,
+                y: strip.y + (strip.h - line) * 0.5,
+                role: FontRole::Icon,
+                color: theme.accent,
+                weight: None,
+                max_w: f32::MAX,
+            });
+            w + 4.0 * scale
+        } else {
+            0.0
+        };
+        let line = measure.line_height(FontRole::Caption);
+        labels.push(ProseLabel {
+            text: self.name.to_owned(),
+            x: strip.x + pad,
+            y: strip.y + (strip.h - line) * 0.5,
+            role: FontRole::Caption,
+            color: if self.selected {
+                theme.fg_primary
+            } else {
+                theme.fg_secondary
+            },
+            weight: None,
+            max_w: (strip.w - 2.0 * pad - check_w).max(0.0),
+        });
+    }
+}
+
+/// A theme card's miniature in its top `band` (whose top corners round by `radius`), all in the
+/// `card` theme's tokens: a `bg.sidebar` strip down the left with an `accent` tab over two quiet
+/// ones, and four lines of text on `bg.base` - a prompt with its command and cursor, a hunk
+/// header, an added line and a removed one.
+fn push_preview(quads: &mut Vec<ChromeQuad>, band: PxRect, radius: f32, card: &Theme, scale: f32) {
+    let side_w = (band.w * 0.2).max(2.0 * radius);
+    let side = PxRect {
+        w: side_w,
+        h: band.h + radius,
+        ..band
+    };
+    quads.push(ChromeQuad::rounded(side, card.bg_sidebar, radius));
+    let square = PxRect {
+        x: band.x + radius,
+        w: side_w - radius,
+        ..band
+    };
+    quads.push(ChromeQuad::fill(square, card.bg_sidebar));
+    let bar_h = (band.h * 0.08).clamp(3.0 * scale, 5.0 * scale);
+    // Each bar is `(x, at, w, color)`: its left, its center as a fraction down the band, its
+    // width, and its token.
+    let mut bar = |x: f32, at: f32, w: f32, color: Srgb| {
+        let rect = PxRect {
+            x,
+            y: band.y + band.h * at - bar_h * 0.5,
+            w,
+            h: bar_h,
+        };
+        quads.push(ChromeQuad::rounded(rect, color, bar_h * 0.5));
+        x + w + bar_h
+    };
+    let tab_x = band.x + side_w * 0.22;
+    let tab_w = side_w * 0.56;
+    bar(tab_x, 0.3, tab_w, card.accent);
+    bar(tab_x, 0.5, tab_w * 0.8, card.fg_faint);
+    bar(tab_x, 0.7, tab_w * 0.9, card.fg_faint);
+    let pad = 8.0 * scale;
+    let x = band.x + side_w + pad;
+    let room = (band.x + band.w - pad - x).max(0.0);
+    let next = bar(x, 0.22, room * 0.07, card.accent);
+    let next = bar(next, 0.22, room * 0.4, card.fg_primary);
+    // The prompt's cursor.
+    bar(next, 0.22, bar_h * 1.4, card.accent);
+    let next = bar(x, 0.42, room * 0.22, card.diff_hunk);
+    bar(next, 0.42, room * 0.3, card.fg_muted);
+    bar(x, 0.62, room * 0.56, card.diff_add);
+    bar(x, 0.82, room * 0.44, card.diff_del);
+}
+
+/// A row of key hints from `at = (x, y)`: each key in a `bg.surface` keycap (`micro`), then
+/// what it does (`caption`, `fg.muted`).
+fn push_key_hints(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    measure: &mut TextMeasure,
+    hints: &[(&str, &str)],
+    at: (f32, f32),
+    scale: f32,
+    theme: &Theme,
+) {
+    let (left, y) = at;
+    let key_pad = HINT_KEY_PAD * scale;
+    let h = HINT_H * scale;
+    let key_line = measure.line_height(FontRole::Micro);
+    let action_line = measure.line_height(FontRole::Caption);
+    let mut x = left;
+    for (i, (key, action)) in hints.iter().enumerate() {
+        if i > 0 {
+            x += HINT_GAP * scale;
+        }
+        let key_w = measure.width(key, FontRole::Micro, None) + 2.0 * key_pad;
+        let cap = PxRect { x, y, w: key_w, h };
+        quads.push(ChromeQuad::rounded(cap, theme.bg_surface, 4.0 * scale));
+        labels.push(ProseLabel {
+            text: (*key).to_owned(),
+            x: x + key_pad,
+            y: y + (h - key_line) * 0.5,
+            role: FontRole::Micro,
+            color: theme.fg_primary,
+            weight: None,
+            max_w: f32::MAX,
+        });
+        x += key_w + HINT_KEY_GAP * scale;
+        labels.push(ProseLabel {
+            text: (*action).to_owned(),
+            x,
+            y: y + (h - action_line) * 0.5,
+            role: FontRole::Caption,
+            color: theme.fg_muted,
+            weight: None,
+            max_w: f32::MAX,
+        });
+        x += measure.width(action, FontRole::Caption, None);
+    }
+}
+
 /// Push one label vertically centered in a row of `row_h` logical px whose top is physical
-/// `top` (`row_h = 0` places the label's top at `top`).
+/// `top` (`row_h = 0` centers the label on `top`).
 #[allow(clippy::too_many_arguments, reason = "one focused placement helper")]
 pub(crate) fn push_row(
     labels: &mut Vec<ProseLabel>,
@@ -2009,9 +2575,12 @@ fn push_right(
 
 #[cfg(test)]
 mod tests {
-    use super::{target_at, Kind, Settings, Target, CATEGORIES, CLOSE_ICON, HEADER_H, PAD};
+    use super::{
+        card_fill, hover_fill, page_fill, target_at, Kind, Settings, Target, CATEGORIES,
+        CHECK_ICON, CLOSE_ICON, HEADER_H, HINT_H, PAD,
+    };
     use skelly_config::Config;
-    use skelly_render::{PxRect, TextMeasure, Theme, THEMES};
+    use skelly_render::{PxRect, Srgb, TextMeasure, Theme, THEMES, THEME_LABELS};
 
     #[test]
     fn adjusting_theme_writes_the_config_and_returns_its_key() {
@@ -2091,23 +2660,31 @@ mod tests {
     fn build_marks_the_active_category_and_focused_control() {
         let config = Config::default();
         let theme = Theme::resolve("ossein-dark");
-        let mut m = TextMeasure::new(2.0);
+        let mut m = TextMeasure::new(1.0);
         let mut settings = Settings::new();
-        settings.move_selection(2); // third control of Appearance
-        let panel = PxRect {
-            x: 0.0,
-            y: 0.0,
-            w: 1200.0,
-            h: 800.0,
-        };
-        let paint = settings.build(panel, 2.0, &config, &[], &theme, &mut m);
-        // The active category (Appearance) heading + the focused control value draw in accent;
-        // the active-category fill/bar + focused-control fill are among the quads.
+        settings.move_selection(2); // Appearance / Line height
+        let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
+        // The heading names the page over its summary, and the nav pill and the focused row's
+        // pill each wear `accent.subtle` over their surface.
         assert!(paint.labels.iter().any(|l| l.text == "Appearance"));
-        assert!(paint.labels.iter().any(|l| l.color == theme.accent));
-        // >= 3 quads: the active-category subtle fill + accent bar + the focused-control fill.
-        assert!(paint.quads.len() >= 3);
-        assert!(paint.nav_divider_x > panel.x);
+        assert!(paint.labels.iter().any(|l| l.text == CATEGORIES[0].about));
+        assert!(has_fill(&paint, theme.accent_subtle_on(page_fill(&theme))));
+        assert!(has_fill(&paint, theme.accent_subtle_on(card_fill(&theme))));
+        // The active nav icon is accent; the others are muted.
+        let icon = |text: &str| paint.labels.iter().find(|l| l.text == text).unwrap().color;
+        assert_eq!(icon(CATEGORIES[0].icon), theme.accent);
+        assert_eq!(icon(CATEGORIES[1].icon), theme.fg_muted);
+        // Rows show their config key under their label.
+        assert!(paint
+            .labels
+            .iter()
+            .any(|l| l.text == "appearance.line_height"));
+        assert!(paint.nav_divider_x > 0.0);
+    }
+
+    /// Whether `paint` draws a quad filled with `color`.
+    fn has_fill(paint: &super::Paint, color: Srgb) -> bool {
+        paint.quads.iter().any(|q| q.color == color)
     }
 
     fn panel() -> PxRect {
@@ -2132,27 +2709,81 @@ mod tests {
     fn clicks_land_on_the_nav_row_and_widget_that_is_drawn() {
         let config = Config::default();
         let theme = Theme::resolve("ossein-dark");
-        let mut m = TextMeasure::new(2.0);
+        let mut m = TextMeasure::new(1.0);
         let settings = Settings::new();
-        let paint = settings.build(panel(), 2.0, &config, &[], &theme, &mut m);
+        let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
         let t = &paint.targets;
-        for i in 0..CATEGORIES.len() {
+        for i in 0..=CATEGORIES.len() {
             let (x, y) = center_of(t, |t| *t == Target::Category(i));
             assert_eq!(target_at(t, x, y), Some(Target::Category(i)));
         }
         // A widget wins over its row; the row's label side still focuses the row.
         let (x, y) = center_of(t, |t| matches!(t, Target::Toggle(_)));
         assert!(matches!(target_at(t, x, y), Some(Target::Toggle(_))));
-        let (_, y) = center_of(t, |t| *t == Target::Row(0));
-        assert_eq!(target_at(t, 300.0 * 2.0, y), Some(Target::Row(0)));
-        // The theme cycler splits into a back half and a forward half.
-        let (x, y) = center_of(t, |t| matches!(t, Target::Cycle { delta: 1, .. }));
+        let (row, _) = t.iter().find(|(_, t)| *t == Target::Row(1)).unwrap();
+        let label_side = (row.x + 40.0, row.y + row.h * 0.5);
         assert_eq!(
-            target_at(t, x, y),
-            Some(Target::Cycle { index: 0, delta: 1 })
+            target_at(t, label_side.0, label_side.1),
+            Some(Target::Row(1))
         );
+        // Every theme is a card of its own.
+        for option in 0..THEMES.len() {
+            let want = Target::Choose { index: 0, option };
+            let (x, y) = center_of(t, |t| *t == want);
+            assert_eq!(target_at(t, x, y), Some(want));
+        }
         assert_eq!(target_at(t, -10.0, -10.0), None);
         assert!(t.iter().any(|(_, t)| *t == Target::Close));
+    }
+
+    #[test]
+    fn the_theme_grid_shows_every_theme_and_checks_the_one_in_use() {
+        let mut config = Config::default();
+        config.appearance.theme = "gruvbox-light".into();
+        let theme = Theme::resolve("ossein-light");
+        let mut m = TextMeasure::new(1.0);
+        let settings = Settings::new();
+        let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
+        for name in THEME_LABELS {
+            assert!(paint.labels.iter().any(|l| l.text == *name), "{name}");
+        }
+        let chosen = THEMES
+            .iter()
+            .position(|(id, _)| *id == "gruvbox-light")
+            .unwrap();
+        let card = |option: usize| {
+            paint
+                .targets
+                .iter()
+                .find(|(_, t)| *t == Target::Choose { index: 0, option })
+                .map(|(r, _)| *r)
+                .unwrap()
+        };
+        // One check, on the chosen card, in accent.
+        let checks: Vec<_> = paint
+            .labels
+            .iter()
+            .filter(|l| l.text == CHECK_ICON)
+            .collect();
+        assert_eq!(checks.len(), 1);
+        let (check, rect) = (checks[0], card(chosen));
+        assert!(check.x > rect.x && check.x < rect.x + rect.w);
+        assert!(check.y > rect.y && check.y < rect.y + rect.h);
+        assert_eq!(check.color, theme.accent);
+        // Each card previews its own theme: its `bg.base` fills the card behind the preview.
+        for (option, (id, _)) in THEMES.iter().enumerate() {
+            let own = Theme::resolve(id).bg_base.to_srgb();
+            let rect = card(option);
+            assert!(
+                paint.quads.iter().any(|q| q.color == own
+                    && q.rect.x >= rect.x
+                    && q.rect.x + q.rect.w <= rect.x + rect.w + 0.01),
+                "{id} previews its own bg.base"
+            );
+        }
+        // Dark and light variants sit side by side: four to a line here.
+        assert!((card(0).y - card(3).y).abs() < 0.01);
+        assert!(card(4).y > card(3).y);
     }
 
     #[test]
@@ -2167,7 +2798,7 @@ mod tests {
             w: 720.0,
             h: 442.0,
         };
-        let footer_top = short.y + short.h - PAD - m.line_height(skelly_render::FontRole::Caption);
+        let footer_top = short.y + short.h - PAD - HINT_H;
         let rows = |paint: &super::Paint| -> Vec<(PxRect, usize)> {
             paint
                 .targets
@@ -2195,10 +2826,15 @@ mod tests {
         assert!(drawn.iter().all(|(r, _)| r.y + r.h <= footer_top));
         assert!(paint.labels.iter().any(|l| l.text.starts_with('\u{2191}')));
 
-        // A wheel scroll up brings the first row back.
-        settings.scroll_rows(i32::try_from(count).unwrap());
+        // A long wheel scroll up brings the theme grid, the first block, back.
+        settings.scroll_rows(100);
         let paint = settings.build(short, 1.0, &config, &[], &theme, &mut m);
-        assert_eq!(rows(&paint).first().map(|(_, i)| *i), Some(0));
+        assert_eq!(paint.rows_first, 0);
+        assert!(paint.targets.iter().any(|(_, t)| *t
+            == Target::Choose {
+                index: 0,
+                option: 0
+            }));
     }
 
     #[test]
@@ -2234,26 +2870,28 @@ mod tests {
     }
 
     #[test]
-    fn segment_cycle_and_slider_clicks_write_their_one_key() {
+    fn choice_and_slider_clicks_write_their_one_key() {
         let mut config = Config::default();
         let mut settings = Settings::new();
-        // Cursor style is a segmented choice (control 3 of Appearance).
+        // Cursor style is a segmented choice (control 5 of Appearance).
         assert_eq!(
-            settings.choose(&mut config, 3, 2),
+            settings.choose(&mut config, 5, 2),
             Some("appearance.cursor")
         );
         assert_eq!(
             config.appearance.cursor,
             skelly_config::CursorStyle::Underline
         );
-        assert_eq!(settings.selected_index(), 3);
-        // The theme cycler wraps backwards from the first option.
-        assert_eq!(settings.step(&mut config, 0, -1), Some("appearance.theme"));
-        assert_eq!(config.appearance.theme, "kanagawa-light");
-        assert_eq!(settings.step(&mut config, 0, 1), Some("appearance.theme"));
-        assert_eq!(config.appearance.theme, "ossein-dark");
-        assert_eq!(settings.step(&mut config, 0, 1), Some("appearance.theme"));
-        assert_eq!(config.appearance.theme, "ossein-light");
+        assert_eq!(settings.selected_index(), 5);
+        // A theme card picks its theme; an out-of-range option clamps to the last.
+        let last = THEMES.len() - 1;
+        assert_eq!(settings.choose(&mut config, 0, 2), Some("appearance.theme"));
+        assert_eq!(config.appearance.theme, THEMES[2].0);
+        assert_eq!(
+            settings.choose(&mut config, 0, 99),
+            Some("appearance.theme")
+        );
+        assert_eq!(config.appearance.theme, THEMES[last].0);
         // Font size slides 8..=32 along the track, snapping to whole steps.
         assert_eq!(
             settings.slide(&mut config, 1, 1.0),
@@ -2309,42 +2947,31 @@ mod tests {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(1.0);
         let mut settings = Settings::new();
-        let plain = settings
-            .build(panel(), 1.0, &config, &[], &theme, &mut m)
-            .quads
-            .len();
-        settings.hover = Some(Target::Row(0)); // already focused: no extra wash
-        assert_eq!(
-            settings
-                .build(panel(), 1.0, &config, &[], &theme, &mut m)
-                .quads
-                .len(),
-            plain
-        );
-        settings.hover = Some(Target::Toggle(4));
-        assert_eq!(
-            settings
-                .build(panel(), 1.0, &config, &[], &theme, &mut m)
-                .quads
-                .len(),
-            plain + 1
-        );
-        settings.hover = Some(Target::Category(2));
-        assert_eq!(
-            settings
-                .build(panel(), 1.0, &config, &[], &theme, &mut m)
-                .quads
-                .len(),
-            plain + 1
-        );
-        settings.hover = Some(Target::Close);
-        assert_eq!(
-            settings
-                .build(panel(), 1.0, &config, &[], &theme, &mut m)
-                .quads
-                .len(),
-            plain + 1
-        );
+        settings.move_selection(1); // Font size
+        let row_wash = hover_fill(&theme, card_fill(&theme));
+        let page_wash = hover_fill(&theme, page_fill(&theme));
+        let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
+        assert!(!has_fill(&paint, row_wash) && !has_fill(&paint, page_wash));
+        settings.hover = Some(Target::Row(1)); // already focused: no wash
+        let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
+        assert!(!has_fill(&paint, row_wash));
+        settings.hover = Some(Target::Toggle(3));
+        let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
+        let washes: Vec<_> = paint.quads.iter().filter(|q| q.color == row_wash).collect();
+        let row = paint
+            .targets
+            .iter()
+            .find(|(_, t)| *t == Target::Row(3))
+            .unwrap()
+            .0;
+        assert_eq!(washes.len(), 1);
+        assert!(washes[0].rect.y > row.y && washes[0].rect.y + washes[0].rect.h < row.y + row.h);
+        for hover in [Target::Category(2), Target::Close] {
+            settings.hover = Some(hover);
+            let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
+            let washes = paint.quads.iter().filter(|q| q.color == page_wash).count();
+            assert_eq!(washes, 1, "{hover:?}");
+        }
     }
 
     #[test]
@@ -2454,45 +3081,81 @@ mod tests {
             assert!(paint
                 .labels
                 .iter()
-                .any(|label| label.text.contains("(not set)") && label.color == theme.accent));
+                .any(|label| label.text.contains("(not set)") && label.color == theme.fg_muted));
+            assert!(paint
+                .labels
+                .iter()
+                .any(|label| label.text == "voice.model_path" && label.color == theme.fg_muted));
         }
     }
 
     #[test]
-    #[ignore = "manual GPU capture: writes /tmp/skelly-{voice,speech}-settings-<theme>.png"]
-    fn capture_voice_settings() {
-        for category in ["Voice", "Speech"] {
-            for theme_name in ["ossein-dark", "ossein-light"] {
+    #[ignore = "manual GPU capture: writes /tmp/skelly-settings-<page>-<theme>.png"]
+    fn capture_settings_pages() {
+        let entries = vec![
+            crate::workspace::Entry {
+                name: "Personal".into(),
+                icon: crate::workspace::ICONS[0],
+                tabs: 3,
+                active: true,
+                groups: vec![crate::workspace::GroupEntry {
+                    name: "Review".into(),
+                    tabs: 2,
+                }],
+            },
+            crate::workspace::Entry {
+                name: "Work".into(),
+                icon: crate::workspace::ICONS[9],
+                tabs: 1,
+                active: false,
+                groups: Vec::new(),
+            },
+        ];
+        for theme_name in ["ossein-dark", "ossein-light"] {
+            for page in 0..=CATEGORIES.len() {
                 let mut settings = Settings::new();
-                settings.category = CATEGORIES.iter().position(|c| c.label == category).unwrap();
-                settings.selected = 2;
+                settings.category = page;
+                // Appearance opens on its theme grid; the other pages focus their second row.
+                settings.selected = usize::from(page != 0);
                 let mut config = Config::default();
                 config.voice.enabled = true;
                 config.voice.model_path = "~/Models/whisper/ggml-base.en.bin".into();
                 config.appearance.theme = theme_name.into();
                 let theme = Theme::resolve(theme_name);
-                let mut measure = TextMeasure::new(1.0);
+                let (w, h, scale) = (1100_u16, 760_u16, 1.0_f32);
+                let mut measure = TextMeasure::new(scale);
                 let panel = PxRect {
                     x: 0.0,
                     y: 0.0,
-                    w: 1000.0,
-                    h: 680.0,
+                    w: f32::from(w),
+                    h: f32::from(h),
                 };
-                let paint = settings.build(panel, 1.0, &config, &[], &theme, &mut measure);
+                let paint = settings.build(panel, scale, &config, &entries, &theme, &mut measure);
                 let view = skelly_render::CaptureSettings {
                     panel,
                     nav_divider_x: paint.nav_divider_x,
                     quads: paint.quads,
                     labels: paint.labels,
                 };
-                let rgba =
-                    skelly_render::capture_settings_rgba(&config.appearance, 1000, 680, 1.0, &view);
-                let file = std::fs::File::create(format!(
-                    "/tmp/skelly-{}-settings-{theme_name}.png",
-                    category.to_ascii_lowercase()
-                ))
-                .unwrap();
-                let mut encoder = png::Encoder::new(std::io::BufWriter::new(file), 1000, 680);
+                let rgba = skelly_render::capture_settings_rgba(
+                    &config.appearance,
+                    u32::from(w),
+                    u32::from(h),
+                    f64::from(scale),
+                    &view,
+                );
+                let name = super::nav_entries()
+                    .nth(page)
+                    .map_or("page", |(_, label)| label)
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("page")
+                    .to_ascii_lowercase();
+                let file =
+                    std::fs::File::create(format!("/tmp/skelly-settings-{name}-{theme_name}.png"))
+                        .unwrap();
+                let mut encoder =
+                    png::Encoder::new(std::io::BufWriter::new(file), u32::from(w), u32::from(h));
                 encoder.set_color(png::ColorType::Rgba);
                 encoder.set_depth(png::BitDepth::Eight);
                 encoder

@@ -337,7 +337,7 @@ pub struct CaptureSettings {
     pub panel: PxRect,
     /// The x of the nav/content divider (physical px).
     pub nav_divider_x: f32,
-    /// The content quads over the frame (active-category + focused-control highlights).
+    /// The quads over the frame: nav pills, section cards, row washes and widgets.
     pub quads: Vec<ChromeQuad>,
     /// The positioned proportional text labels.
     pub labels: Vec<ProseLabel>,
