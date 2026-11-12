@@ -7,7 +7,7 @@
 //! in the branch review, against where the branch left its base branch, so committed work
 //! stays in it. Each file is under a header that folds it, stages it, and marks it viewed;
 //! comment threads sit under the lines they are about; and a composer opens under a line from
-//! its `+`. The agent reads the threads through `skelly review` and answers them there, and the
+//! its `+`, or under a run of lines picked by dragging across them. The agent reads the threads through `skelly review` and answers them there, and the
 //! dock shows the answers as they land. Staging by file or hunk and the commit box stay, the
 //! commit box at the foot.
 //!
@@ -17,6 +17,7 @@
 //! binary owns the git and review-store calls, routing keys and clicks, and the viewport inset.
 
 use std::collections::HashMap;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 
 use skelly_render::{ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme};
@@ -253,6 +254,34 @@ pub(crate) enum Compose {
     Reply(u64),
 }
 
+/// Diff lines picked for one comment - by dragging across them, or with `⇧V` and the arrows:
+/// a run of lines in one hunk of one file, from the line the pick began on to the one it
+/// reaches now (either way round).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Pick {
+    path: String,
+    from: (Side, u32),
+    to: (Side, u32),
+    /// What a pointer pick began on, while the button is down; `None` for a keyboard pick.
+    grab: Option<Grab>,
+}
+
+/// What a pointer pick of lines began on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Grab {
+    /// A line's row: a pick of more than one line opens the composer when it is let go.
+    Row,
+    /// A line's `+`: the composer opens when it is let go, on one line or more.
+    Plus,
+}
+
+/// Diff lines a build marks as commented on: a run of lines in one hunk of a file.
+struct Mark {
+    path: String,
+    hunk: usize,
+    lines: RangeInclusive<usize>,
+}
+
 /// The open comment composer.
 struct Composer {
     target: Compose,
@@ -301,6 +330,8 @@ pub(crate) struct GitDock {
     focus: Focus,
     /// The comment composer, while one is open.
     composer: Option<Composer>,
+    /// The lines being picked for a comment, while they are.
+    pick: Option<Pick>,
     /// The target under the pointer.
     hover: Option<Target>,
     /// The hit targets of the last build, back to front.
@@ -332,6 +363,7 @@ impl GitDock {
             reveal: None,
             focus: Focus::List,
             composer: None,
+            pick: None,
             hover: None,
             targets: Vec::new(),
             message: String::new(),
@@ -351,6 +383,7 @@ impl GitDock {
     pub(crate) fn close(&mut self) {
         self.open = false;
         self.hover = None;
+        self.pick = None;
         if matches!(self.focus, Focus::Composer | Focus::Base) {
             self.focus = Focus::List;
         }
@@ -367,6 +400,7 @@ impl GitDock {
         self.anchors.clear();
         self.reveal = None;
         self.composer = None;
+        self.pick = None;
         self.focus = Focus::List;
         self.message.clear();
         self.last_commit = None;
@@ -480,6 +514,14 @@ impl GitDock {
         self.error = None;
         self.data = reading;
         self.reanchor = true;
+        // A pick whose lines are no longer one run of a hunk has nothing left to comment on.
+        if self
+            .pick
+            .as_ref()
+            .is_some_and(|pick| self.pick_lines(pick).is_none())
+        {
+            self.pick = None;
+        }
     }
 
     /// Surface a git error in place of the review.
@@ -613,8 +655,9 @@ impl GitDock {
         self.cursor.as_ref()
     }
 
-    /// Put the keyboard cursor on `spot` and scroll it into view.
+    /// Put the keyboard cursor on `spot` and scroll it into view, dropping any pick of lines.
     pub(crate) fn set_cursor(&mut self, spot: Spot) {
+        self.pick = None;
         self.cursor = Some(spot);
         self.reveal = Some(Reveal::Cursor);
     }
@@ -643,6 +686,10 @@ impl GitDock {
 
     /// Move the cursor `delta` focusable rows, clamped; from no cursor, onto the first.
     pub(crate) fn move_cursor(&mut self, delta: i32) {
+        if self.pick.is_some() {
+            self.stretch_pick(delta);
+            return;
+        }
         let spots = self.spots();
         if spots.is_empty() {
             return;
@@ -717,37 +764,200 @@ impl GitDock {
         self.scroll_rows(delta.saturating_mul(page));
     }
 
-    /// Open the composer on the diff line at `spot`, keeping any text already written: there is
-    /// one composer, and a draft moves with it rather than being lost. `false` when `spot` is
-    /// not a line.
+    /// Open the composer on the lines picked, or else on the diff line at `spot`, keeping any
+    /// text already written: there is one composer, and a draft moves with it rather than being
+    /// lost. `false` when `spot` is not a line.
     pub(crate) fn start_comment(&mut self, spot: &Spot) -> bool {
         let Spot::Line { path, side, line } = spot else {
             return false;
         };
-        let Some(text) = self.change(path).and_then(|c| {
-            c.diff
-                .hunks
-                .iter()
-                .flat_map(|h| &h.lines)
-                .find(|l| line_spot(l) == Some((*side, *line)))
-                .map(|l| l.text.clone())
-        }) else {
+        let pick = self.pick.take().unwrap_or_else(|| Pick {
+            path: path.clone(),
+            from: (*side, *line),
+            to: (*side, *line),
+            grab: None,
+        });
+        let Some(anchor) = self.pick_anchor(&pick) else {
             return false;
         };
-        let anchor = Anchor {
-            path: path.clone(),
-            side: *side,
-            line: *line,
-            line_end: *line,
-            text,
+        self.compose(Compose::Comment(anchor));
+        self.cursor = Some(Spot::Line {
+            path: pick.path,
+            side: pick.to.0,
+            line: pick.to.1,
+        });
+        true
+    }
+
+    /// The anchor of a comment on `pick`'s lines: on the new side when any of them is on it -
+    /// the removed lines among them are context for the agent, which edits the file as it is -
+    /// else on the old side, in the commit the review is against.
+    fn pick_anchor(&self, pick: &Pick) -> Option<Anchor> {
+        let (change, hunk, lo, hi) = self.pick_lines(pick)?;
+        let lines = change.diff.hunks.get(hunk)?.lines.get(lo..=hi)?;
+        let new: Vec<(u32, &str)> = lines
+            .iter()
+            .filter(|l| l.kind != LineKind::Del)
+            .filter_map(|l| Some((l.new_no?, l.text.as_str())))
+            .collect();
+        let (side, numbered) = if new.is_empty() {
+            let old = lines
+                .iter()
+                .filter_map(|l| Some((l.old_no?, l.text.as_str())))
+                .collect();
+            (Side::Old, old)
+        } else {
+            (Side::New, new)
+        };
+        let &(line, text) = numbered.first()?;
+        let &(line_end, _) = numbered.last()?;
+        Some(Anchor {
+            path: pick.path.clone(),
+            side,
+            line,
+            line_end,
+            text: text.to_owned(),
             base: match side {
                 Side::Old => self.data.base.commit().map(str::to_owned),
                 Side::New => None,
             },
+        })
+    }
+
+    /// `pick`'s change, its hunk, and its first and last line in the hunk; `None` when its
+    /// ends are not both lines of one hunk.
+    fn pick_lines(&self, pick: &Pick) -> Option<(&FileChange, usize, usize, usize)> {
+        let change = self.change(&pick.path)?;
+        let (hunk, a) = line_index(change, pick.from)?;
+        let (to_hunk, b) = line_index(change, pick.to)?;
+        (hunk == to_hunk).then_some((change, hunk, a.min(b), a.max(b)))
+    }
+
+    /// How many lines are picked, while some are.
+    pub(crate) fn picked(&self) -> Option<usize> {
+        let (_, _, lo, hi) = self.pick_lines(self.pick.as_ref()?)?;
+        Some(hi - lo + 1)
+    }
+
+    /// Start picking lines at the cursor's line (`⇧V`), or drop the pick there is. Nothing
+    /// happens when the cursor is on no line or the review cannot take comments.
+    pub(crate) fn toggle_pick(&mut self) {
+        if self.pick.take().is_some() {
+            return;
+        }
+        if let Some(Spot::Line { path, side, line }) = &self.cursor {
+            if self.can_comment() {
+                self.pick = Some(Pick {
+                    path: path.clone(),
+                    from: (*side, *line),
+                    to: (*side, *line),
+                    grab: None,
+                });
+            }
+        }
+    }
+
+    /// Drop the pick of lines; `false` when there was none.
+    pub(crate) fn drop_pick(&mut self) -> bool {
+        self.pick.take().is_some()
+    }
+
+    /// Stretch the pick `delta` lines, staying in its hunk; the cursor follows its end.
+    fn stretch_pick(&mut self, delta: i32) {
+        let next = self.pick.as_ref().and_then(|pick| {
+            let change = self.change(&pick.path)?;
+            let (hunk, at) = line_index(change, pick.to)?;
+            let lines = &change.diff.hunks[hunk].lines;
+            line_spot(&lines[step(at, delta, lines.len())])
+        });
+        if let Some(to) = next {
+            self.stretch_to(to);
+        }
+    }
+
+    /// Move the pick's end to the line at `to` (in the pick's file), and the cursor with it.
+    fn stretch_to(&mut self, to: (Side, u32)) -> bool {
+        let Some(pick) = self.pick.as_mut() else {
+            return false;
         };
-        self.compose(Compose::Comment(anchor));
-        self.cursor = Some(spot.clone());
+        if pick.to == to {
+            return false;
+        }
+        pick.to = to;
+        self.cursor = Some(Spot::Line {
+            path: pick.path.clone(),
+            side: to.0,
+            line: to.1,
+        });
+        self.reveal = Some(Reveal::Cursor);
         true
+    }
+
+    /// A press on the diff line at `spot` - its row, or its `+` - puts the cursor there and,
+    /// when the review takes comments, starts a pointer pick of lines from it.
+    pub(crate) fn grab_line(&mut self, spot: &Spot, grab: Grab) {
+        self.set_cursor(spot.clone());
+        if let Spot::Line { path, side, line } = spot {
+            if self.can_comment() {
+                self.pick = Some(Pick {
+                    path: path.clone(),
+                    from: (*side, *line),
+                    to: (*side, *line),
+                    grab: Some(grab),
+                });
+            }
+        }
+    }
+
+    /// Whether a pointer pick is live: the button is down after a press on a line.
+    pub(crate) fn grabbing(&self) -> bool {
+        self.pick.as_ref().is_some_and(|pick| pick.grab.is_some())
+    }
+
+    /// Stretch the pointer pick to the line of its hunk nearest the pointer's `py`: the line under
+    /// it, else the hunk's first or last line on screen. `true` when the pick changed (repaint).
+    pub(crate) fn drag_to(&mut self, py: f32) -> bool {
+        let Some(pick) = self.pick.as_ref().filter(|pick| pick.grab.is_some()) else {
+            return false;
+        };
+        let Some(change) = self.change(&pick.path) else {
+            return false;
+        };
+        let hunk = line_index(change, pick.from).map(|(hunk, _)| hunk);
+        // The hunk's rows on screen, top to bottom, as the last build laid them out.
+        let rows: Vec<(PxRect, (Side, u32))> = self
+            .targets
+            .iter()
+            .filter_map(|(rect, target)| match target {
+                Target::Row(Spot::Line { path, side, line })
+                    if *path == pick.path
+                        && line_index(change, (*side, *line)).map(|(h, _)| h) == hunk =>
+                {
+                    Some((*rect, (*side, *line)))
+                }
+                _ => None,
+            })
+            .collect();
+        let nearest = rows
+            .iter()
+            .find(|(rect, _)| py < rect.y + rect.h)
+            .or(rows.last())
+            .map(|&(_, to)| to);
+        nearest.is_some_and(|to| self.stretch_to(to))
+    }
+
+    /// Let go of the pointer pick: `true` when the composer should open on it - it spans more
+    /// than one line, or began on a line's `+`. A press on a row that did not move ends here,
+    /// as the click that put the cursor there.
+    pub(crate) fn release_pick(&mut self) -> bool {
+        let Some(grab) = self.pick.as_mut().and_then(|pick| pick.grab.take()) else {
+            return false;
+        };
+        if grab == Grab::Plus || self.picked().is_some_and(|n| n > 1) {
+            return true;
+        }
+        self.pick = None;
+        false
     }
 
     /// Open the composer for a reply on thread `id`.
@@ -961,11 +1171,12 @@ impl GitDock {
         }
     }
 
-    /// An unfolded file's rows: its hunks and lines with each thread under the line it is
+    /// An unfolded file's rows: its hunks and lines with each thread under the last line it is
     /// on, then the threads that are on no line shown, then the composer if it is here.
     fn push_section(&self, items: &mut Vec<Item>, si: usize, section: &Section) {
         let threads = self.threads();
-        let mut pending: Vec<usize> = (0..threads.len())
+        let change = section.change.map(|i| &self.data.changes[i]);
+        let mut pending: Vec<(usize, Option<(Side, u32)>)> = (0..threads.len())
             .filter(|&t| {
                 threads[t]
                     .anchor
@@ -973,12 +1184,16 @@ impl GitDock {
                     .is_some_and(|a| a.path == section.path)
                     && (section.change.is_some() || threads[t].status == Open::Open)
             })
+            .map(|t| (t, change.and_then(|c| self.thread_end(t, c))))
             .collect();
         let mut composer = self.composer.as_ref().and_then(|c| match &c.target {
-            Compose::Comment(a) if a.path == section.path => Some((a.side, a.line)),
+            Compose::Comment(a) if a.path == section.path => Some(
+                change
+                    .and_then(|c| last_line(c, a.side, (a.line, a.line_end)))
+                    .unwrap_or((a.side, a.line)),
+            ),
             _ => None,
         });
-        let change = section.change.map(|i| &self.data.changes[i]);
         match change {
             Some(change) if change.skipped.is_none() && !change.diff.hunks.is_empty() => {
                 for (hi, hunk) in change.diff.hunks.iter().enumerate() {
@@ -988,8 +1203,8 @@ impl GitDock {
                         let Some(spot) = line_spot(line) else {
                             continue;
                         };
-                        pending.retain(|&t| {
-                            let here = self.thread_spot(t) == Some(spot);
+                        pending.retain(|&(t, end)| {
+                            let here = end == Some(spot);
                             if here {
                                 self.push_thread(items, t, true);
                             }
@@ -1004,7 +1219,7 @@ impl GitDock {
             }
             _ => items.push(Item::Note(si)),
         }
-        for t in pending {
+        for (t, _) in pending {
             self.push_thread(items, t, false);
         }
         if composer.is_some() {
@@ -1012,13 +1227,83 @@ impl GitDock {
         }
     }
 
-    /// The side and line thread `index` is on now, when it is on one.
-    fn thread_spot(&self, index: usize) -> Option<(Side, u32)> {
+    /// The side and the first and last line thread `index` is on now, when it is on lines.
+    fn thread_lines(&self, index: usize) -> Option<(Side, u32, u32)> {
         let anchor = self.threads()[index].anchor.as_ref()?;
         match self.location(index) {
-            Location::At(line) => Some((anchor.side, line)),
+            Location::At(line) => {
+                let end = line.saturating_add(anchor.line_end.saturating_sub(anchor.line));
+                Some((anchor.side, line, end))
+            }
             Location::Whole | Location::Outdated => None,
         }
+    }
+
+    /// The last of `change`'s lines thread `index` is on, which it sits under.
+    fn thread_end(&self, index: usize, change: &FileChange) -> Option<(Side, u32)> {
+        let (side, start, end) = self.thread_lines(index)?;
+        last_line(change, side, (start, end))
+    }
+
+    /// The diff lines to mark as commented on: the pick, the lines the composer is on, and the
+    /// lines of the thread under the cursor or the pointer.
+    fn marks(&self) -> Vec<Mark> {
+        let mut marks = Vec::new();
+        if let Some((pick, (_, hunk, lo, hi))) = self
+            .pick
+            .as_ref()
+            .and_then(|pick| Some((pick, self.pick_lines(pick)?)))
+        {
+            marks.push(Mark {
+                path: pick.path.clone(),
+                hunk,
+                lines: lo..=hi,
+            });
+        }
+        let mut ranges = Vec::new();
+        if let Some(Compose::Comment(a)) = self.composer.as_ref().map(|c| &c.target) {
+            ranges.push((a.path.as_str(), a.side, a.line, a.line_end));
+        }
+        let hovered = match &self.hover {
+            Some(
+                Target::Row(Spot::Thread(id))
+                | Target::Reply(id)
+                | Target::Resolve(id)
+                | Target::Reopen(id)
+                | Target::Delete(id),
+            ) => Some(*id),
+            _ => None,
+        };
+        let cursor = match &self.cursor {
+            Some(Spot::Thread(id)) => Some(*id),
+            _ => None,
+        };
+        let threads = self.threads();
+        for id in [hovered, cursor].into_iter().flatten() {
+            let Some(t) = threads.iter().position(|t| t.id == id) else {
+                continue;
+            };
+            if let (Some(a), Some((side, start, end))) =
+                (threads[t].anchor.as_ref(), self.thread_lines(t))
+            {
+                ranges.push((a.path.as_str(), side, start, end));
+            }
+        }
+        for (path, side, start, end) in ranges {
+            let Some(change) = self.change(path) else {
+                continue;
+            };
+            marks.extend(
+                line_runs(change, side, (start, end))
+                    .into_iter()
+                    .map(|(hunk, lines)| Mark {
+                        path: path.to_owned(),
+                        hunk,
+                        lines,
+                    }),
+            );
+        }
+        marks
     }
 
     /// The focusable rows, top to bottom.
@@ -1066,12 +1351,14 @@ impl GitDock {
         theme: &Theme,
         measure: &mut TextMeasure,
     ) -> Paint {
+        let marks = self.marks();
         let ctx = GCtx {
             panel,
             cx: panel.x + PAD_X * scale,
             cr: panel.x + panel.w - PAD_X * scale,
             scale,
             theme,
+            marks: &marks,
         };
         let mut out = Out::default();
         let outline = self.outline();
@@ -1499,7 +1786,18 @@ impl GitDock {
             .iter()
             .filter(|t| t.status == Open::Open)
             .count();
-        let (text, role, color) = if let Some(problem) = &self.data.review_problem {
+        let (text, role, color) = if let Some(picked) = self.picked() {
+            let what = if picked == 1 {
+                "1 line".to_owned()
+            } else {
+                format!("{picked} lines")
+            };
+            (
+                format!("{what}  c comment  esc cancel"),
+                FontRole::Caption,
+                theme.accent,
+            )
+        } else if let Some(problem) = &self.data.review_problem {
             (
                 format!("comments unavailable: {problem}"),
                 FontRole::Caption,
@@ -1743,7 +2041,11 @@ impl GitDock {
             Item::Line(si, hi, li) => {
                 if let Some(line) = self.diff_line(outline, si, hi, li) {
                     let path = &outline.sections[si].path;
-                    self.paint_line(out, ctx, measure, path, line, y);
+                    let marked = ctx
+                        .marks
+                        .iter()
+                        .any(|m| m.path == *path && m.hunk == hi && m.lines.contains(&li));
+                    self.paint_line(out, ctx, measure, path, (line, marked), y);
                 }
             }
             Item::Thread(t, attached) => {
@@ -2165,15 +2467,16 @@ impl GitDock {
         }
     }
 
-    /// One diff line: its add/del background, the `+` comment button when hovered or under
-    /// the cursor, the right-aligned gutter number, and the code.
+    /// One diff line: its add/del background (the accent's while it is `marked` as commented
+    /// on), the `+` comment button when hovered or under the cursor, the
+    /// right-aligned gutter number, and the code.
     fn paint_line(
         &self,
         out: &mut Out,
         ctx: &GCtx,
         measure: &mut TextMeasure,
         path: &str,
-        line: &DiffLine,
+        (line, marked): (&DiffLine, bool),
         y: f32,
     ) {
         let (scale, theme) = (ctx.scale, ctx.theme);
@@ -2184,18 +2487,12 @@ impl GitDock {
             w: ctx.panel.w,
             h,
         };
-        // Diff-row backgrounds pre-composite their translucent hue over the dock's bg.base
-        // backing in sRGB space (the guide's CSS weight), not the brighter linear-space blend.
-        let base = theme.bg_base.to_srgb();
-        let (fg, sign, bg) = match line.kind {
-            LineKind::Add => (theme.diff_add, '+', Some(theme.diff_add)),
-            LineKind::Del => (theme.diff_del, '-', Some(theme.diff_del)),
-            LineKind::Context => (theme.fg_secondary, ' ', None),
+        let (fg, sign) = match line.kind {
+            LineKind::Add => (theme.diff_add, '+'),
+            LineKind::Del => (theme.diff_del, '-'),
+            LineKind::Context => (theme.fg_secondary, ' '),
         };
-        if let Some(bg) = bg {
-            out.quads
-                .push(ChromeQuad::fill(full, bg.over(base, DIFF_BG_ALPHA)));
-        }
+        push_line_wash(out, ctx, full, line.kind, marked);
         let spot = line_spot(line).map(|(side, number)| Spot::Line {
             path: path.to_owned(),
             side,
@@ -2424,15 +2721,11 @@ impl GitDock {
                     Location::At(line) => line,
                     Location::Whole | Location::Outdated => a.line,
                 };
-                let side = if a.side == Side::Old {
-                    "old line"
-                } else {
-                    "line"
-                };
+                let lines = lines_label(a.side, line, a.line_end.saturating_sub(a.line));
                 if attached {
-                    format!("{side} {line}")
+                    lines
                 } else {
-                    format!("{side} {line}, outside the diff")
+                    format!("{lines}, outside the diff")
                 }
             }
         };
@@ -2491,10 +2784,10 @@ impl GitDock {
         match part {
             Part::Head => {
                 let head = match &composer.target {
-                    Compose::Comment(a) if a.side == Side::Old => {
-                        format!("Comment on old line {}", a.line)
-                    }
-                    Compose::Comment(a) => format!("Comment on line {}", a.line),
+                    Compose::Comment(a) => format!(
+                        "Comment on {}",
+                        lines_label(a.side, a.line, a.line_end.saturating_sub(a.line))
+                    ),
                     Compose::Reply(id) => format!("Reply to #{id}"),
                 };
                 push_row(
@@ -2903,13 +3196,15 @@ struct Out {
     targets: Vec<(PxRect, Target)>,
 }
 
-/// Shared geometry for the dock builders: the panel, the content left/right x, scale, theme.
+/// Shared geometry for the dock builders: the panel, the content left/right x, scale, theme,
+/// and the diff lines marked as commented on.
 struct GCtx<'a> {
     panel: PxRect,
     cx: f32,
     cr: f32,
     scale: f32,
     theme: &'a Theme,
+    marks: &'a [Mark],
 }
 
 /// One file's part of the scroll.
@@ -3069,6 +3364,61 @@ fn step(at: usize, delta: i32, len: usize) -> usize {
     step_unclamped(at, delta).min(len.saturating_sub(1))
 }
 
+/// Where a comment is, as a thread or the composer names it: `line 19`, `lines 19-21`, or
+/// `old line 19` - `more` lines past `line`.
+fn lines_label(side: Side, line: u32, more: u32) -> String {
+    let old = if side == Side::Old { "old " } else { "" };
+    if more == 0 {
+        format!("{old}line {line}")
+    } else {
+        format!("{old}lines {line}-{}", line.saturating_add(more))
+    }
+}
+
+/// The hunk and the index in it of `change`'s line at `spot`.
+fn line_index(change: &FileChange, spot: (Side, u32)) -> Option<(usize, usize)> {
+    change.diff.hunks.iter().enumerate().find_map(|(hunk, h)| {
+        let at = h.lines.iter().position(|l| line_spot(l) == Some(spot))?;
+        Some((hunk, at))
+    })
+}
+
+/// The last of `change`'s lines on `side` numbered `start..=end`: where a comment on those lines
+/// sits (under the last line it is about, as on GitHub).
+fn last_line(change: &FileChange, side: Side, (start, end): (u32, u32)) -> Option<(Side, u32)> {
+    change
+        .diff
+        .hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .rev()
+        .filter_map(line_spot)
+        .find(|&(s, n)| s == side && (start..=end).contains(&n))
+}
+
+/// The runs of `change`'s lines, one per hunk, from its first to its last line on `side` numbered
+/// `start..=end` - with the lines of the other side between them, which a comment on the new side
+/// takes as context.
+fn line_runs(
+    change: &FileChange,
+    side: Side,
+    (start, end): (u32, u32),
+) -> Vec<(usize, RangeInclusive<usize>)> {
+    let within =
+        |l: &DiffLine| line_spot(l).is_some_and(|(s, n)| s == side && (start..=end).contains(&n));
+    change
+        .diff
+        .hunks
+        .iter()
+        .enumerate()
+        .filter_map(|(hunk, h)| {
+            let first = h.lines.iter().position(within)?;
+            let last = h.lines.iter().rposition(within)?;
+            Some((hunk, first..=last))
+        })
+        .collect()
+}
+
 /// `at` moved by `delta`, floored at zero.
 fn step_unclamped(at: usize, delta: i32) -> usize {
     let magnitude = usize::try_from(delta.unsigned_abs()).unwrap_or(usize::MAX);
@@ -3136,6 +3486,21 @@ fn push_card(out: &mut Out, ctx: &GCtx, card: Card, fill: Srgb, bar: Srgb) {
         },
         bar,
     ));
+}
+
+/// A diff line's background: its add / del hue pre-composited over the dock's `bg.base` in sRGB
+/// space (the guide's CSS weight), not the brighter linear-space blend - or, while it is
+/// `marked` as commented on, one accent band, as a selection reads; the signs and the code's
+/// colors still say which lines were added or removed.
+fn push_line_wash(out: &mut Out, ctx: &GCtx, full: PxRect, kind: LineKind, marked: bool) {
+    let (theme, base) = (ctx.theme, ctx.theme.bg_base.to_srgb());
+    let wash = match kind {
+        _ if marked => theme.accent_subtle_on(base),
+        LineKind::Add => theme.diff_add.over(base, DIFF_BG_ALPHA),
+        LineKind::Del => theme.diff_del.over(base, DIFF_BG_ALPHA),
+        LineKind::Context => return,
+    };
+    out.quads.push(ChromeQuad::fill(full, wash));
 }
 
 /// The keyboard cursor's accent bar down the dock's left edge.

@@ -11,7 +11,8 @@
 //! committed on a branch - `branch` (the branch review) or `committed` (the uncommitted one).
 //! With the branch stacked on a parent branch: `stacked` (the review against the parent chosen
 //! for it), `missing` (a chosen parent that is gone), `picker` (the base drop-down open over the
-//! dock) or `picker-filter` (the drop-down filtered).
+//! dock) or `picker-filter` (the drop-down filtered). `range` puts the first thread on two
+//! lines, with the cursor on it, and `range-composer` picks lines and opens the composer on them.
 //! Run: `cargo run -p skelly --example git_dock_capture -- git-dock.png [theme] [state]`.
 #![allow(
     clippy::cast_precision_loss,
@@ -200,7 +201,8 @@ fn dock_in(dir: &Path, state: &str) -> GitDock {
             "missing" => Stack::Chosen("feat/pane-moved"),
             _ => Stack::Flat,
         };
-        dock.load(read(dir, committed, scope, stack));
+        let leaf_lines = if state == "range" { 2 } else { 1 };
+        dock.load(read(dir, committed, scope, stack, leaf_lines));
         dock.set_cursor(Spot::Line {
             path: "src/pane/tree.rs".to_owned(),
             side: Side::New,
@@ -215,6 +217,23 @@ fn dock_in(dir: &Path, state: &str) -> GitDock {
         });
         dock.compose_text(
             "Should closing also clear the zoom? A zoomed pane that closes leaves the camera on nothing.",
+        );
+    }
+    if state == "range" {
+        dock.set_cursor(Spot::Thread(1));
+    }
+    if state == "range-composer" {
+        let close = |line| Spot::Line {
+            path: "src/pane/tree.rs".to_owned(),
+            side: Side::New,
+            line,
+        };
+        dock.set_cursor(close(17));
+        dock.toggle_pick();
+        dock.move_cursor(1);
+        dock.start_comment(&close(18));
+        dock.compose_text(
+            "Focus the previous pane before pruning, so focus never lands on the closed one.",
         );
     }
     if state == "scrolled" {
@@ -267,8 +286,9 @@ fn drop_down(
 
 /// Make a repository in `dir` with a commit and the agent's changes - its edit to the pane tree
 /// `committed` on a branch, or not - review them, and read it in `scope`'s review the way the
-/// binary does, with the branch placed as `stack` says.
-fn read(dir: &Path, committed: bool, scope: Scope, stack: Stack) -> Reading {
+/// binary does, with the branch placed as `stack` says. The first thread is on `leaf_lines`
+/// lines.
+fn read(dir: &Path, committed: bool, scope: Scope, stack: Stack, leaf_lines: u32) -> Reading {
     let root = dir.join("repo");
     std::fs::create_dir_all(root.join("src/pane")).expect("repo dir");
     std::fs::create_dir_all(root.join("src/session")).expect("repo dir");
@@ -323,7 +343,8 @@ fn read(dir: &Path, committed: bool, scope: Scope, stack: Stack) -> Reading {
                 text: text.to_owned(),
                 base: None,
             };
-            let leaf = on(Side::New, 11, "        let leaf = self.focused_leaf();");
+            let mut leaf = on(Side::New, 11, "        let leaf = self.focused_leaf();");
+            leaf.line_end = 10 + leaf_lines;
             review.comment(
                 Some(leaf),
                 Author::Human,

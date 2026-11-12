@@ -82,6 +82,23 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-12 - **A review comment can be on a run of lines, picked by dragging or with `⇧V`.**
+  User request: click and drag across diff rows to comment on several lines at once, as on
+  GitHub. A press on a line's row or its `+` starts a pick; dragging stretches it to the line
+  nearest the pointer, staying in the hunk it began in. Letting go opens the composer on the
+  lines when the pick spans more than one, or began on the `+`; a click on a row without a
+  drag only moves the cursor, as before. From the keyboard, `⇧V` starts a pick at the
+  cursor's line (as vim's line-wise visual mode does), `↑/↓` stretch it in its hunk, `c` or
+  `Enter` comment on it, and `Esc` drops it. A comment is on one side, as the review's anchor
+  is: the new side when any picked line is on it (the removed lines among them are context,
+  since the agent edits the file as it is), else the old side. The thread and the composer sit
+  under the last line they are on. The lines picked, the composer's, and those of the thread
+  under the cursor or the pointer show as one `accent.subtle` band. The composer and the
+  thread name the run (`lines 19-21`), and the agent reads `path:19-21`, as it already did for
+  a range written through `skelly review`. A pick is a passing state, not a setting, so it has
+  no config key.
+  _(was: a comment could only be on one line from the dock)_
+
 - 2026-11-03 - **A workspace switch swooshes the sidebar's rows sideways.** User request:
   animate the sidebar when scrolling between workspaces, like a swoosh. On every workspace
   switch (a wheel, a chip click, the `+`, or removing the workspace on screen) the

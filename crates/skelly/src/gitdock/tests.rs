@@ -1,3 +1,4 @@
+use std::ops::RangeInclusive;
 use std::path::Path;
 
 use skelly_session::review::ReviewStore;
@@ -444,6 +445,7 @@ fn a_reload_keeps_the_cursor_and_the_rows_on_screen() {
             cr: short.w - 24.0,
             scale: 2.0,
             theme: &Theme::resolve("ossein-dark"),
+            marks: &[],
         },
         &mut TextMeasure::new(2.0),
     );
@@ -526,6 +528,200 @@ fn a_comment_on_a_removed_line_anchors_to_the_old_side() {
         "no such line"
     );
     assert!(!dock.start_comment(&Spot::File(tree.to_owned())));
+}
+
+/// The anchor of the comment `dock`'s composer is writing.
+fn composing_on(dock: &mut GitDock) -> Anchor {
+    dock.compose_text("x");
+    match dock.composed() {
+        Some((Compose::Comment(anchor), _)) => anchor,
+        other => panic!("not writing a comment: {other:?}"),
+    }
+}
+
+/// The lines `dock` marks as commented on: each run's file, hunk and line indices.
+fn marked(dock: &GitDock) -> Vec<(String, usize, RangeInclusive<usize>)> {
+    dock.marks()
+        .into_iter()
+        .map(|m| (m.path, m.hunk, m.lines))
+        .collect()
+}
+
+/// The center height of diff line `side` `line` of the tree, as the last build drew it.
+fn row_y(dock: &GitDock, side: Side, line: u32) -> f32 {
+    let spot = line_spot_at("src/pane/tree.rs", side, line);
+    center(rect_of(dock, &Target::Row(spot))).1
+}
+
+#[test]
+fn dragging_across_lines_comments_on_them_all() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dock = sample_dock(dir.path());
+    let tree = "src/pane/tree.rs";
+    built(&mut dock);
+    // From removed line 19 down to added line 20: the removed line is context for the agent,
+    // which edits the file as it is, so the comment is on new lines 19-20.
+    dock.grab_line(&line_spot_at(tree, Side::Old, 19), Grab::Row);
+    assert!(dock.grabbing());
+    let y = row_y(&dock, Side::New, 20);
+    assert!(dock.drag_to(y));
+    assert!(!dock.drag_to(y), "the same line again changes nothing");
+    assert_eq!(dock.picked(), Some(3));
+    assert_eq!(marked(&dock), vec![(tree.to_owned(), 0, 1..=3)]);
+    assert!(texts(&built(&mut dock)).contains(&"3 lines  c comment  esc cancel"));
+
+    assert!(
+        dock.release_pick(),
+        "letting go of lines opens the composer"
+    );
+    assert!(!dock.grabbing());
+    let cursor = dock.cursor().cloned().unwrap();
+    assert_eq!(
+        cursor,
+        line_spot_at(tree, Side::New, 20),
+        "the cursor is at its end"
+    );
+    assert!(dock.start_comment(&cursor));
+    assert_eq!(dock.picked(), None, "the composer takes the pick");
+    let mut want = anchor(tree, Side::New, 19, "    let leaf = self.focused_leaf();");
+    want.line_end = 20;
+    assert_eq!(composing_on(&mut dock), want);
+    assert_eq!(
+        marked(&dock),
+        vec![(tree.to_owned(), 0, 2..=3)],
+        "the composer marks the lines it is on"
+    );
+    assert!(texts(&built(&mut dock)).contains(&"Comment on lines 19-20"));
+    assert_eq!(
+        position(&dock, Item::Composer),
+        position(&dock, Item::Line(0, 0, 3)) + 1,
+        "the composer sits under the last line"
+    );
+}
+
+#[test]
+fn a_drag_stays_in_the_hunk_it_began_in() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dock = sample_dock(dir.path());
+    let tree = "src/pane/tree.rs";
+    built(&mut dock);
+    dock.grab_line(&line_spot_at(tree, Side::New, 20), Grab::Plus);
+    // Down onto the next hunk: the pick stops at its own hunk's last line.
+    assert!(dock.drag_to(row_y(&dock, Side::New, 42)));
+    assert_eq!(dock.cursor(), Some(&line_spot_at(tree, Side::New, 21)));
+    // Up past the top of the dock: its first line.
+    assert!(dock.drag_to(0.0));
+    assert_eq!(dock.cursor(), Some(&line_spot_at(tree, Side::New, 18)));
+    assert_eq!(dock.picked(), Some(4));
+    assert!(dock.release_pick());
+    let cursor = dock.cursor().cloned().unwrap();
+    assert!(dock.start_comment(&cursor));
+    let mut want = anchor(tree, Side::New, 18, "fn split(&mut self, dir: Dir) {");
+    want.line_end = 20;
+    assert_eq!(composing_on(&mut dock), want);
+}
+
+#[test]
+fn a_click_on_a_row_moves_the_cursor_and_one_on_its_plus_comments() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dock = sample_dock(dir.path());
+    let tree = "src/pane/tree.rs";
+    let close = line_spot_at(tree, Side::New, 42);
+    dock.grab_line(&close, Grab::Row);
+    assert!(
+        !dock.release_pick(),
+        "a click on a row only moves the cursor"
+    );
+    assert_eq!(dock.picked(), None);
+    assert_eq!(dock.cursor(), Some(&close));
+
+    dock.grab_line(&close, Grab::Plus);
+    assert!(
+        dock.release_pick(),
+        "a click on its `+` comments on the line"
+    );
+    assert!(dock.start_comment(&close));
+    assert_eq!(
+        composing_on(&mut dock),
+        anchor(tree, Side::New, 42, "    self.focus_previous();")
+    );
+    assert!(texts(&built(&mut dock)).contains(&"Comment on line 42"));
+}
+
+#[test]
+fn shift_v_and_the_arrows_pick_lines_in_one_hunk() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut dock = sample_dock(dir.path());
+    let tree = "src/pane/tree.rs";
+    dock.set_cursor(line_spot_at(tree, Side::New, 19));
+    dock.toggle_pick();
+    assert_eq!(dock.picked(), Some(1));
+    for _ in 0..3 {
+        dock.move_cursor(1);
+    }
+    assert_eq!(
+        dock.cursor(),
+        Some(&line_spot_at(tree, Side::New, 21)),
+        "the pick stops at the end of its hunk"
+    );
+    assert_eq!(dock.picked(), Some(3));
+    dock.move_cursor(-3);
+    assert_eq!(dock.cursor(), Some(&line_spot_at(tree, Side::Old, 19)));
+    assert_eq!(dock.picked(), Some(2));
+    assert!(dock.start_comment(&line_spot_at(tree, Side::Old, 19)));
+    assert_eq!(
+        composing_on(&mut dock),
+        anchor(tree, Side::New, 19, "    let leaf = self.focused_leaf();"),
+        "with an added line in it, the pick is on the new side"
+    );
+    dock.close_composer();
+
+    dock.toggle_pick();
+    assert!(dock.drop_pick(), "`Esc` drops it");
+    assert!(!dock.drop_pick());
+    dock.toggle_pick();
+    dock.move_file(1);
+    assert_eq!(dock.picked(), None, "leaving the line drops it");
+}
+
+#[test]
+fn a_thread_on_lines_sits_under_the_last_and_marks_them_all() {
+    let theme = Theme::resolve("ossein-dark");
+    let dir = tempfile::tempdir().unwrap();
+    let tree = "src/pane/tree.rs";
+    let review = || {
+        review_in(dir.path(), |review| {
+            let mut on = anchor(tree, Side::New, 19, "    let leaf = self.focused_leaf();");
+            on.line_end = 20;
+            review
+                .comment(Some(on), Author::Human, "Fold these into one call.", 0)
+                .unwrap();
+        })
+    };
+    let mut dock = GitDock::new();
+    dock.open();
+    dock.load(reading(sample_changes(), review(), vec![Location::At(19)]));
+    assert_eq!(
+        position(&dock, Item::Thread(0, true)),
+        position(&dock, Item::Line(0, 0, 3)) + 1
+    );
+    assert!(marked(&dock).is_empty());
+    dock.set_cursor(Spot::Thread(1));
+    let paint = built(&mut dock);
+    assert!(texts(&paint).contains(&"lines 19-20"));
+    assert_eq!(marked(&dock), vec![(tree.to_owned(), 0, 2..=3)]);
+    let band = theme.accent_subtle_on(theme.bg_base.to_srgb());
+    let tinted = paint.quads.iter().filter(|q| q.color == band).count();
+    assert_eq!(tinted, 2, "both its lines are marked");
+
+    // The lines moved down two, and the last of them is no longer in the diff: the thread sits
+    // under the last of its lines that is.
+    dock.load(reading(sample_changes(), review(), vec![Location::At(21)]));
+    assert_eq!(
+        position(&dock, Item::Thread(0, true)),
+        position(&dock, Item::Line(0, 0, 4)) + 1
+    );
+    assert!(texts(&built(&mut dock)).contains(&"lines 21-22"));
 }
 
 #[test]

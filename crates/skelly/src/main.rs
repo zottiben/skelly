@@ -60,7 +60,7 @@ use skelly_term::{CellAttrs, CellColor, ExitStatus, KeyboardMode, TermCell, Term
 use basepicker::{BasePicker, Pick};
 use confirm::{CloseTarget, Confirm};
 use contextmenu::{ContextMenu, MenuAction, MenuContext};
-use gitdock::{Compose, GitDock, Spot};
+use gitdock::{Compose, GitDock, Grab, Spot};
 use palette::Palette;
 use settings::Settings;
 use sidebar::Sidebar;
@@ -5362,7 +5362,9 @@ impl App {
 
     /// Keys while the review has focus: `↑/↓` move the cursor a row, `⇧↑/⇧↓` a file, `[`/`]` a
     /// hunk, and `PageUp/PageDown` page; `Enter` folds the cursor's file, or opens the composer
-    /// on its line (a reply on its thread) as `c` does; `v` marks the file viewed, `r` resolves
+    /// on its line (a reply on its thread) as `c` does; `⇧V` starts picking lines from the
+    /// cursor's, `↑/↓` then stretch the pick in its hunk, `c` / `Enter` comment on it, and `Esc`
+    /// drops it; `v` marks the file viewed, `r` resolves
     /// or reopens a thread and `⌫` deletes it; `Space` stages the file, `⌘↵` the hunk, and `a`
     /// everything; `u` undoes the last commit; `b` switches between the uncommitted and the
     /// branch review, and `⇧B` drops down the branches it can be against; `Tab` moves to the
@@ -5376,6 +5378,7 @@ impl App {
                     self.toggle_hunk(&path, index);
                 }
             }
+            Key::Named(NamedKey::Escape) if self.git_dock.drop_pick() => {}
             Key::Named(NamedKey::Escape) => self.toggle_git_dock(),
             // In the no-repo empty state, `Enter` runs the "Init repo" action.
             Key::Named(NamedKey::Enter) if self.git_dock.no_repo() => self.init_repo(),
@@ -5406,6 +5409,10 @@ impl App {
     fn on_review_letter(&mut self, ch: &str) {
         if ch.eq_ignore_ascii_case("b") && self.modifiers.shift_key() {
             self.open_base_picker();
+            return;
+        }
+        if ch.eq_ignore_ascii_case("v") && self.modifiers.shift_key() {
+            self.git_dock.toggle_pick();
             return;
         }
         let cursor = self.git_dock.cursor().cloned();
@@ -6146,6 +6153,9 @@ impl App {
             self.on_settings_pointer();
             return;
         }
+        if self.drag_git_dock_pick() {
+            return;
+        }
         // Dragging the dock's left edge resizes it.
         if self.dock_resizing {
             self.resize_dock_to_pointer();
@@ -6343,6 +6353,7 @@ impl App {
                 self.selecting = false;
                 self.dock_resizing = false;
                 self.dragging_tab = None;
+                self.release_git_dock_pick();
                 // Persist the settled sidebar width/mode once when a resize drag ends.
                 if self.sidebar_resizing {
                     self.end_sidebar_resize();
@@ -6402,8 +6413,9 @@ impl App {
             Target::Stage(path) => self.toggle_stage(&path),
             Target::Fold(path) => self.git_dock.toggle_fold(&path),
             Target::Viewed(path) => self.toggle_viewed(&path),
+            Target::Row(spot @ Spot::Line { .. }) => self.git_dock.grab_line(&spot, Grab::Row),
             Target::Row(spot) => self.git_dock.set_cursor(spot),
-            Target::Comment(spot) => self.comment_on(&spot),
+            Target::Comment(spot) => self.git_dock.grab_line(&spot, Grab::Plus),
             Target::Hunk { path, hunk } => self.toggle_hunk(&path, hunk),
             Target::Reply(id) => self.comment_on(&Spot::Thread(id)),
             Target::Resolve(id) => {
@@ -6415,6 +6427,28 @@ impl App {
             Target::Send => self.send_comment(),
             Target::Cancel => self.git_dock.close_composer(),
             Target::Message => self.git_dock.focus_commit(),
+        }
+    }
+
+    /// Dragging across the git dock's diff lines picks them for one comment; `true` while a
+    /// pick is live (it takes the pointer).
+    fn drag_git_dock_pick(&mut self) -> bool {
+        if !self.git_dock.grabbing() {
+            return false;
+        }
+        let (_, py) = point_f32(self.pointer);
+        if self.git_dock.drag_to(py) {
+            self.request_redraw();
+        }
+        true
+    }
+
+    /// Letting go of a pick of diff lines opens the composer on them.
+    fn release_git_dock_pick(&mut self) {
+        if self.git_dock.release_pick() {
+            if let Some(spot) = self.git_dock.cursor().cloned() {
+                self.comment_on(&spot);
+            }
         }
     }
 
