@@ -623,7 +623,7 @@ mod tests {
                         tab_titles: &titles,
                         tab_keys: keys,
                         rail: false,
-                        top_inset: crate::TITLE_STRIP,
+                        top_inset: 38.0,
                     };
                     sidebar::build(&view, panel, SCALE, &theme, &mut measure)
                 };

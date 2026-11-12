@@ -414,7 +414,7 @@ mod tests {
             edge,
             footprint,
             top: if footprint < crate::TRAFFIC_LIGHT_WIDTH * SCALE {
-                pad.max(crate::TITLE_STRIP * SCALE)
+                pad.max(38.0 * SCALE)
             } else {
                 pad
             },
@@ -476,7 +476,7 @@ mod tests {
                 tab_titles: &titles,
                 tab_keys: &[],
                 rail,
-                top_inset: crate::TITLE_STRIP,
+                top_inset: 38.0,
             };
             let w = if rail { RAIL } else { FULL };
             let panel = PxRect {
