@@ -243,7 +243,8 @@ pub enum SidebarMode {
 pub struct Tabs {
     /// What a tab is titled by.
     pub title: TabTitle,
-    /// Re-title as the working directory changes, unless manually renamed.
+    /// Re-title as the working directory changes, unless manually renamed. Governs a title by
+    /// directory name only: a branch title always follows the checked-out branch.
     pub follow_cwd: bool,
 }
 
@@ -258,6 +259,9 @@ pub enum TabTitle {
     Command,
     /// A user-set custom name.
     Custom,
+    /// The git branch checked out where the focused pane is; the directory name outside a
+    /// repository or on a detached HEAD.
+    Branch,
 }
 
 /// `[panes]`.
@@ -632,6 +636,24 @@ mod tests {
             Config::from_toml_str(&config.to_toml_string().unwrap()).unwrap(),
             config
         );
+    }
+
+    #[test]
+    fn every_tab_title_source_round_trips() {
+        for (text, source) in [
+            ("custom", TabTitle::Custom),
+            ("branch", TabTitle::Branch),
+            ("cwd", TabTitle::Cwd),
+            ("command", TabTitle::Command),
+        ] {
+            let config = Config::from_toml_str(&format!("[tabs]\ntitle = \"{text}\"\n")).unwrap();
+            assert_eq!(config.tabs.title, source);
+            assert!(config.tabs.follow_cwd, "a missing key defaults");
+            assert_eq!(
+                Config::from_toml_str(&config.to_toml_string().unwrap()).unwrap(),
+                config
+            );
+        }
     }
 
     #[test]

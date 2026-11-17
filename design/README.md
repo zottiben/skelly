@@ -82,6 +82,22 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-17 - **A tab can be titled by its git branch.** User request: name tabs by the
+  current branch or directory instead of a custom name, with four options. `[tabs] title`
+  gains `"branch"` beside the guide's `cwd | command | custom`; the default stays `cwd`.
+  Settings > Tabs shows "Title source" as four segments in the order the user gave: Custom,
+  Branch, Directory (`cwd`), Command. A branch title is the branch checked out where the
+  tab's focused pane is. Outside a repo, or on a detached HEAD, it is the directory name,
+  then the running command, then `Tab N`, as the other sources fall back. A manual `F2` name
+  still wins over every source. The branch comes from the background git poll, never from
+  `git` in a repaint, so a tab holds its title until the poll has read the pane's new cwd and
+  then changes once - never the directory name on the way to the branch. The poll remembers
+  each cwd's repo, and a pane entering a cwd it has not read wakes it at once, so a new tab
+  or a `cd` into another repo shows its branch within about a second; a checkout made
+  outside Skelly shows at the next poll (4s, or 600ms with a dock open). `follow_cwd` governs
+  the directory and command titles only: a branch title always follows the pane.
+  _(was: `[tabs] title` was `cwd | command | custom`)_
+
 - 2026-11-12 - **The right docks slide in and out, and settings fades in and out.** User
   request: add motion elsewhere where it helps, in the spirit of the sidebar's. Opening or
   closing the git diff dock or the session timeline slides it in or out at the window's right

@@ -46,7 +46,7 @@ mod workspace;
 mod zoom;
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -303,6 +303,10 @@ struct Tab {
     /// The cwd-basename tab title captured once, for `[tabs] follow_cwd = false` (title does not
     /// re-title as the pane `cd`s). `None` until first captured; ignored when `follow_cwd` is on.
     frozen_cwd_title: Option<String>,
+    /// Where the focused pane is, as the git poll last read it, for `[tabs] title = "branch"`.
+    /// Kept until the poll reads the pane's new cwd, so the title changes once and never shows the
+    /// directory name on its way to the branch. `None` until the poll first reads it.
+    place: Option<Place>,
     /// Whether this tab is pinned to the sidebar's 3-up pinned grid (design §08 #4). Pinned
     /// tabs show as icon tiles above the tab list instead of in it.
     pinned: bool,
@@ -312,6 +316,15 @@ struct Tab {
     /// The collapsible group this tab belongs to (index into the workspace's `groups`, design
     /// §08 #5), or `None` for an ungrouped top-level tab.
     group: Option<usize>,
+}
+
+/// A pane cwd as the git poll read it: its directory name and the branch checked out there.
+#[derive(Debug, PartialEq, Eq)]
+struct Place {
+    /// The cwd's basename, as the directory tab title shows it.
+    dir: String,
+    /// The checked-out branch, or `None` outside a repo or on a detached HEAD.
+    branch: Option<String>,
 }
 
 /// What an inline sidebar rename edits.
@@ -391,6 +404,7 @@ impl Tab {
             zoom: None,
             pane_cwd: HashMap::new(),
             frozen_cwd_title: None,
+            place: None,
             pinned: false,
             custom_title: None,
             group: None,
@@ -435,7 +449,7 @@ struct RepoTimeline {
     started: bool,
     /// Last-known working-tree `(added, removed)` totals - the status-line dirty projection source.
     dirty: Option<(u32, u32)>,
-    /// Last-known branch - the status-line branch projection source.
+    /// Last-known branch - the status-line branch projection source, and the branch tab title.
     branch: Option<String>,
     /// The newest working-tree snapshot observed for this repo (a tree id in Skelly's own object
     /// store). A change in it is what makes a poll cycle a timeline moment; it is also the restore
@@ -464,6 +478,8 @@ struct PolledStatuses {
     generation: u64,
     /// The statuses, keyed by repo root.
     repos: HashMap<std::path::PathBuf, RepoStatus>,
+    /// Each cwd the cycle read, mapped to its repo root, or `None` outside a repo.
+    roots: HashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
 }
 
 /// The active repo's event log from the per-repo map, or the empty fallback outside a repo. A free
@@ -515,10 +531,13 @@ fn interval_ms(interval: Duration) -> u64 {
 
 /// Sleep out the git poll's current interval in [`GIT_POLL_SLICE`] slices, re-reading it each
 /// slice. Waiting in slices is what lets opening a dock speed the poll up right away instead of
-/// after the idle interval already in flight has elapsed.
-fn poll_wait(interval_ms: &AtomicU64) {
+/// after the idle interval already in flight has elapsed, and lets `wake` end the wait at once.
+fn poll_wait(interval_ms: &AtomicU64, wake: &AtomicBool) {
     let start = Instant::now();
     loop {
+        if wake.swap(false, Ordering::Relaxed) {
+            return;
+        }
         let target = Duration::from_millis(interval_ms.load(Ordering::Relaxed));
         let Some(left) = target.checked_sub(start.elapsed()) else {
             return;
@@ -627,6 +646,9 @@ struct App {
     /// Per-repo session event logs, keyed by repo root. Every open tab's repo gets one (the git
     /// poll records edits into all of them); the dock + rewind scope to [`active_root`](Self::active_root).
     timelines: HashMap<std::path::PathBuf, RepoTimeline>,
+    /// Each pane cwd the git poll has read, mapped to its repo root (`None` outside a repo), so a
+    /// tab finds its branch in [`timelines`](Self::timelines) without running `git` in a repaint.
+    repo_roots: HashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
     /// The active tab's focused-pane repo root (`Repo::discover(active_cwd).root()`), or `None`
     /// outside a repo. The dock renders `timelines[active_root]`; rewind + status project from it.
     active_root: Option<std::path::PathBuf>,
@@ -779,6 +801,9 @@ struct App {
     /// The git-poll thread's current interval in milliseconds. The UI writes it whenever a git
     /// surface opens or closes so the dock reads as a live feed while it is up.
     git_poll_ms: Arc<AtomicU64>,
+    /// Set when a pane enters a cwd the git poll has not read, so the poll reads it now instead
+    /// of after its idle interval.
+    git_poll_wake: Arc<AtomicBool>,
     /// The command palette's open / close animation (design §03 motion), live only while it
     /// plays. While any animation is set the event loop polls + redraws each frame; it clears
     /// itself when done (finalizing the close), returning the loop to its idle `Wait`.
@@ -843,6 +868,7 @@ impl App {
             git_dock: GitDock::new(),
             timeline: TimelineDock::new(),
             timelines: HashMap::new(),
+            repo_roots: HashMap::new(),
             active_root: None,
             empty_timeline: Timeline::new(),
             confirm: None,
@@ -906,6 +932,7 @@ impl App {
             git_generation: Arc::new(AtomicU64::new(0)),
             snapshots,
             git_poll_ms: Arc::new(AtomicU64::new(interval_ms(GIT_POLL_INTERVAL))),
+            git_poll_wake: Arc::new(AtomicBool::new(false)),
             palette_anim: None,
             confirm_anim: None,
             pinching: false,
@@ -1900,6 +1927,9 @@ impl App {
                 self.rescope_active();
             }
         }
+        if cwds.values().any(|dir| !self.repo_roots.contains_key(dir)) {
+            self.git_poll_wake.store(true, Ordering::Relaxed);
+        }
         // Foreground process groups can change without the pane set changing (for example when a
         // shell starts an agent). Refresh after every cwd cycle so the next one follows that job's
         // cwd; once it exits, the next cycle naturally falls back to the shell pid.
@@ -2300,17 +2330,28 @@ impl App {
     }
 
     /// The tab titles per config (design §10.3, `[tabs] title` + `follow_cwd`). Refreshes the
-    /// per-tab job-name cache and captures the frozen-cwd title (for `follow_cwd = false`) first,
-    /// then resolves each title via [`resolved_tab_title`](Self::resolved_tab_title) so the sidebar
-    /// list and the rail tooltip agree.
+    /// per-tab job-name and [`Place`] caches and captures the frozen-cwd title (for
+    /// `follow_cwd = false`) first, then resolves each title via
+    /// [`resolved_tab_title`](Self::resolved_tab_title) so the sidebar list and the rail tooltip
+    /// agree.
     fn tab_titles(&mut self) -> Vec<String> {
         let follow_cwd = self.config.tabs.follow_cwd;
+        let cwds = self.pending_cwds.lock().ok();
         for tab in &mut self.tabs {
             let id = tab.tree.focused();
             let pid = tab.panes.get(&id).and_then(Terminal::foreground_job_pid);
             if pid != tab.job_pid {
                 tab.job_pid = pid;
                 tab.job_name = pid.and_then(process_name);
+            }
+            let place = tab
+                .panes
+                .get(&id)
+                .and_then(Terminal::cwd_pid)
+                .and_then(|pid| cwds.as_ref()?.get(&pid))
+                .and_then(|dir| polled_place(dir, &self.repo_roots, &self.timelines));
+            if place.is_some() {
+                tab.place = place;
             }
             // With `follow_cwd = false`, the cwd title is captured once and never re-titles on a
             // later `cd`; with it on, the live `pane_cwd` is used and this stays cleared.
@@ -2320,16 +2361,18 @@ impl App {
                 tab.frozen_cwd_title = tab.pane_cwd.get(&id).map(|cwd| dir_basename(cwd));
             }
         }
+        drop(cwds);
         (0..self.tabs.len())
             .map(|i| self.resolved_tab_title(i))
             .collect()
     }
 
     /// Resolve tab `i`'s title honoring `[tabs] title` (Hard rule 1). A manual `F2` rename always
-    /// wins; otherwise the configured source is used - `command` the running-command name,
-    /// `cwd` the focused pane's directory basename (frozen when `follow_cwd = false`), `custom`
-    /// only the rename - each falling back to `Tab N` when its source is absent. Shared by the
-    /// sidebar tab list and the rail/pinned tooltip so the two never diverge.
+    /// wins; otherwise the configured source is used (see [`auto_title`]), falling back to `Tab N`
+    /// when no source has a name. A branch title reads its directory name from the git poll's
+    /// [`Place`], so the two change together; the other sources read the live cwd, frozen when
+    /// `follow_cwd = false`. Shared by the sidebar tab list and the rail/pinned tooltip so the two
+    /// never diverge.
     fn resolved_tab_title(&self, i: usize) -> String {
         let Some(tab) = self.tabs.get(i) else {
             return format!("Tab {}", i + 1);
@@ -2337,20 +2380,22 @@ impl App {
         if let Some(custom) = &tab.custom_title {
             return custom.clone();
         }
-        let cwd_title = || {
-            if self.config.tabs.follow_cwd {
-                tab.pane_cwd
-                    .get(&tab.tree.focused())
-                    .map(|c| dir_basename(c))
-            } else {
-                tab.frozen_cwd_title.clone()
-            }
+        let place = tab.place.as_ref();
+        let dir = if self.config.tabs.title == TabTitle::Branch {
+            place.map(|p| p.dir.clone())
+        } else if self.config.tabs.follow_cwd {
+            tab.pane_cwd
+                .get(&tab.tree.focused())
+                .map(|c| dir_basename(c))
+        } else {
+            tab.frozen_cwd_title.clone()
         };
-        match self.config.tabs.title {
-            TabTitle::Command => tab.job_name.clone().or_else(cwd_title),
-            TabTitle::Cwd => cwd_title().or_else(|| tab.job_name.clone()),
-            TabTitle::Custom => None,
-        }
+        auto_title(
+            self.config.tabs.title,
+            place.and_then(|p| p.branch.as_deref()),
+            dir,
+            tab.job_name.as_deref(),
+        )
         .unwrap_or_else(|| format!("Tab {}", i + 1))
     }
 
@@ -2894,12 +2939,13 @@ impl App {
         let status_slot = Arc::clone(&self.pending_status);
         let snapshots = Arc::clone(&self.snapshots);
         let interval_ms = Arc::clone(&self.git_poll_ms);
+        let wake = Arc::clone(&self.git_poll_wake);
         let generation_slot = Arc::clone(&self.git_generation);
         let review_slot = Arc::clone(&self.review_target);
         let record = self.config.session.timeline;
         let proxy = self.proxy.clone();
         std::thread::spawn(move || loop {
-            poll_wait(&interval_ms);
+            poll_wait(&interval_ms, &wake);
             let generation = generation_slot.load(Ordering::Relaxed);
             // The working set: every pane's cwd (covers background tabs). Before the first cwd poll
             // fills the map, fall back to the process cwd so the launch repo is watched from cycle 1.
@@ -2915,8 +2961,13 @@ impl App {
             cwds.extend(review_target.as_ref().map(|(root, _)| root.clone()));
             // Discover + status each distinct repo once (dedup cwds that share a repo root).
             let mut result: HashMap<std::path::PathBuf, RepoStatus> = HashMap::new();
+            let mut roots = HashMap::new();
             for cwd in cwds {
-                let Ok(Some(repo)) = Repo::discover(&cwd) else {
+                let Ok(found) = Repo::discover(&cwd) else {
+                    continue;
+                };
+                roots.insert(cwd, found.as_ref().map(|repo| repo.root().to_path_buf()));
+                let Some(repo) = found else {
                     continue;
                 };
                 let root = repo.root().to_path_buf();
@@ -2943,6 +2994,7 @@ impl App {
                 *guard = PolledStatuses {
                     generation,
                     repos: result,
+                    roots,
                 };
             }
             if proxy.send_event(Wakeup::GitPoll).is_err() {
@@ -2982,6 +3034,10 @@ impl App {
         }
         let statuses = polled.repos;
         let mut changed = false;
+        for (dir, root) in polled.roots {
+            changed |= self.repo_roots.get(&dir) != Some(&root);
+            self.repo_roots.insert(dir, root);
+        }
         let mut dock_reading = None;
         for (
             root,
@@ -3037,7 +3093,7 @@ impl App {
                     changed = true;
                 }
                 if let Some(rt) = self.timelines.get_mut(&root) {
-                    changed |= rt.dirty != totals;
+                    changed |= rt.dirty != totals || rt.branch != branch;
                     rt.dirty = totals;
                     rt.branch = branch;
                     // The edit baseline and the snapshot are one fact - what the codebase looked
@@ -7438,6 +7494,41 @@ fn dir_basename(cwd: &str) -> String {
         .to_owned()
 }
 
+/// A tab's automatic title from `[tabs] title` (design §10.3): `branch` the focused pane's
+/// checked-out branch, `cwd` its directory basename, `command` its running command. An absent
+/// source falls back to the directory, then the command; `custom` has no automatic title, so the
+/// tab stays `Tab N` until it is renamed.
+fn auto_title(
+    source: TabTitle,
+    branch: Option<&str>,
+    dir: Option<String>,
+    job: Option<&str>,
+) -> Option<String> {
+    let job = job.map(str::to_owned);
+    match source {
+        TabTitle::Custom => None,
+        TabTitle::Branch => branch.map(str::to_owned).or(dir).or(job),
+        TabTitle::Cwd => dir.or(job),
+        TabTitle::Command => job.or(dir),
+    }
+}
+
+/// `dir` as the git poll read it, or `None` while the poll has not read `dir` or its repo yet.
+fn polled_place(
+    dir: &std::path::Path,
+    roots: &HashMap<std::path::PathBuf, Option<std::path::PathBuf>>,
+    timelines: &HashMap<std::path::PathBuf, RepoTimeline>,
+) -> Option<Place> {
+    let branch = match roots.get(dir)? {
+        Some(root) => timelines.get(root)?.branch.clone(),
+        None => None,
+    };
+    Some(Place {
+        dir: dir_basename(&home_relative(dir)),
+        branch,
+    })
+}
+
 /// Resolve a terminal cell into a render cell against the active ANSI palette,
 /// folding in the palette-dependent SGR effects: *dim* reduces the foreground
 /// intensity and *reverse video* swaps foreground and background (using the
@@ -8794,21 +8885,22 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        adopt, changed_since, chip_steps, clipboard_action, csi_edit, cursor_key,
+        adopt, auto_title, changed_since, chip_steps, clipboard_action, csi_edit, cursor_key,
         cursor_navigation_shortcut, cycle_index, dim, dirty_stats, edit_text, editor_filetype,
         editor_mode, enter_bytes, index_after_close, interval_ms, kitty_csi, kitty_modifier_code,
         notch_lines, order, overlay_panel_top, overlay_rise_offset, pane_action, pane_dims,
-        panic_message, parse_chord, pointer_cell_in, poll_wait, process_name, resolve_cell,
-        selection_cells, selection_text, shell_escape_path, step_index, super_chord, tab_action,
-        take_group, take_tab, ungroup, wheel_switches_workspace, xterm_modifier_code,
-        ClipboardAction, Duration, Instant, PaneAction, Selection, SuperChord, Tab, TabAction,
-        TabGroup,
+        panic_message, parse_chord, pointer_cell_in, poll_wait, polled_place, process_name,
+        resolve_cell, selection_cells, selection_text, shell_escape_path, step_index, super_chord,
+        tab_action, take_group, take_tab, ungroup, wheel_switches_workspace, xterm_modifier_code,
+        ClipboardAction, Duration, Instant, PaneAction, Place, RepoTimeline, Selection, SuperChord,
+        Tab, TabAction, TabGroup, TabTitle,
     };
     use skelly_pane::{Dir, Rect};
     use skelly_render::{AnsiPalette, Srgb};
     use skelly_session::{ChangedFile, FileStatus, Status};
     use skelly_term::{CellAttrs, CellColor, CursorShape, TermCell};
     use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
     use winit::keyboard::{Key, KeyCode, ModifiersState, NamedKey};
 
     /// A working status with the given `(path, added, removed)` files.
@@ -8833,7 +8925,7 @@ mod tests {
 
     #[test]
     fn shortening_the_poll_interval_cuts_a_wait_already_in_flight() {
-        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
         use std::sync::Arc;
 
         // Opening the diff dock switches the poll to its live cadence. Waiting in slices is what
@@ -8845,10 +8937,34 @@ mod tests {
             slot.store(interval_ms(Duration::from_millis(100)), Ordering::Relaxed);
         });
         let start = Instant::now();
-        poll_wait(&interval);
+        poll_wait(&interval, &AtomicBool::new(false));
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "the wait followed the new cadence, not the 30s one it started on"
+        );
+    }
+
+    #[test]
+    fn a_wake_ends_the_poll_wait_at_once() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        use std::sync::Arc;
+
+        let interval = AtomicU64::new(interval_ms(Duration::from_secs(30)));
+        let wake = Arc::new(AtomicBool::new(false));
+        let slot = Arc::clone(&wake);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            slot.store(true, Ordering::Relaxed);
+        });
+        let start = Instant::now();
+        poll_wait(&interval, &wake);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "the wake cut the wait"
+        );
+        assert!(
+            !wake.load(Ordering::Relaxed),
+            "the wake is taken by the cycle it starts"
         );
     }
 
@@ -9627,6 +9743,81 @@ mod tests {
         // An index past the end is a no-op.
         ungroup(&mut tabs, &mut groups, 5);
         assert_eq!(groups.len(), 2);
+    }
+
+    #[test]
+    fn each_title_source_names_the_tab_and_falls_back_when_it_is_absent() {
+        let dir = || Some("skelly".to_owned());
+        let title = |source, branch, dir: Option<String>, job| auto_title(source, branch, dir, job);
+        assert_eq!(
+            title(TabTitle::Branch, Some("main"), dir(), Some("nvim")).as_deref(),
+            Some("main")
+        );
+        assert_eq!(
+            title(TabTitle::Cwd, Some("main"), dir(), Some("nvim")).as_deref(),
+            Some("skelly")
+        );
+        assert_eq!(
+            title(TabTitle::Command, Some("main"), dir(), Some("nvim")).as_deref(),
+            Some("nvim")
+        );
+        assert_eq!(
+            title(TabTitle::Custom, Some("main"), dir(), Some("nvim")),
+            None
+        );
+        assert_eq!(
+            title(TabTitle::Branch, None, dir(), Some("nvim")).as_deref(),
+            Some("skelly"),
+            "outside a repository, or on a detached HEAD, there is no branch to show"
+        );
+        assert_eq!(
+            title(TabTitle::Branch, None, None, Some("nvim")).as_deref(),
+            Some("nvim")
+        );
+        assert_eq!(title(TabTitle::Branch, None, None, None), None);
+    }
+
+    #[test]
+    fn a_cwd_reads_the_branch_of_the_repository_the_git_poll_found_it_in() {
+        let repo = PathBuf::from("/src/skelly");
+        let roots = HashMap::from([
+            (repo.clone(), Some(repo.clone())),
+            (repo.join("crates"), Some(repo.clone())),
+            (PathBuf::from("/tmp"), None),
+            (
+                PathBuf::from("/src/unread"),
+                Some(PathBuf::from("/src/unread")),
+            ),
+        ]);
+        let timelines = HashMap::from([(
+            repo.clone(),
+            RepoTimeline {
+                branch: Some("main".to_owned()),
+                ..RepoTimeline::default()
+            },
+        )]);
+        let place = |dir: &str| polled_place(Path::new(dir), &roots, &timelines);
+        let place_of = |dir: &str, branch: Option<&str>| {
+            Some(Place {
+                dir: dir.to_owned(),
+                branch: branch.map(str::to_owned),
+            })
+        };
+        assert_eq!(
+            place("/src/skelly/crates"),
+            place_of("crates", Some("main"))
+        );
+        assert_eq!(place("/tmp"), place_of("tmp", None), "outside a repository");
+        assert_eq!(
+            place("/src/elsewhere"),
+            None,
+            "a cwd the poll has not read yet leaves the tab's title as it was"
+        );
+        assert_eq!(
+            place("/src/unread"),
+            None,
+            "a repository whose status was not read yet leaves the tab's title as it was"
+        );
     }
 
     /// Tabs in the given groups, each titled by its position so a test can follow it.

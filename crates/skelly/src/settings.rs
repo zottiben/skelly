@@ -502,16 +502,18 @@ static CATEGORIES: &[Category] = &[
                 section: "Titles",
                 key: "tabs.title",
                 kind: Kind::Choice {
-                    options: &["Directory", "Command", "Custom"],
+                    options: &["Custom", "Branch", "Directory", "Command"],
                     get: |c| match c.tabs.title {
-                        TabTitle::Cwd => 0,
-                        TabTitle::Command => 1,
-                        TabTitle::Custom => 2,
+                        TabTitle::Custom => 0,
+                        TabTitle::Branch => 1,
+                        TabTitle::Cwd => 2,
+                        TabTitle::Command => 3,
                     },
                     set: |c, i| {
                         c.tabs.title = match i {
-                            1 => TabTitle::Command,
-                            2 => TabTitle::Custom,
+                            0 => TabTitle::Custom,
+                            1 => TabTitle::Branch,
+                            3 => TabTitle::Command,
                             _ => TabTitle::Cwd,
                         };
                     },
