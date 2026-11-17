@@ -18,6 +18,11 @@ ignore = [
     # cosmic-text/fontdb for font parsing; no drop-in swap until glyphon/cosmic-text
     # migrate to skrifa. Revisit at the next cosmic-text bump.
     "RUSTSEC-2026-0192",
+    # chrono unmaintained (not a vulnerability). Pulled only by rmcp (`skelly mcp`),
+    # which depends on it unconditionally on every non-wasm target, up to rmcp 3.11.0;
+    # no rmcp release drops it yet. Revisit when modelcontextprotocol/rust-sdk#1469
+    # moves rmcp to jiff/time or makes chrono optional.
+    "RUSTSEC-2026-0543",
 ]
 
 [licenses]
