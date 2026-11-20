@@ -329,6 +329,7 @@ fn theme_card(
         color: card_theme.accent,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
     let sl = m.line_height(FontRole::Caption);
     l.push(ProseLabel {
@@ -343,6 +344,7 @@ fn theme_card(
         },
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
 }
 
@@ -386,6 +388,7 @@ fn hints(
             color: theme.fg_primary,
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
         l.push(ProseLabel {
             text: (*lbl).to_owned(),
@@ -395,6 +398,7 @@ fn hints(
             color: theme.fg_muted,
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
         x += w + gap;
     }
@@ -418,6 +422,7 @@ fn label(
         color: theme.fg_muted,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
 }
 
@@ -439,6 +444,7 @@ fn center(
         color,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
 }
 
@@ -458,6 +464,7 @@ fn push(
         color,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
 }
 

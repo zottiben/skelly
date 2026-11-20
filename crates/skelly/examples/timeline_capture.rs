@@ -298,6 +298,7 @@ fn build_dock(width: u32, height: u32, scale: f32, theme: &Theme) -> CaptureTime
             color: e.title_fg,
             weight: None,
             max_w,
+            shrink: 0.0,
         });
     }
 
@@ -374,6 +375,7 @@ fn t_row(
         color,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
 }
 

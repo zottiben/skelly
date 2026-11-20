@@ -169,6 +169,7 @@ fn exit_message(rect: PxRect, scale: f32, theme: &Theme, m: &mut TextMeasure) ->
             color,
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
         y += m.line_height(role) + gap;
     }

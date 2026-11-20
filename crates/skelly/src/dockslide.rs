@@ -173,6 +173,7 @@ mod tests {
                 color: Srgb { r: 4, g: 5, b: 6 },
                 weight: None,
                 max_w: f32::MAX,
+                shrink: 0.0,
             }],
         }
     }

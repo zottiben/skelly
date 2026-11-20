@@ -48,6 +48,9 @@ pub struct ProseLabel {
     pub weight: Option<u16>,
     /// Maximum line width in physical px - the buffer clips here (no wrap).
     pub max_w: f32,
+    /// How much to shrink the original text by before appending `…` when the line exceeds
+    /// `max_w`. A value of `0.0` means "no truncation" (the default).
+    pub shrink: f32,
 }
 
 /// One label's shaped buffer plus where it draws, what it clips to, and a fingerprint of
@@ -165,16 +168,60 @@ impl ProseLayer {
             let font_px = role.size_px() * scale;
             let line_px = role.line_height_px(scale);
             buf.buffer.set_metrics(Metrics::new(font_px, line_px));
-            // No width bound: the line lays out at its natural advance (with `Wrap::None`)
-            // and is clipped to the surface panel by the draw-time `TextBounds`. A finite
-            // width here would let a short line justify/stretch to fill it (the `max_w` field
-            // is kept for callers' layout math, not for constraining the buffer).
-            buf.buffer.set_size(None, Some(line_px.max(1.0)));
+            // Constrain to `max_w` when the caller wants truncation (sidebar tab names etc.).
+            // A finite width here prevents the line from overflowing its container.
+            let (w, text) = if label.shrink > 0.0 {
+                (
+                    Some(label.max_w.max(1.0)),
+                    Cow::Owned(label.text.clone()),
+                )
+            } else {
+                (None, Cow::Borrowed(&label.text))
+            };
+            buf.buffer.set_size(w, Some(line_px.max(1.0)));
             let weight = Weight(label.weight.unwrap_or_else(|| role.weight()));
             let attrs = role_attrs(role, weight);
             buf.buffer
-                .set_text(&label.text, &attrs, Shaping::Advanced, None);
+                .set_text(&text, &attrs, Shaping::Advanced, None);
             buf.buffer.shape_until_scroll(font_system, false);
+            // Append `…` when the line overflows `max_w` (sidebar tab names, etc.).
+            if label.shrink > 0.0 {
+                let total_w = buf.buffer
+                    .layout_runs()
+                    .map(|run| run.line_w)
+                    .fold(0.0, f32::max);
+                if total_w > label.max_w {
+                    let suffix = "…";
+                    let suffix_w = measure_text_width(
+                        font_system, suffix, role, label.weight, font_px, line_px,
+                    );
+                    // Binary-search the right prefix length so the prefix + suffix fit.
+                    let mut lo = 0usize;
+                    let mut hi = label.text.chars().count();
+                    let mut best = 0usize;
+                    while lo <= hi {
+                        let mid = lo + (hi - lo) / 2;
+                        let prefix: String = label.text.chars().take(mid).collect();
+                        let pw = measure_text_width(
+                            font_system, &prefix, role, label.weight, font_px, line_px,
+                        );
+                        if pw + suffix_w <= label.max_w {
+                            best = mid;
+                            lo = mid + 1;
+                        } else {
+                            hi = mid - 1;
+                        }
+                    }
+                    let prefix: String = label.text.chars().take(best).collect();
+                    buf.buffer.set_text(
+                        &format!("{prefix}{suffix}"),
+                        &attrs,
+                        Shaping::Advanced,
+                        None,
+                    );
+                    buf.buffer.shape_until_scroll(font_system, false);
+                }
+            }
             buf.shaped = Some(fingerprint);
         }
     }
@@ -305,8 +352,30 @@ fn label_fingerprint(label: &ProseLabel, scale: f32) -> u64 {
     label.role.hash(&mut hasher);
     label.weight.hash(&mut hasher);
     label.max_w.to_bits().hash(&mut hasher);
+    label.shrink.to_bits().hash(&mut hasher);
     scale.to_bits().hash(&mut hasher);
     hasher.finish()
+}
+
+/// Measure the physical-px width of `text` in `role` at `weight`, using the same
+/// metrics as `set_label_runs`. This is a leaf helper so the ellipsis truncation
+/// loop can measure intermediate prefixes without carrying a `FontSystem`.
+fn measure_text_width(
+    db: &mut FontSystem,
+    text: &str,
+    role: FontRole,
+    weight: Option<u16>,
+    font_px: f32,
+    line_px: f32,
+) -> f32 {
+    let mut scratch = Buffer::new(db, Metrics::new(font_px, line_px));
+    scratch.set_wrap(Wrap::None);
+    scratch.set_size(None, Some(line_px.max(1.0)));
+    let w = Weight(weight.unwrap_or_else(|| role.weight()));
+    let attrs = role_attrs(role, w);
+    scratch.set_text(text, &attrs, Shaping::Advanced, None);
+    scratch.shape_until_scroll(db, false);
+    scratch.layout_runs().next().map_or(0.0, |run| run.line_w)
 }
 
 /// `labels` shown `shown` (`0..=1`) of the way over the opaque `page` they sit on: each color
@@ -464,6 +533,7 @@ mod tests {
             },
             weight: None,
             max_w: 100.0,
+            shrink: 0.0,
         }];
         assert!(
             matches!(shown_over(&labels, page, 1.0), Cow::Borrowed(_)),

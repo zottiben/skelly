@@ -63,7 +63,8 @@ pub(crate) fn message_labels(
             color,
             weight: None,
             max_w: f32::MAX,
-        });
+                shrink: 0.0,
+            });
         y += measure.line_height(role) + gap;
     }
     labels

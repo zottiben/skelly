@@ -616,6 +616,7 @@ pub(crate) fn build(
             color: theme.fg_primary,
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
     }
 
@@ -846,6 +847,7 @@ fn push_row(
                         color: chev_color,
                         weight: None,
                         max_w: f32::MAX,
+                        shrink: 0.0,
                     });
                     // The count, right-aligned; the name fills the space between chevron + count.
                     let count = group.len.to_string();
@@ -861,6 +863,7 @@ fn push_row(
                         color: ctx.theme.fg_muted,
                         weight: None,
                         max_w: (count_x - name_x - GROUP_CHEVRON_SLOT * ctx.scale).max(1.0),
+                        shrink: 0.0,
                     });
                     labels.push(ProseLabel {
                         text: count,
@@ -870,6 +873,7 @@ fn push_row(
                         color: ctx.theme.fg_faint,
                         weight: None,
                         max_w: f32::MAX,
+                        shrink: 0.0,
                     });
                 }
             }
@@ -916,6 +920,7 @@ fn push_row(
                         color: ctx.theme.accent,
                         weight: None,
                         max_w: f32::MAX,
+                        shrink: 0.0,
                     });
                 }
                 // The label (the tab title, §10.3), inset past the prefix slot + gap so all
@@ -927,6 +932,17 @@ fn push_row(
                     .get(index)
                     .cloned()
                     .unwrap_or_else(|| format!("Tab {}", index + 1));
+                // Measure to decide whether the title needs ellipsis truncation.
+                let title_w = measure.width(&title, FontRole::Label, None);
+                let avail_w = (ctx.panel.x + ctx.panel.w - x - LABEL_INSET * ctx.scale * 0.5).max(1.0);
+                let shrink = if title_w > avail_w {
+                    // The title won't fit - truncate with `…` in the prose layer.
+                    // Leave room for the ellipsis glyph itself.
+                    let ellipsis_w = measure.width("…", FontRole::Label, None);
+                    (title_w - avail_w + ellipsis_w) / avail_w
+                } else {
+                    0.0
+                };
                 labels.push(ProseLabel {
                     text: title,
                     x,
@@ -934,7 +950,8 @@ fn push_row(
                     role: FontRole::Label,
                     color,
                     weight: None,
-                    max_w: (ctx.panel.x + ctx.panel.w - x - LABEL_INSET * ctx.scale * 0.5).max(1.0),
+                    max_w: avail_w,
+                    shrink,
                 });
             }
         }
@@ -988,6 +1005,7 @@ fn push_command_well(
             color: ctx.theme.fg_muted,
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
         return;
     }
@@ -1028,6 +1046,7 @@ fn push_command_well(
             color: ctx.theme.fg_muted,
             weight: None,
             max_w: (well.x + well.w - pad - x).max(1.0),
+            shrink: 0.0,
         });
         x += measure.width(text, FontRole::Caption, None) + gap * ctx.scale;
     }
@@ -1168,6 +1187,7 @@ fn push_chips(
                 color: theme.fg_faint,
                 weight: None,
                 max_w: f32::MAX,
+                shrink: 0.0,
             });
         }
     }
@@ -1211,6 +1231,7 @@ fn push_chips(
             color: if active { theme.accent } else { theme.fg_muted },
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
     }
 }
@@ -1290,6 +1311,7 @@ fn push_pinned(
         color: theme.fg_faint,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
     let slots = pinned_slots(pinned.len(), panel, block_top, scale);
     let radius = PINNED_RADIUS * scale;
@@ -1328,6 +1350,7 @@ fn push_pinned(
             color: if active { theme.accent } else { theme.fg_muted },
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
     }
 }
@@ -1424,6 +1447,7 @@ fn push_utility_bar(
             color: theme.fg_muted,
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
     }
 }
@@ -1461,6 +1485,7 @@ fn push_label(
         color,
         weight: None,
         max_w,
+        shrink: 0.0,
     });
 }
 

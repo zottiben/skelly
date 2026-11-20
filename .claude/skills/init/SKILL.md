@@ -1,6 +1,6 @@
 ---
 name: toolbox-init
-description: Bootstrap a repo for the ai-toolbox end to end. Scaffolds the knowledge files (AGENTS.md + a thin CLAUDE.md adapter, optional RULES.md) AND sets up the functional layer — hooks, MCPs, and helper skills — installing only what the detected stack needs. Detects the stack (web, backend, mobile, OR game engine: Unity/Godot/Unreal), auto-fills mechanical facts from real manifests, composes matching starter rule-snippets, interviews you for the non-obvious rules only you know, then recommends and installs the tailored tooling via the `ai-toolbox` CLI. Use when setting up a new or existing project to use this toolkit.
+description: Bootstrap a repo for the ai-toolbox end to end. Scaffolds the knowledge files (AGENTS.md + a thin CLAUDE.md adapter, optional RULES.md) AND sets up the functional layer — hooks, MCPs, and helper skills — installing only what the detected stack needs. Detects the stack (web, backend, mobile, OR game engine - Unity/Godot/Unreal), auto-fills mechanical facts from real manifests, composes matching starter rule-snippets, interviews you for the non-obvious rules only you know, then recommends and installs the tailored tooling via the `ai-toolbox` CLI. Use when setting up a new or existing project to use this toolkit.
 ---
 
 # ai-toolbox init — scaffold project knowledge

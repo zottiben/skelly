@@ -327,6 +327,7 @@ fn status_line(
         color,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     };
 
     // Right-anchored cursor readout first, then fit the left segments before it (mirrors the
@@ -678,6 +679,7 @@ fn confirm_overlay(width: u32, height: u32, scale: f32, theme: &Theme) -> Captur
             color,
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
         tx += m.width(text, FontRole::Title, None);
     }
@@ -735,6 +737,7 @@ fn push_pl(
         color,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
 }
 
@@ -755,6 +758,7 @@ fn push_pl_at(
         color,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
 }
 
@@ -781,6 +785,7 @@ fn push_centered_pl(
         color,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
 }
 
@@ -1176,6 +1181,7 @@ fn push_sb_body(
                     color: theme.accent,
                     weight: None,
                     max_w: f32::MAX,
+                    shrink: 0.0,
                 });
             }
             let x = prefix_x + (SB_TAB_PROMPT_SLOT + SB_TAB_GAP) * scale;
@@ -1195,6 +1201,7 @@ fn push_sb_body(
                 color,
                 weight: None,
                 max_w: f32::MAX,
+                shrink: 0.0,
             });
         }
         y += SB_TAB_H + SB_TAB_GAP_V;
@@ -1307,6 +1314,7 @@ fn push_sb_label(
         color,
         weight: None,
         max_w,
+        shrink: 0.0,
     });
 }
 

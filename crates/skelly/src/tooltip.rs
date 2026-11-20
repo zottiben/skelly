@@ -53,6 +53,7 @@ pub(crate) fn build(
         color: theme.fg_primary,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     }];
     (Vec::new(), labels)
 }

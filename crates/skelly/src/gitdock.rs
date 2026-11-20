@@ -1600,7 +1600,8 @@ impl GitDock {
                 color,
                 weight: None,
                 max_w: f32::MAX,
-            });
+                    shrink: 0.0,
+                });
             let rect = PxRect {
                 x,
                 y: control.y,
@@ -1623,7 +1624,8 @@ impl GitDock {
                 color: theme.fg_muted,
                 weight: None,
                 max_w: (ctx.cr - x).max(1.0),
-            });
+                    shrink: 0.0,
+                });
             return;
         }
         let field = PxRect {
@@ -1643,7 +1645,8 @@ impl GitDock {
                 color: theme.diff_del,
                 weight: None,
                 max_w: w.max(1.0),
-            });
+                    shrink: 0.0,
+                });
         }
     }
 
@@ -1722,6 +1725,7 @@ impl GitDock {
             },
             weight: None,
             max_w: text_w.max(1.0),
+            shrink: 0.0,
         });
         let icon_h = measure.line_height(FontRole::Icon);
         out.labels.push(ProseLabel {
@@ -1732,7 +1736,8 @@ impl GitDock {
             color: theme.fg_muted,
             weight: None,
             max_w: f32::MAX,
-        });
+                shrink: 0.0,
+            });
         out.targets.push((field, Target::Base));
         let role = FontRole::Caption;
         let lead_w = (field.x - gap - left).max(0.0);
@@ -1746,7 +1751,8 @@ impl GitDock {
             color: theme.fg_muted,
             weight: None,
             max_w: lead_w.max(1.0),
-        });
+                shrink: 0.0,
+            });
     }
 
     /// The label over the scroll: `CHANGED - N` and how many are viewed, with the open
@@ -2192,7 +2198,8 @@ impl GitDock {
             color: theme.fg_primary,
             weight: None,
             max_w: (right - 8.0 * scale - x).max(1.0),
-        });
+                shrink: 0.0,
+            });
     }
 
     /// A file header's right-anchored controls; returns where they start, for the path to
@@ -2312,7 +2319,8 @@ impl GitDock {
                 color: theme.bg_base.to_srgb(),
                 weight: None,
                 max_w: f32::MAX,
-            });
+                    shrink: 0.0,
+                });
         } else {
             let ring = if hover {
                 theme.border_strong
@@ -2442,6 +2450,7 @@ impl GitDock {
             color: theme.diff_hunk,
             weight: None,
             max_w: (if here { hint_x - 8.0 * scale } else { ctx.cr } - ctx.cx).max(1.0),
+            shrink: 0.0,
         });
         if here {
             push_row(
@@ -2531,6 +2540,7 @@ impl GitDock {
             color: fg,
             weight: None,
             max_w: (ctx.cr - code_x).max(1.0),
+            shrink: 0.0,
         });
         let Some(spot) = spot else {
             return;
@@ -2566,7 +2576,8 @@ impl GitDock {
                 color: theme.bg_base.to_srgb(),
                 weight: Some(700),
                 max_w: f32::MAX,
-            });
+                    shrink: 0.0,
+                });
         }
         let hit = PxRect {
             x: ctx.panel.x,
@@ -2635,7 +2646,8 @@ impl GitDock {
                     color,
                     weight: Some(600),
                     max_w: f32::MAX,
-                });
+                        shrink: 0.0,
+                    });
             }
             Part::Text(text) => {
                 let color = if resolved {
@@ -2748,7 +2760,8 @@ impl GitDock {
             color,
             weight: None,
             max_w: (right - x).max(1.0),
-        });
+                shrink: 0.0,
+            });
     }
 
     /// One row of the composer card.
@@ -3026,7 +3039,8 @@ impl GitDock {
             color,
             weight: None,
             max_w: f32::MAX,
-        });
+                shrink: 0.0,
+            });
         if style != ButtonStyle::Disabled {
             out.targets.push((rect, target));
         }
@@ -3536,7 +3550,8 @@ fn push_clipped(
         color,
         weight: None,
         max_w: (right - x).max(1.0),
-    });
+            shrink: 0.0,
+        });
 }
 
 /// A rounded rect with a 1px ring: the ring color filled, then the fill inset by a stroke.
@@ -3619,7 +3634,8 @@ fn push_row(
         color,
         weight: None,
         max_w: f32::MAX,
-    });
+            shrink: 0.0,
+        });
 }
 
 /// Push a right-anchored label ending at `right`, vertically centered; returns its left edge.
@@ -3659,7 +3675,8 @@ fn push_centered(
         color,
         weight: None,
         max_w: f32::MAX,
-    });
+            shrink: 0.0,
+        });
 }
 
 // Spelled out so the module resolves the same when the capture example includes this file.

@@ -478,7 +478,8 @@ impl ContextMenu {
                 color,
                 weight: None,
                 max_w: f32::MAX,
-            });
+                    shrink: 0.0,
+                });
             if !hint.is_empty() {
                 let hw = measure.width(hint, FontRole::Micro, None);
                 let hint_color = if *danger {
@@ -494,7 +495,8 @@ impl ContextMenu {
                     color: hint_color,
                     weight: None,
                     max_w: f32::MAX,
-                });
+                        shrink: 0.0,
+                    });
             }
         }
         // Divider rules, centered in their reserved band (`DIV_MARGIN` above the 1px rule).

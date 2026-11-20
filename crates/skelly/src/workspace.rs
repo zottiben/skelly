@@ -658,7 +658,8 @@ fn push_glyph(
         color,
         weight: None,
         max_w: f32::MAX,
-    });
+            shrink: 0.0,
+        });
 }
 
 /// A row's name (or its rename draft with a caret, in accent) followed by its muted meta,

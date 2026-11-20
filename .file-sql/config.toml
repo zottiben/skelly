@@ -1,0 +1,8 @@
+roots = ["."]
+
+[storage]
+backend = "sqlite"
+sqlite_path = ".file-sql/index.db"
+
+[embedding]
+mode = "lexical" # compact code-term index; no vectors, model or download

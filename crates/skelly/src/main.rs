@@ -1819,6 +1819,7 @@ impl App {
             color: self.theme.fg_primary,
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
         let status = if hit.is_some() {
             "match".to_owned()
@@ -1840,6 +1841,7 @@ impl App {
             },
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
     }
 
@@ -2763,6 +2765,7 @@ impl App {
             color: self.theme.fg_secondary,
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
     }
 

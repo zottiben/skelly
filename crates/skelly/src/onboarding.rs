@@ -310,6 +310,7 @@ pub(crate) fn build(
         color: theme.fg_primary,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
     labels.push(ProseLabel {
         text: "Barebones. Let\u{2019}s set two things.".to_owned(),
@@ -321,6 +322,7 @@ pub(crate) fn build(
         color: theme.fg_muted,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
 
     // Section labels (micro, letterspaced, fg.muted).
@@ -426,6 +428,7 @@ fn push_section_label(
         color: theme.fg_muted,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
 }
 
@@ -524,6 +527,7 @@ fn push_theme_card(
         color: card_theme.accent,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
     // The theme name on the strip.
     let strip_line = measure.line_height(FontRole::Caption);
@@ -539,6 +543,7 @@ fn push_theme_card(
         },
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
 }
 
@@ -588,6 +593,7 @@ fn push_hints(
             color: theme.fg_primary,
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
         labels.push(ProseLabel {
             text: (*label).to_owned(),
@@ -597,6 +603,7 @@ fn push_hints(
             color: theme.fg_muted,
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
         x += w + gap;
     }
@@ -676,6 +683,7 @@ fn center_label(
         color,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
 }
 

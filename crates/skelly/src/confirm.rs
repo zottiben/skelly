@@ -146,7 +146,8 @@ impl Confirm {
                 color,
                 weight: None,
                 max_w: f32::MAX,
-            });
+                    shrink: 0.0,
+                });
             x += w;
         }
         y += TITLE_H * scale + GAP * scale;
@@ -207,7 +208,8 @@ fn push_centered(
         color,
         weight: None,
         max_w: f32::MAX,
-    });
+            shrink: 0.0,
+        });
 }
 
 #[cfg(test)]

@@ -364,6 +364,7 @@ fn capture_voice_controls() {
                 color: theme.fg_secondary,
                 weight: None,
                 max_w: pane.w - 28.0,
+                shrink: 0.0,
             });
             panes.push(skelly_render::CapturePane {
                 rect: pane,

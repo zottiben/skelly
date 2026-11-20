@@ -936,6 +936,7 @@ fn push_line(
         color,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
 }
 
@@ -1003,6 +1004,7 @@ fn push_command(
         },
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     });
     // The label, split into matched / unmatched runs so matched chars draw in accent. A label
     // wider than the row (a deep file path in `/` mode) is truncated with a leading `…`, keeping
@@ -1037,6 +1039,7 @@ fn push_command(
             color,
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
         x += w;
     }
@@ -1053,6 +1056,7 @@ fn push_command(
             color: theme.fg_muted,
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
     }
 }

@@ -207,7 +207,7 @@ impl Drawer {
                 .extend(rail_labels.into_iter().map(|label| ProseLabel {
                     x: label.x + dx,
                     color: label.color.over(bg, shown),
-                    ..label
+                    ..label.clone()
                 }));
         }
     }
@@ -260,7 +260,8 @@ mod tests {
                 color: INK,
                 weight: None,
                 max_w: 100.0,
-            }],
+                    shrink: 0.0,
+                }],
             chip_first: None,
             list_quads: 1..2,
             list_labels: 0..1,

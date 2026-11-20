@@ -191,7 +191,8 @@ pub(crate) fn build(
         color: theme.fg_primary,
         weight: None,
         max_w: f32::MAX,
-    });
+            shrink: 0.0,
+        });
     let hint = "esc to close";
     let hint_w = measure.width(hint, FontRole::Caption, None);
     labels.push(ProseLabel {
@@ -202,7 +203,8 @@ pub(crate) fn build(
         color: theme.fg_muted,
         weight: None,
         max_w: f32::MAX,
-    });
+            shrink: 0.0,
+        });
 
     let body_top = panel.y + (HEADER_H + PAD) * scale;
     #[allow(
@@ -258,7 +260,8 @@ fn push_column(
             color: theme.fg_primary,
             weight: None,
             max_w: f32::MAX,
-        });
+                shrink: 0.0,
+            });
         y += TITLE_H * scale;
         quads.push(ChromeQuad::fill(
             PxRect {
@@ -278,7 +281,8 @@ fn push_column(
                 color: theme.fg_muted,
                 weight: None,
                 max_w: f32::MAX,
-            });
+                    shrink: 0.0,
+                });
             y += NOTE_H * scale;
         }
         let row_line = measure.line_height(FontRole::Body);
@@ -292,7 +296,8 @@ fn push_column(
                 color: theme.fg_secondary,
                 weight: None,
                 max_w: f32::MAX,
-            });
+                    shrink: 0.0,
+                });
             let cw = measure.width(bind.chord, FontRole::Mono, None);
             labels.push(ProseLabel {
                 text: bind.chord.to_owned(),
@@ -302,7 +307,8 @@ fn push_column(
                 color: theme.fg_primary,
                 weight: None,
                 max_w: f32::MAX,
-            });
+                    shrink: 0.0,
+                });
             y += ROW_H * scale;
         }
     }

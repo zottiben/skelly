@@ -401,6 +401,7 @@ impl Bar {
                 },
                 weight: None,
                 max_w: rect.w,
+                shrink: 0.0,
             });
         }
         if let Some(last) = self.buttons.last() {
@@ -415,7 +416,8 @@ impl Bar {
                     color: theme.fg_muted,
                     weight: None,
                     max_w: avail,
-                });
+                        shrink: 0.0,
+                    });
             }
         }
         (quads, labels)

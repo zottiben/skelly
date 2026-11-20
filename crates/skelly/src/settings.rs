@@ -1281,7 +1281,8 @@ impl Settings {
             color: theme.fg_muted,
             weight: None,
             max_w: f32::MAX,
-        });
+                shrink: 0.0,
+            });
         let side = CLOSE_SIDE * scale;
         let button = PxRect {
             x: at.edge - side,
@@ -1601,7 +1602,8 @@ impl Settings {
             color: theme.fg_primary,
             weight: None,
             max_w: room,
-        });
+                shrink: 0.0,
+            });
         paint.labels.push(ProseLabel {
             text: control.key.to_owned(),
             x,
@@ -1610,7 +1612,8 @@ impl Settings {
             color: theme.fg_muted,
             weight: None,
             max_w: room,
-        });
+                shrink: 0.0,
+            });
     }
 
     /// One line of the theme grid at `top`: a preview card per theme on it, each a click target
@@ -1838,7 +1841,8 @@ fn push_section_label(
         color: ctx.theme.fg_muted,
         weight: None,
         max_w: f32::MAX,
-    });
+            shrink: 0.0,
+        });
     if unit.cards {
         let mono = measure.line_height(FontRole::Mono);
         let w = measure.width(control.key, FontRole::Mono, None);
@@ -1850,7 +1854,8 @@ fn push_section_label(
             color: ctx.theme.fg_muted,
             weight: None,
             max_w: f32::MAX,
-        });
+                shrink: 0.0,
+            });
     }
 }
 
@@ -2125,7 +2130,8 @@ fn push_input(
         color,
         weight: None,
         max_w: room,
-    });
+            shrink: 0.0,
+        });
     rect
 }
 
@@ -2261,6 +2267,7 @@ fn push_segmented(
             },
             weight: None,
             max_w: f32::MAX,
+            shrink: 0.0,
         });
         x += w;
     }
@@ -2296,7 +2303,8 @@ fn push_slider(
         color: theme.accent,
         weight: None,
         max_w: f32::MAX,
-    });
+            shrink: 0.0,
+        });
     // The track, to the left of the value.
     let track_w = SLIDER_W * scale;
     let track_h = SLIDER_TRACK_H * scale;
@@ -2414,7 +2422,8 @@ impl ThemeCard<'_> {
                 color: theme.accent,
                 weight: None,
                 max_w: f32::MAX,
-            });
+                    shrink: 0.0,
+                });
             w + 4.0 * scale
         } else {
             0.0
@@ -2432,6 +2441,7 @@ impl ThemeCard<'_> {
             },
             weight: None,
             max_w: (strip.w - 2.0 * pad - check_w).max(0.0),
+            shrink: 0.0,
         });
     }
 }
@@ -2517,7 +2527,8 @@ fn push_key_hints(
             color: theme.fg_primary,
             weight: None,
             max_w: f32::MAX,
-        });
+                shrink: 0.0,
+            });
         x += key_w + HINT_KEY_GAP * scale;
         labels.push(ProseLabel {
             text: (*action).to_owned(),
@@ -2527,7 +2538,8 @@ fn push_key_hints(
             color: theme.fg_muted,
             weight: None,
             max_w: f32::MAX,
-        });
+                shrink: 0.0,
+            });
         x += measure.width(action, FontRole::Caption, None);
     }
 }
@@ -2555,7 +2567,8 @@ pub(crate) fn push_row(
         color,
         weight: None,
         max_w: f32::MAX,
-    });
+            shrink: 0.0,
+        });
 }
 
 /// Push a right-anchored label ending at `right`, vertically centered in the row.

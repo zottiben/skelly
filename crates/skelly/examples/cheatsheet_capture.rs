@@ -281,6 +281,7 @@ fn label(text: &str, role: FontRole, color: skelly_render::Srgb, x: f32, y: f32)
         color,
         weight: None,
         max_w: f32::MAX,
+        shrink: 0.0,
     }
 }
 
