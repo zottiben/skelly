@@ -139,7 +139,7 @@ impl Drop for TempScript {
 
 /// Whether `exe` sits in a cargo build directory (`…/target/debug|release/skelly`, or a
 /// cross-compiled `…/target/<triple>/debug/skelly`).
-fn is_build_dir(exe: &Path) -> bool {
+pub(crate) fn is_build_dir(exe: &Path) -> bool {
     let mut parents = exe.ancestors().skip(1);
     let profile = parents.next().and_then(Path::file_name);
     if !matches!(profile.and_then(|p| p.to_str()), Some("debug" | "release")) {
@@ -151,7 +151,7 @@ fn is_build_dir(exe: &Path) -> bool {
 }
 
 /// The first `PATH` entry holding an executable named `name`.
-fn which(name: &str) -> Option<PathBuf> {
+pub(crate) fn which(name: &str) -> Option<PathBuf> {
     env::split_paths(&env::var_os("PATH")?).find_map(|dir| {
         let candidate = dir.join(name);
         candidate.is_file().then_some(candidate)

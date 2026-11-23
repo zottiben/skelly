@@ -92,6 +92,8 @@ pub(crate) enum Action {
     ShowTimeline,
     /// Open the full-window settings view.
     OpenSettings,
+    /// Open the settings view on its Agents page, checking every agent.
+    OpenAgents,
     /// Switch the UI theme to the named one (a `skelly_render::THEMES` config name).
     Theme(&'static str),
     /// Insert clipboard text through the Pi bridge, exercising the dictation path.
@@ -222,6 +224,13 @@ pub(crate) const COMMANDS: &[Command] = &[
         label: "Open settings",
         hint: "cmd ,",
         action: Action::OpenSettings,
+    },
+    Command {
+        category: "View",
+        icon: "\u{2699}", // ⚙ settings
+        label: "Connect agents over MCP",
+        hint: "",
+        action: Action::OpenAgents,
     },
     Command {
         category: "Appearance",

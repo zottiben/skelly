@@ -82,6 +82,25 @@ Deferred stack/foundation choices (from init; keep TBD until crates are picked):
 Record settled decisions here, newest first: `YYYY-MM-DD - <decision> (was: <the
 open question>)`.
 
+- 2026-11-23 - **Settings > Agents connects coding agents to `skelly mcp`.** User request:
+  people should not have to remember each agent's MCP setup command. A page after Workspaces
+  (nav icon codicon `plug`), outside the config categories and the one-key contract like
+  Workspaces: it shows state the agents own, and no Skelly setting. One row per agent - Pi,
+  Claude Code, Codex - with a `status.*` dot (success connected, warning (`accent`) needs
+  setup, danger not working, muted not installed or unknown) and a Connect (or Fix) button.
+  Below, the focused agent's command in a mono well with Copy, and why it is not working.
+  Skelly runs only each agent's own CLI (`pi mcp list --json`, `claude mcp get skelly`,
+  `codex mcp get skelly --json`, then its `mcp add`) from the login shell's `PATH` in `$HOME`;
+  it never edits an agent's config. Fix reruns `add` (Claude Code removes its entry first,
+  as its `add` refuses a duplicate). The command names this Skelly by its resolved full path
+  (a cargo build names the `skelly` on the `PATH`), so desktop apps without the shell's
+  `PATH` start it. Pi registers with `--exposure direct`; any other exposure needs a fix.
+  Codex does not health-check, so Skelly checks that its command exists and runs `mcp`.
+  The check runs off the window loop at launch, on arriving at the page, after a connect and
+  on `r`. While an installed agent needs setup, the sidebar's settings gear and the Agents
+  nav entry carry an `accent` dot; an agent that is not installed never raises it. No
+  ChatGPT web support: it takes only remote HTTPS MCP servers.
+  _(was: each agent was connected by hand from the README)_
 - 2026-11-17 - **A tab can be titled by its git branch.** User request: name tabs by the
   current branch or directory instead of a custom name, with four options. `[tabs] title`
   gains `"branch"` beside the guide's `cwd | command | custom`; the default stays `cwd`.

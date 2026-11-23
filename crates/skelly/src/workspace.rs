@@ -737,37 +737,48 @@ fn push_buttons(
     }
     let mut x = right;
     for (text, target, color) in buttons.into_iter().rev() {
-        let w = measure.width(text, FontRole::Caption, None) + 2.0 * BUTTON_PAD_X * scale;
-        x -= w;
-        let rect = PxRect {
-            x,
-            y: top + (row_h - BUTTON_H) * 0.5 * scale,
-            w,
-            h: BUTTON_H * scale,
-        };
-        push_ringed(
-            out.quads,
-            rect,
-            theme.border_subtle,
-            theme.bg_surface,
-            BUTTON_RADIUS * scale,
-            scale,
-        );
-        push_row(
-            out.labels,
-            measure,
-            text,
-            FontRole::Caption,
-            color,
-            x + BUTTON_PAD_X * scale,
-            top,
-            row_h,
-            scale,
+        let at = (x, top, row_h);
+        let rect = push_button(
+            out.quads, out.labels, text, color, at, scale, theme, measure,
         );
         out.targets.push((rect, target));
-        x -= BUTTON_GAP * scale;
+        x = rect.x - BUTTON_GAP * scale;
     }
     x
+}
+
+/// A compact row button reading `text` in `color`: a `bg.surface` fill in a `border.subtle`
+/// ring, right-anchored at `at = (right, top, row_h)` and centered in that row. Returns its rect.
+#[allow(clippy::too_many_arguments, reason = "one focused button builder")]
+pub(crate) fn push_button(
+    quads: &mut Vec<ChromeQuad>,
+    labels: &mut Vec<ProseLabel>,
+    text: &str,
+    color: skelly_render::Srgb,
+    at: (f32, f32, f32),
+    scale: f32,
+    theme: &Theme,
+    measure: &mut TextMeasure,
+) -> PxRect {
+    let (right, top, row_h) = at;
+    let w = measure.width(text, FontRole::Caption, None) + 2.0 * BUTTON_PAD_X * scale;
+    let rect = PxRect {
+        x: right - w,
+        y: top + (row_h - BUTTON_H) * 0.5 * scale,
+        w,
+        h: BUTTON_H * scale,
+    };
+    push_ringed(
+        quads,
+        rect,
+        theme.border_subtle,
+        theme.bg_surface,
+        BUTTON_RADIUS * scale,
+        scale,
+    );
+    let (role, x) = (FontRole::Caption, rect.x + BUTTON_PAD_X * scale);
+    push_row(labels, measure, text, role, color, x, top, row_h, scale);
+    rect
 }
 
 #[cfg(test)]

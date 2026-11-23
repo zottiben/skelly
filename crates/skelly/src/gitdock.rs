@@ -3446,7 +3446,12 @@ fn step_unclamped(at: usize, delta: i32) -> usize {
 /// `text` broken into lines no wider than `width` in `role`: at its newlines, then between
 /// words, and inside a word too long for a line of its own. Spaces are kept, so a caret after
 /// the last line lands where the text ends. Always at least one line.
-fn wrap(text: &str, role: FontRole, width: f32, measure: &mut TextMeasure) -> Vec<String> {
+pub(crate) fn wrap(
+    text: &str,
+    role: FontRole,
+    width: f32,
+    measure: &mut TextMeasure,
+) -> Vec<String> {
     let space = measure.width(" ", role, None);
     let mut lines = Vec::new();
     for paragraph in text.split('\n') {

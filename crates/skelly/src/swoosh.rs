@@ -368,6 +368,7 @@ mod tests {
                     tab_keys: &[],
                     rail: false,
                     top_inset: 38.0,
+                    settings_attention: false,
                 };
                 sidebar::build(&view, panel, SCALE, &theme, &mut measure)
             };

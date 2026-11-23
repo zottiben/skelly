@@ -167,6 +167,9 @@ pub(crate) struct View<'a> {
     pub(crate) rail: bool,
     /// The macOS control-strip inset in **logical** px (0 elsewhere); content clears it.
     pub(crate) top_inset: f32,
+    /// Whether the settings gear carries its attention dot: a coding agent needs setting up
+    /// (Settings > Agents).
+    pub(crate) settings_attention: bool,
 }
 
 /// One collapsible group's span over the ordered tab list (design §08 #5): the header name +
@@ -213,6 +216,10 @@ const UTIL_ICONS: [(UtilAction, &str, FontRole); 4] = [
 /// Horizontal padding of the full-panel utility row from the sidebar edges; the four icons
 /// spread evenly across the inner width between these pads.
 const UTIL_PAD_X: f32 = 15.0;
+/// The settings gear's attention dot (see [`View::settings_attention`]), and the ring of
+/// sidebar surface that cuts it out of the glyph beneath.
+const UTIL_DOT: f32 = 6.0;
+const UTIL_DOT_RING: f32 = 1.5;
 
 /// The persistent left sidebar's state: its display mode (a mirror of
 /// `config.sidebar.mode`, the source of truth per Hard rule 1) plus the visible mode to
@@ -660,7 +667,16 @@ pub(crate) fn build(
     // The bottom-anchored utility bar (design §08 #7) - full panel only; the slim rail has no
     // room for it (its actions stay reachable via keys / the palette).
     if !view.rail {
-        push_utility_bar(&mut quads, &mut labels, panel, scale, theme, measure);
+        let attention = view.settings_attention;
+        push_utility_bar(
+            &mut quads,
+            &mut labels,
+            panel,
+            attention,
+            scale,
+            theme,
+            measure,
+        );
     }
 
     // The right-edge divider separating the sidebar from the pane area (drawn last).
@@ -1414,11 +1430,12 @@ fn push_active_marks(
 /// The bottom-anchored utility bar (design §08 #7): a `border.subtle` top hairline over the
 /// sidebar surface, then the four toggle glyphs (⚙ ◐ ⟲ ⑂) in `fg.muted`, left-clustered per
 /// the guide. Full panel only. Icon-only; the tooltip-on-hover is a follow-up (no tooltip
-/// layer yet).
+/// layer yet). With `attention`, an `accent` dot sits at the gear's top right.
 fn push_utility_bar(
     quads: &mut Vec<ChromeQuad>,
     labels: &mut Vec<ProseLabel>,
     panel: PxRect,
+    attention: bool,
     scale: f32,
     theme: &Theme,
     measure: &mut TextMeasure,
@@ -1436,20 +1453,41 @@ fn push_utility_bar(
     ));
     // Larger than default UI text (§05 `h2`, 20px) so the toggles read as real touch targets,
     // each centered in its evenly-spread slot.
-    for ((_, glyph, role), (_, slot)) in UTIL_ICONS.iter().zip(utility_slots(panel, scale)) {
+    for ((action, glyph, role), (_, slot)) in UTIL_ICONS.iter().zip(utility_slots(panel, scale)) {
         let role = *role;
         let gw = measure.width(glyph, role, None);
         let line_h = measure.line_height(role);
+        let (x, y) = (
+            slot.x + (slot.w - gw) * 0.5,
+            top + (UTIL_H * scale - line_h) * 0.5,
+        );
         labels.push(ProseLabel {
             text: (*glyph).to_owned(),
-            x: slot.x + (slot.w - gw) * 0.5,
-            y: top + (UTIL_H * scale - line_h) * 0.5,
+            x,
+            y,
             role,
             color: theme.fg_muted,
             weight: None,
             max_w: f32::MAX,
             shrink: 0.0,
         });
+        if attention && *action == UtilAction::Settings {
+            let (d, ring) = (UTIL_DOT * scale, UTIL_DOT_RING * scale);
+            let dot = PxRect {
+                x: x + gw - d * 0.5,
+                y: y + (line_h - gw) * 0.5 - d * 0.25,
+                w: d,
+                h: d,
+            };
+            let cut = PxRect {
+                x: dot.x - ring,
+                y: dot.y - ring,
+                w: d + 2.0 * ring,
+                h: d + 2.0 * ring,
+            };
+            quads.push(ChromeQuad::rounded(cut, theme.bg_sidebar, cut.w * 0.5));
+            quads.push(ChromeQuad::rounded(dot, theme.accent, d * 0.5));
+        }
     }
 }
 
@@ -1524,6 +1562,7 @@ mod tests {
             tab_keys: &[],
             rail,
             top_inset: 0.0,
+            settings_attention: false,
         }
     }
 
@@ -1663,6 +1702,7 @@ mod tests {
             tab_keys: &[],
             rail: false,
             top_inset: 0.0,
+            settings_attention: false,
         }
     }
 
@@ -1789,6 +1829,7 @@ mod tests {
             tab_keys: &[],
             rail: false,
             top_inset: 0.0,
+            settings_attention: false,
         };
         let paint = build(&v, panel(), 2.0, &theme, &mut m);
         // The two workspace glyphs + the trailing "+" tile are drawn.
@@ -1832,6 +1873,7 @@ mod tests {
             tab_keys: &[],
             rail: false,
             top_inset: 0.0,
+            settings_attention: false,
         };
         // A 232px sidebar (as at the 240 default) fits six tiles of the nine (eight chips and
         // the `+`).
@@ -1936,6 +1978,51 @@ mod tests {
                 "rail should omit utility glyph {glyph:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_settings_gear_carries_a_dot_while_an_agent_needs_setup() {
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(2.0);
+        let accents = |v: &View<'_>, m: &mut TextMeasure| -> Vec<PxRect> {
+            let paint = build(v, panel(), 2.0, &theme, m);
+            let quads = paint.quads.iter().filter(|q| q.color == theme.accent);
+            quads.map(|q| q.rect).collect()
+        };
+        let mut v = view(2, 0, false);
+        let calm = accents(&v, &mut m);
+        v.settings_attention = true;
+        let dots: Vec<PxRect> = accents(&v, &mut m)
+            .into_iter()
+            .filter(|r| !calm.contains(r))
+            .collect();
+        let gear = super::utility_slots(panel(), 2.0)
+            .into_iter()
+            .find(|(action, _)| *action == UtilAction::Settings)
+            .unwrap()
+            .1;
+        assert_eq!(dots.len(), 1, "one dot: {dots:?}");
+        let dot = dots[0];
+        assert!((dot.w - super::UTIL_DOT * 2.0).abs() < 0.01 && (dot.h - dot.w).abs() < 0.01);
+        assert!(
+            dot.x >= gear.x && dot.x + dot.w <= gear.x + gear.w,
+            "{dot:?} in {gear:?}"
+        );
+        assert!(
+            dot.y >= gear.y && dot.y + dot.h <= gear.y + gear.h,
+            "{dot:?} in {gear:?}"
+        );
+        // A ring of sidebar surface cuts the dot out of the gear glyph.
+        let paint = build(&v, panel(), 2.0, &theme, &mut m);
+        let ring = super::UTIL_DOT_RING * 2.0;
+        assert!(paint.quads.iter().any(|q| q.color == theme.bg_sidebar
+            && (q.rect.x - (dot.x - ring)).abs() < 0.01
+            && (q.rect.y - (dot.y - ring)).abs() < 0.01
+            && (q.rect.w - (dot.w + 2.0 * ring)).abs() < 0.01));
+        // The rail has no utility bar, so no dot either.
+        v.rail = true;
+        let rail_calm = accents(&view(2, 0, true), &mut m);
+        assert_eq!(accents(&v, &mut m), rail_calm);
     }
 
     #[test]

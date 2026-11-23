@@ -138,7 +138,18 @@ moves your `HEAD`, branches or index except when you stage or commit. See
 ### Connect an agent over MCP
 
 `skelly mcp` is an MCP server on stdin/stdout. Add it to your agent once, and "address my
-review comments" works in every repository:
+review comments" works in every repository.
+
+**Settings > Agents** (`⌘,`, or "Connect agents over MCP" in `⌘K`) does this for you. It
+finds Pi, Claude Code and Codex on your login shell's `PATH`, asks each one whether its
+`skelly` server works, and connects or repairs one with `enter`. It runs each agent's own
+`mcp` commands and never edits their config files. The command it runs starts this Skelly
+by its full path, so a desktop app without your shell's `PATH` finds it too; `⌘C` copies
+the command to run it yourself. A dot on the settings gear says that an installed agent
+is not connected, or that its `skelly` server does not start (for example after Skelly
+moved).
+
+To connect an agent by hand:
 
 ```sh
 claude mcp add --scope user skelly -- skelly mcp   # Claude Code

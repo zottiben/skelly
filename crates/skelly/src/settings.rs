@@ -18,14 +18,16 @@
 //! every clickable rect it draws, so a click lands on exactly what is on screen. Deferred: the
 //! keybindings / advanced categories (they need the `[keys]` registry).
 //!
-//! The nav ends with the Workspaces page ([`crate::workspace`]): a manager over the session
-//! layout rather than the config, so it sits outside [`CATEGORIES`] and the one-key contract.
+//! The nav ends with the Workspaces page ([`crate::workspace`]), a manager over the session
+//! layout, and the Agents page ([`crate::agents`]), a view of each coding agent's own MCP config.
+//! Neither is the config, so both sit outside [`CATEGORIES`] and the one-key contract.
 
 use skelly_config::{Config, CursorStyle, DiffAgainst, DiffView, SidebarMode, TabTitle};
 use skelly_render::{
     ChromeQuad, FontRole, ProseLabel, PxRect, Srgb, TextMeasure, Theme, THEMES, THEME_LABELS,
 };
 
+use crate::agents;
 use crate::workspace::{self, push_ringed};
 
 /// Settings-view layout constants in **logical** px (multiplied by the DPI scale), after the
@@ -44,6 +46,9 @@ const NAV_ICON_X: f32 = 11.0;
 const NAV_ICON_W: f32 = 25.0;
 /// The gap on each side of the hairline that sets the Workspaces page apart.
 const NAV_SEP_GAP: f32 = 8.0;
+/// The attention dot at a nav pill's right, and its inset from the pill's right edge.
+const NAV_DOT: f32 = 6.0;
+const NAV_DOT_INSET: f32 = 12.0;
 /// The content column's inset from the nav divider, and its widest; a wider area centers it.
 const CONTENT_PAD: f32 = 32.0;
 const COLUMN_MAX_W: f32 = 720.0;
@@ -140,6 +145,19 @@ const WORKSPACES_HINTS: &[(&str, &str)] = &[
 const WORKSPACES_NAV: (&str, &str) = ("\u{eb23}", "Workspaces");
 /// The Workspaces page's summary line.
 const WORKSPACES_ABOUT: &str = "Workspaces and their groups, kept in the session layout";
+/// The footer's key hints on the Agents page.
+const AGENTS_HINTS: &[(&str, &str)] = &[
+    ("\u{2191}\u{2193}", "move"),
+    ("enter", "connect"),
+    ("\u{2318}C", "copy command"),
+    ("r", "check again"),
+    ("tab", "category"),
+    ("esc", "close"),
+];
+/// The Agents page's nav entry (codicon `plug`), after the Workspaces page.
+const AGENTS_NAV: (&str, &str) = ("\u{eb2d}", "Agents");
+/// The Agents page's summary line.
+const AGENTS_ABOUT: &str = "Coding agents that can use Skelly's review tools over MCP";
 /// The theme card's selected mark (codicon `check`).
 const CHECK_ICON: &str = "\u{eab2}";
 
@@ -864,6 +882,8 @@ pub(crate) enum Target {
     Text(usize),
     /// Something on the Workspaces page.
     Workspaces(workspace::Target),
+    /// Something on the Agents page.
+    Agents(agents::Target),
 }
 
 impl Target {
@@ -872,7 +892,7 @@ impl Target {
         match self {
             Target::Row(i) | Target::Toggle(i) | Target::Text(i) => Some(i),
             Target::Choose { index, .. } | Target::Slider { index, .. } => Some(index),
-            Target::Close | Target::Category(_) | Target::Workspaces(_) => None,
+            Target::Close | Target::Category(_) | Target::Workspaces(_) | Target::Agents(_) => None,
         }
     }
 }
@@ -1015,7 +1035,7 @@ impl Settings {
         }
     }
 
-    /// The controls of the active category (none on the Workspaces page).
+    /// The controls of the active category (none on the Workspaces or Agents page).
     fn controls(&self) -> &'static [Control] {
         CATEGORIES.get(self.category).map_or(&[], |c| c.controls)
     }
@@ -1023,6 +1043,18 @@ impl Settings {
     /// Whether the Workspaces page is showing (its rows, not config controls, take input).
     pub(crate) fn on_workspaces_page(&self) -> bool {
         self.category == CATEGORIES.len()
+    }
+
+    /// Whether the Agents page is showing (its agent rows take input).
+    pub(crate) fn on_agents_page(&self) -> bool {
+        self.category == CATEGORIES.len() + 1
+    }
+
+    /// Open the view on the Agents page, its first agent focused.
+    pub(crate) fn open_agents(&mut self) {
+        self.open();
+        self.category = CATEGORIES.len() + 1;
+        self.editing = None;
     }
 
     /// Open the view on the Workspaces page with row `row` focused, optionally straight into
@@ -1036,12 +1068,12 @@ impl Settings {
         self.reveal_row = true;
     }
 
-    /// The focused row on the Workspaces page.
+    /// The focused row on the Workspaces or Agents page.
     pub(crate) fn selected_row(&self) -> usize {
         self.selected
     }
 
-    /// Move the Workspaces-page focus by `delta` over `count` rows, clamped.
+    /// Move the Workspaces- or Agents-page focus by `delta` over `count` rows, clamped.
     pub(crate) fn move_row(&mut self, delta: i32, count: usize) {
         let last = i32::try_from(count.saturating_sub(1)).unwrap_or(0);
         let cur = i32::try_from(self.selected).unwrap_or(0);
@@ -1049,7 +1081,7 @@ impl Settings {
         self.reveal_row = true;
     }
 
-    /// Focus Workspaces-page row `row`, dropping an open rename of another row.
+    /// Focus Workspaces- or Agents-page row `row`, dropping an open rename of another row.
     pub(crate) fn select_row(&mut self, row: usize) {
         if row != self.selected {
             self.editing = None;
@@ -1084,7 +1116,7 @@ impl Settings {
 
     /// Switch to the category at nav index `index` (a click), resetting the control selection.
     pub(crate) fn select_category(&mut self, index: usize) {
-        if index <= CATEGORIES.len() && index != self.category {
+        if index < nav_entries().count() && index != self.category {
             self.category = index;
             self.selected = 0;
             self.rows_first = 0;
@@ -1156,10 +1188,10 @@ impl Settings {
         Some(control.key)
     }
 
-    /// Switch category by `delta` (wrapping, through the Workspaces page), resetting the
-    /// control selection.
+    /// Switch category by `delta` (wrapping, through the Workspaces and Agents pages), resetting
+    /// the control selection.
     pub(crate) fn cycle_category(&mut self, forward: bool) {
-        let n = CATEGORIES.len() + 1;
+        let n = nav_entries().count();
         self.category = if forward {
             (self.category + 1) % n
         } else {
@@ -1201,14 +1233,19 @@ impl Settings {
     /// Build the settings view's display list within `panel` (physical px) at DPI `scale`,
     /// reading current values from `config` in `theme`'s UI tokens: the category nav, the
     /// header (the category's name over its summary, the esc hint and the close button), the
-    /// active page - a config category's section cards, or the Workspaces page - and the
-    /// footer's key hints. The renderer fills the panel and draws the nav divider beneath.
+    /// active page - a config category's section cards, the Workspaces page or the Agents page -
+    /// and the footer's key hints. The renderer fills the panel and draws the nav divider beneath.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the config and the two non-config pages' models are separate inputs"
+    )]
     pub(crate) fn build(
         &self,
         panel: PxRect,
         scale: f32,
         config: &Config,
         workspaces: &[workspace::Entry],
+        agents: &agents::Agents,
         theme: &Theme,
         measure: &mut TextMeasure,
     ) -> Paint {
@@ -1221,15 +1258,21 @@ impl Settings {
             rows_first: 0,
         };
         self.push_header(&mut paint, measure, &at, scale, theme);
-        self.push_nav(&mut paint, measure, &at, scale, theme);
+        let attention = agents.attention();
+        self.push_nav(&mut paint, measure, &at, attention, scale, theme);
         paint.rows_first = if self.on_workspaces_page() {
             self.push_workspaces(&mut paint, measure, workspaces, &at, scale, theme)
+        } else if self.on_agents_page() {
+            self.push_agents(&mut paint, measure, agents, &at, scale, theme);
+            0
         } else {
             let ctx = PageCtx::new(self.controls(), config, &at, scale, theme, measure);
             self.push_page(&mut paint, measure, &ctx, &at)
         };
         let hints = if self.on_workspaces_page() {
             WORKSPACES_HINTS
+        } else if self.on_agents_page() {
+            AGENTS_HINTS
         } else {
             FOOTER_HINTS
         };
@@ -1257,9 +1300,11 @@ impl Settings {
         scale: f32,
         theme: &Theme,
     ) {
-        let (name, about) = CATEGORIES
-            .get(self.category)
-            .map_or((WORKSPACES_NAV.1, WORKSPACES_ABOUT), |c| (c.label, c.about));
+        let (name, about) = match CATEGORIES.get(self.category) {
+            Some(category) => (category.label, category.about),
+            None if self.on_agents_page() => (AGENTS_NAV.1, AGENTS_ABOUT),
+            None => (WORKSPACES_NAV.1, WORKSPACES_ABOUT),
+        };
         let labels = &mut paint.labels;
         let (h2, caption) = (FontRole::H2, FontRole::Caption);
         push_row(
@@ -1376,15 +1421,56 @@ impl Settings {
         first
     }
 
+    /// Draw the Agents page: each coding agent's MCP state, focused + hovered from this view's
+    /// state, in the content column.
+    fn push_agents(
+        &self,
+        paint: &mut Paint,
+        measure: &mut TextMeasure,
+        agents: &agents::Agents,
+        at: &Layout,
+        scale: f32,
+        theme: &Theme,
+    ) {
+        let hover = match self.hover {
+            Some(Target::Agents(t)) => Some(t),
+            _ => None,
+        };
+        let page = agents::Page {
+            agents,
+            selected: self.selected,
+            hover,
+        };
+        let area = workspace::Area {
+            x: at.left,
+            right: at.right,
+            top: at.body_top,
+            bottom: at.body_bottom,
+        };
+        let mut out = agents::Out {
+            quads: &mut paint.quads,
+            labels: &mut paint.labels,
+            targets: Vec::new(),
+        };
+        page.build(&area, scale, theme, measure, &mut out);
+        paint.targets.extend(
+            out.targets
+                .into_iter()
+                .map(|(rect, t)| (rect, Target::Agents(t))),
+        );
+    }
+
     /// Draw the left nav: a "Settings" title on the heading's line, then a pill per page - its
     /// codicon and name - the active one on an `accent.subtle` fill with an `accent` icon, a
-    /// hovered one on a lighter wash. A hairline sets the Workspaces page apart from the config
-    /// categories above it.
+    /// hovered one on a lighter wash. A hairline sets the Workspaces and Agents pages apart from
+    /// the config categories above them, and the Agents pill carries an `accent` dot while an
+    /// agent needs setting up (`attention`).
     fn push_nav(
         &self,
         paint: &mut Paint,
         measure: &mut TextMeasure,
         at: &Layout,
+        attention: bool,
         scale: f32,
         theme: &Theme,
     ) {
@@ -1452,6 +1538,18 @@ impl Settings {
             push_row(
                 labels, measure, name, role, color, label_x, y, NAV_ROW_H, scale,
             );
+            if attention && index == CATEGORIES.len() + 1 {
+                let d = NAV_DOT * scale;
+                let dot = PxRect {
+                    x: x + w - NAV_DOT_INSET * scale - d,
+                    y: y + (NAV_ROW_H * scale - d) * 0.5,
+                    w: d,
+                    h: d,
+                };
+                paint
+                    .quads
+                    .push(ChromeQuad::rounded(dot, theme.accent, d * 0.5));
+            }
             y += (NAV_ROW_H + NAV_ROW_GAP) * scale;
         }
     }
@@ -1908,12 +2006,13 @@ fn push_section_cards(quads: &mut Vec<ChromeQuad>, ctx: &PageCtx<'_>, placed: &[
     flush(&mut run);
 }
 
-/// Every nav entry as `(icon, label)`: the config categories, then the Workspaces page.
+/// Every nav entry as `(icon, label)`: the config categories, then the Workspaces and Agents
+/// pages.
 fn nav_entries() -> impl Iterator<Item = (&'static str, &'static str)> {
     CATEGORIES
         .iter()
         .map(|c| (c.icon, c.label))
-        .chain(std::iter::once(WORKSPACES_NAV))
+        .chain([WORKSPACES_NAV, AGENTS_NAV])
 }
 
 /// The settings page's surface, under the nav and the content alike: `bg.sidebar`, which the
@@ -2659,11 +2758,15 @@ mod tests {
         // Cycling category resets the control selection.
         settings.cycle_category(true); // Appearance -> Sidebar
         assert_eq!(settings.selected_index(), 0);
-        // Sidebar -> Appearance -> (wrap) the Workspaces page, then the last config category.
+        // Sidebar -> Appearance -> (wrap) the Agents page, the Workspaces page, then the last
+        // config category.
         settings.cycle_category(false);
+        settings.cycle_category(false);
+        assert_eq!(settings.category_label(), "Agents");
+        assert!(settings.on_agents_page() && !settings.on_workspaces_page());
         settings.cycle_category(false);
         assert_eq!(settings.category_label(), "Workspaces");
-        assert!(settings.on_workspaces_page());
+        assert!(settings.on_workspaces_page() && !settings.on_agents_page());
         settings.cycle_category(false);
         assert_eq!(
             settings.category_label(),
@@ -2678,7 +2781,7 @@ mod tests {
         let mut m = TextMeasure::new(1.0);
         let mut settings = Settings::new();
         settings.move_selection(2); // Appearance / Line height
-        let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
+        let paint = settings.build(panel(), 1.0, &config, &[], &agents(), &theme, &mut m);
         // The heading names the page over its summary, and the nav pill and the focused row's
         // pill each wear `accent.subtle` over their surface.
         assert!(paint.labels.iter().any(|l| l.text == "Appearance"));
@@ -2698,6 +2801,10 @@ mod tests {
     }
 
     /// Whether `paint` draws a quad filled with `color`.
+    fn agents() -> crate::agents::Agents {
+        crate::agents::Agents::new("/Applications/Skelly.app/Contents/MacOS/skelly".into())
+    }
+
     fn has_fill(paint: &super::Paint, color: Srgb) -> bool {
         paint.quads.iter().any(|q| q.color == color)
     }
@@ -2726,7 +2833,7 @@ mod tests {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(1.0);
         let settings = Settings::new();
-        let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
+        let paint = settings.build(panel(), 1.0, &config, &[], &agents(), &theme, &mut m);
         let t = &paint.targets;
         for i in 0..=CATEGORIES.len() {
             let (x, y) = center_of(t, |t| *t == Target::Category(i));
@@ -2758,7 +2865,7 @@ mod tests {
         let theme = Theme::resolve("ossein-light");
         let mut m = TextMeasure::new(1.0);
         let settings = Settings::new();
-        let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
+        let paint = settings.build(panel(), 1.0, &config, &[], &agents(), &theme, &mut m);
         for name in THEME_LABELS {
             assert!(paint.labels.iter().any(|l| l.text == *name), "{name}");
         }
@@ -2826,7 +2933,7 @@ mod tests {
         };
         let mut settings = Settings::new(); // Appearance: more rows than fit
         let count = settings.controls().len();
-        let paint = settings.build(short, 1.0, &config, &[], &theme, &mut m);
+        let paint = settings.build(short, 1.0, &config, &[], &agents(), &theme, &mut m);
         let drawn = rows(&paint);
         assert!(drawn.len() < count, "not every Appearance row fits");
         assert!(drawn.iter().all(|(r, _)| r.y + r.h <= footer_top));
@@ -2834,7 +2941,7 @@ mod tests {
 
         // Moving focus to the last row scrolls it into view, still above the footer.
         settings.move_selection(i32::try_from(count).unwrap());
-        let paint = settings.build(short, 1.0, &config, &[], &theme, &mut m);
+        let paint = settings.build(short, 1.0, &config, &[], &agents(), &theme, &mut m);
         settings.settle_rows(paint.rows_first);
         let drawn = rows(&paint);
         assert_eq!(drawn.last().map(|(_, i)| *i), Some(count - 1));
@@ -2843,7 +2950,7 @@ mod tests {
 
         // A long wheel scroll up brings the theme grid, the first block, back.
         settings.scroll_rows(100);
-        let paint = settings.build(short, 1.0, &config, &[], &theme, &mut m);
+        let paint = settings.build(short, 1.0, &config, &[], &agents(), &theme, &mut m);
         assert_eq!(paint.rows_first, 0);
         assert!(paint.targets.iter().any(|(_, t)| *t
             == Target::Choose {
@@ -2858,7 +2965,7 @@ mod tests {
         let theme = Theme::resolve("ossein-dark");
         let mut m = TextMeasure::new(2.0);
         let mut settings = Settings::new();
-        let paint = settings.build(panel(), 2.0, &config, &[], &theme, &mut m);
+        let paint = settings.build(panel(), 2.0, &config, &[], &agents(), &theme, &mut m);
         let button = paint
             .targets
             .iter()
@@ -2874,7 +2981,7 @@ mod tests {
 
         // While a text edit is open the hint turns into "enter save", but the button stays.
         settings.editing = Some(String::new());
-        let paint = settings.build(panel(), 2.0, &config, &[], &theme, &mut m);
+        let paint = settings.build(panel(), 2.0, &config, &[], &agents(), &theme, &mut m);
         let closes: Vec<_> = paint
             .targets
             .iter()
@@ -2935,7 +3042,7 @@ mod tests {
         let mut m = TextMeasure::new(1.0);
         let settings = Settings::new();
         let track_xs = |config: &Config, m: &mut TextMeasure| -> Vec<f32> {
-            let paint = settings.build(panel(), 1.0, config, &[], &theme, m);
+            let paint = settings.build(panel(), 1.0, config, &[], &agents(), &theme, m);
             paint
                 .targets
                 .iter()
@@ -2965,13 +3072,13 @@ mod tests {
         settings.move_selection(1); // Font size
         let row_wash = hover_fill(&theme, card_fill(&theme));
         let page_wash = hover_fill(&theme, page_fill(&theme));
-        let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
+        let paint = settings.build(panel(), 1.0, &config, &[], &agents(), &theme, &mut m);
         assert!(!has_fill(&paint, row_wash) && !has_fill(&paint, page_wash));
         settings.hover = Some(Target::Row(1)); // already focused: no wash
-        let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
+        let paint = settings.build(panel(), 1.0, &config, &[], &agents(), &theme, &mut m);
         assert!(!has_fill(&paint, row_wash));
         settings.hover = Some(Target::Toggle(3));
-        let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
+        let paint = settings.build(panel(), 1.0, &config, &[], &agents(), &theme, &mut m);
         let washes: Vec<_> = paint.quads.iter().filter(|q| q.color == row_wash).collect();
         let row = paint
             .targets
@@ -2983,10 +3090,64 @@ mod tests {
         assert!(washes[0].rect.y > row.y && washes[0].rect.y + washes[0].rect.h < row.y + row.h);
         for hover in [Target::Category(2), Target::Close] {
             settings.hover = Some(hover);
-            let paint = settings.build(panel(), 1.0, &config, &[], &theme, &mut m);
+            let paint = settings.build(panel(), 1.0, &config, &[], &agents(), &theme, &mut m);
             let washes = paint.quads.iter().filter(|q| q.color == page_wash).count();
             assert_eq!(washes, 1, "{hover:?}");
         }
+    }
+
+    #[test]
+    fn the_agents_page_shows_each_agent_and_its_nav_entry_calls_out_setup() {
+        use crate::agents::probe::Report;
+        use crate::agents::{Agent, State};
+        let config = Config::default();
+        let theme = Theme::resolve("ossein-dark");
+        let mut m = TextMeasure::new(1.0);
+        let mut settings = Settings::new();
+        settings.open_agents();
+        assert!(settings.on_agents_page() && !settings.on_workspaces_page());
+        assert_eq!(settings.category_label(), "Agents");
+        assert!(settings.controls().is_empty(), "no config control here");
+        let mut agents = agents();
+        for agent in Agent::ALL {
+            agents.apply(Report::State(agent, State::Connected));
+        }
+        let nav_dots = |paint: &super::Paint| {
+            let nav = paint
+                .targets
+                .iter()
+                .find(|(_, t)| *t == Target::Category(CATEGORIES.len() + 1))
+                .unwrap()
+                .0;
+            paint
+                .quads
+                .iter()
+                .filter(|q| {
+                    q.color == theme.accent
+                        && (q.rect.w - super::NAV_DOT).abs() < 0.01
+                        && q.rect.x >= nav.x
+                        && q.rect.x + q.rect.w <= nav.x + nav.w
+                        && q.rect.y >= nav.y
+                        && q.rect.y + q.rect.h <= nav.y + nav.h
+                })
+                .count()
+        };
+        let paint = settings.build(panel(), 1.0, &config, &[], &agents, &theme, &mut m);
+        for text in ["Agents", super::AGENTS_ABOUT, "Pi", "Claude Code", "Codex"] {
+            assert!(paint.labels.iter().any(|l| l.text == text), "{text}");
+        }
+        assert!(paint
+            .targets
+            .iter()
+            .any(|(_, t)| *t == Target::Agents(crate::agents::Target::Check)));
+        assert_eq!(nav_dots(&paint), 0);
+        // Codex lost its Skelly: the Agents entry carries a dot, on any page.
+        agents.apply(Report::State(Agent::Codex, State::Off));
+        let paint = settings.build(panel(), 1.0, &config, &[], &agents, &theme, &mut m);
+        assert_eq!(nav_dots(&paint), 1);
+        settings.select_category(0);
+        let paint = settings.build(panel(), 1.0, &config, &[], &agents, &theme, &mut m);
+        assert_eq!(nav_dots(&paint), 1);
     }
 
     #[test]
@@ -3015,7 +3176,7 @@ mod tests {
         assert!(settings.on_workspaces_page());
         assert_eq!(settings.editing_index(), Some(1));
         assert!(settings.controls().is_empty(), "no config control here");
-        let paint = settings.build(panel(), 1.0, &config, &entries, &theme, &mut m);
+        let paint = settings.build(panel(), 1.0, &config, &entries, &agents(), &theme, &mut m);
         assert!(paint.labels.iter().any(|l| l.text == "Workspaces"));
         assert!(paint.labels.iter().any(|l| l.text == "Work\u{258f}"));
         assert!(paint
@@ -3086,6 +3247,7 @@ mod tests {
                 1.0,
                 &config,
                 &[],
+                &agents(),
                 &theme,
                 &mut measure,
             );
@@ -3107,6 +3269,8 @@ mod tests {
     #[test]
     #[ignore = "manual GPU capture: writes /tmp/skelly-settings-<page>-<theme>.png"]
     fn capture_settings_pages() {
+        use crate::agents::probe::Report;
+        use crate::agents::{Agent, State};
         let entries = vec![
             crate::workspace::Entry {
                 name: "Personal".into(),
@@ -3126,8 +3290,20 @@ mod tests {
                 groups: Vec::new(),
             },
         ];
+        // One agent of each kind of state, the focused one (Claude Code) needing a fix.
+        let mut agents = agents();
+        for (agent, state) in [
+            (Agent::Pi, State::Connected),
+            (
+                Agent::Claude,
+                State::Broken("ENOENT: no such file or directory, posix_spawn 'skelly'".into()),
+            ),
+            (Agent::Codex, State::Off),
+        ] {
+            agents.apply(Report::State(agent, state));
+        }
         for theme_name in ["ossein-dark", "ossein-light"] {
-            for page in 0..=CATEGORIES.len() {
+            for page in 0..super::nav_entries().count() {
                 let mut settings = Settings::new();
                 settings.category = page;
                 // Appearance opens on its theme grid; the other pages focus their second row.
@@ -3145,7 +3321,15 @@ mod tests {
                     w: f32::from(w),
                     h: f32::from(h),
                 };
-                let paint = settings.build(panel, scale, &config, &entries, &theme, &mut measure);
+                let paint = settings.build(
+                    panel,
+                    scale,
+                    &config,
+                    &entries,
+                    &agents,
+                    &theme,
+                    &mut measure,
+                );
                 let view = skelly_render::CaptureSettings {
                     panel,
                     nav_divider_x: paint.nav_divider_x,

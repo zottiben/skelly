@@ -140,6 +140,7 @@ mod tests {
                 SCALE,
                 &config,
                 &[],
+                &crate::agents::Agents::new("skelly".into()),
                 &theme,
                 &mut TextMeasure::new(SCALE),
             );

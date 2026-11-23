@@ -478,6 +478,7 @@ mod tests {
                 tab_keys: &[],
                 rail,
                 top_inset: 38.0,
+                settings_attention: false,
             };
             let w = if rail { RAIL } else { FULL };
             let panel = PxRect {

@@ -52,6 +52,8 @@ arboard = { version = "3.6.1", default-features = false }
 # that subcommand starts (ADR-0012).
 rmcp = { version = "3.8.0", default-features = false, features = ["server", "macros", "transport-io"] }
 tokio = { version = "1", features = ["rt"] }
+# Settings > Agents: stop an agent CLI that hangs, with whatever it started (its process group).
+nix = { version = "0.28", features = ["signal", "process"] }
 
 # macOS: build a native application menu so the standard system shortcuts (⌘H hide, ⌘M
 # minimize, ⌘Q quit, Hide Others, …) work - winit installs no menu on its own. Versions are

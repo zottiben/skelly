@@ -10,6 +10,7 @@
 //! output. Errors are contextualized here with `anyhow`; `wgpu`/`alacritty` types
 //! never leak up.
 
+mod agents;
 mod basepicker;
 #[cfg(test)]
 mod capture;
@@ -63,6 +64,8 @@ use skelly_session::review::{Author, Review, ReviewError, Scope, Status as Threa
 use skelly_session::{Actor, Repo, SessionEvent, Status, Timeline};
 use skelly_term::{CellAttrs, CellColor, ExitStatus, KeyboardMode, TermCell, Terminal};
 
+use agents::probe::{Prober, Report};
+use agents::Agents;
 use basepicker::{BasePicker, Pick};
 use confirm::{CloseTarget, Confirm};
 use contextmenu::{ContextMenu, MenuAction, MenuContext};
@@ -161,6 +164,7 @@ enum Wakeup {
     CwdPoll,
     Voice,
     Rewind,
+    Agents,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -679,6 +683,12 @@ struct App {
     rewinder: snapshots::Rewinder,
     /// What the rewind worker made of each request, drained on [`Wakeup::Rewind`].
     rewind_outcomes: Receiver<snapshots::Outcome>,
+    /// Each coding agent's MCP state for Settings > Agents and the settings gear's dot.
+    agents: Agents,
+    /// The worker that runs the agents' CLIs (see [`agents::probe`]).
+    agent_prober: Prober,
+    /// What the agent worker found, drained on [`Wakeup::Agents`].
+    agent_reports: Receiver<Report>,
     /// Whether the "rewind is off" notice has been shown for the open timeline, so scrubbing with
     /// `session.shadow_worktree` disabled explains itself once instead of once per step.
     rewind_off_notified: bool,
@@ -835,6 +845,10 @@ struct OverlayAnim {
 }
 
 impl App {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one straight-line initializer of every App field"
+    )]
     fn new(config: Config, proxy: EventLoopProxy<Wakeup>) -> Self {
         let ansi_palette = AnsiPalette::resolve(&config.appearance.theme);
         let theme = Theme::resolve(&config.appearance.theme);
@@ -847,6 +861,8 @@ impl App {
                 let _ = wake.send_event(Wakeup::Rewind);
             }
         });
+        let (agents, agent_prober, agent_reports) =
+            agents::wiring::start(&config.shell.program, &proxy);
         Self {
             config,
             proxy,
@@ -880,6 +896,9 @@ impl App {
             find: None,
             rewinder,
             rewind_outcomes,
+            agents,
+            agent_prober,
+            agent_reports,
             rewind_off_notified: false,
             session_start: Instant::now(),
             git_repo: None,
@@ -2577,6 +2596,7 @@ impl App {
             tab_keys: &tab_keys,
             rail,
             top_inset: self.content_top() / scale,
+            settings_attention: self.agents.attention(),
         };
         let panel = PxRect {
             x: 0.0,
@@ -2652,6 +2672,7 @@ impl App {
             scale,
             &self.config,
             &entries,
+            &self.agents,
             &self.theme,
             &mut self.measure,
         );
@@ -3778,6 +3799,7 @@ impl App {
             tab_keys: &[],
             rail: self.sidebar_rail_now(),
             top_inset: self.content_top() / scale,
+            settings_attention: self.agents.attention(),
         };
         let panel = PxRect {
             x: 0.0,
@@ -4553,6 +4575,9 @@ impl App {
         }
         let label = match self.sidebar_hit()? {
             sidebar::Hit::Util(action) => match action {
+                sidebar::UtilAction::Settings if self.agents.attention() => {
+                    "Settings  \u{2318},  \u{b7}  an agent needs setting up"
+                }
                 sidebar::UtilAction::Settings => "Settings  \u{2318},",
                 sidebar::UtilAction::Theme => "Toggle theme",
                 sidebar::UtilAction::Timeline => "Session timeline  \u{21e7}\u{2318}H",
@@ -5570,6 +5595,11 @@ impl App {
             Action::ShowGitDiff => self.toggle_git_dock(),
             Action::ShowTimeline => self.toggle_timeline(),
             Action::OpenSettings => self.open_settings(),
+            Action::OpenAgents => {
+                self.open_settings();
+                self.settings.open_agents();
+                self.check_agents();
+            }
             Action::Theme(name) => self.choose_theme(name),
             Action::VoiceInsertClipboard => self.voice_insert_clipboard(),
             Action::VoiceDictation => self.toggle_dictation(),
@@ -5635,6 +5665,15 @@ impl App {
             self.on_workspaces_key(key_event);
             return;
         }
+        if self.settings.on_agents_page()
+            && !matches!(
+                key_event.logical_key.as_ref(),
+                Key::Named(NamedKey::Escape | NamedKey::Tab)
+            )
+        {
+            self.on_agents_key(key_event);
+            return;
+        }
         match key_event.logical_key.as_ref() {
             Key::Named(NamedKey::Escape) => self.close_settings(),
             Key::Named(NamedKey::ArrowUp) => {
@@ -5656,7 +5695,9 @@ impl App {
                 }
             }
             Key::Named(NamedKey::Tab) => {
+                let was_on_agents = self.settings.on_agents_page();
                 self.settings.cycle_category(!self.modifiers.shift_key());
+                self.check_agents_on_arrival(was_on_agents);
                 self.request_redraw();
             }
             Key::Named(NamedKey::Enter) => {
@@ -6837,7 +6878,9 @@ impl App {
                 None
             }
             Target::Category(index) => {
+                let was_on_agents = self.settings.on_agents_page();
                 self.settings.select_category(index);
+                self.check_agents_on_arrival(was_on_agents);
                 None
             }
             Target::Row(index) => {
@@ -6863,6 +6906,10 @@ impl App {
             }
             Target::Workspaces(target) => {
                 self.on_workspaces_click(target);
+                None
+            }
+            Target::Agents(target) => {
+                self.on_agents_click(target);
                 None
             }
         };
@@ -7005,9 +7052,12 @@ impl App {
         if let Some(window) = self.window.as_ref() {
             window.set_cursor(match hover {
                 Some(Target::Text(_)) => CursorIcon::Text,
-                Some(Target::Row(_) | Target::Workspaces(workspace::Target::Row(_))) | None => {
-                    CursorIcon::Default
-                }
+                Some(
+                    Target::Row(_)
+                    | Target::Workspaces(workspace::Target::Row(_))
+                    | Target::Agents(agents::Target::Row(_)),
+                )
+                | None => CursorIcon::Default,
                 Some(_) => CursorIcon::Pointer,
             });
         }
@@ -7699,6 +7749,7 @@ impl ApplicationHandler<Wakeup> for App {
             // Fresh per-pane cwds from the poll thread; apply them (status line, titles, git dock).
             Wakeup::CwdPoll => self.drain_cwd_poll(),
             Wakeup::Rewind => self.drain_rewind(),
+            Wakeup::Agents => self.drain_agents(),
         }
     }
 
