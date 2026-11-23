@@ -143,9 +143,12 @@ review comments" works in every repository:
 ```sh
 claude mcp add --scope user skelly -- skelly mcp   # Claude Code
 codex mcp add skelly -- skelly mcp                 # Codex
+pi mcp add skelly --exposure direct -- skelly mcp  # Pi
 ```
 
-Other clients take the same command in their MCP config:
+In Pi, `--exposure direct` puts the three tools in the model's own tool list, so a
+small local model finds them without searching for them first. Other clients take the
+same command in their MCP config:
 `{"mcpServers": {"skelly": {"command": "skelly", "args": ["mcp"]}}}`.
 
 The server has three tools. `list_review_comments` reads the open comments (or every one,
