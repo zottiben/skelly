@@ -13,6 +13,9 @@
 .idea/
 .vscode/
 
+# Local file-sql MCP server index (never track these)
+.file-sql/
+
 # Local env overrides
 .env
 .env.local
