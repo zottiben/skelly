@@ -2844,7 +2844,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "skelly"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "anyhow",
  "arboard",
@@ -2873,7 +2873,7 @@ dependencies = [
 
 [[package]]
 name = "skelly-config"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2882,7 +2882,7 @@ dependencies = [
 
 [[package]]
 name = "skelly-pane"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "proptest",
  "serde",
@@ -2890,7 +2890,7 @@ dependencies = [
 
 [[package]]
 name = "skelly-render"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "bytemuck",
  "criterion",
@@ -2906,7 +2906,7 @@ dependencies = [
 
 [[package]]
 name = "skelly-session"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "serde",
  "serde_json",
@@ -2916,7 +2916,7 @@ dependencies = [
 
 [[package]]
 name = "skelly-term"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "alacritty_terminal",
  "bitflags 2.13.0",
@@ -2927,7 +2927,7 @@ dependencies = [
 
 [[package]]
 name = "skelly-voice"
-version = "0.1.29"
+version = "0.1.30"
 dependencies = [
  "cpal",
  "getrandom 0.3.4",
