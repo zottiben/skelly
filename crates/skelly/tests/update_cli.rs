@@ -9,6 +9,8 @@
 //! up-to-date comparison - which is where an updater actually breaks.
 //! Set `SKELLY_TEST_BINARY` to test an installed/released binary of the same version.
 
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -23,12 +25,13 @@ fn repo_root() -> PathBuf {
         .expect("repo root")
 }
 
-/// Run the built `skelly` binary with `args`, isolated from a real install: the receipt
+/// The built `skelly` binary with `args`, isolated from a real install: the receipt
 /// lives under `HOME`, so a temp `HOME` keeps the test off the user's own state.
-fn skelly(args: &[&str], home: &Path) -> Output {
+fn skelly_command(args: &[&str], home: &Path) -> Command {
     let binary = std::env::var_os("SKELLY_TEST_BINARY")
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_skelly").into());
-    Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(args)
         .env("HOME", home)
         .env("XDG_CONFIG_HOME", home.join(".config"))
@@ -37,9 +40,26 @@ fn skelly(args: &[&str], home: &Path) -> Output {
         .env(
             "SKELLY_INSTALL_URL",
             format!("file://{}", repo_root().join("install.sh").display()),
-        )
-        .output()
-        .expect("running skelly")
+        );
+    command
+}
+
+/// Run the built `skelly` binary with `args` (see [`skelly_command`]).
+fn skelly(args: &[&str], home: &Path) -> Output {
+    skelly_command(args, home).output().expect("running skelly")
+}
+
+/// Write an executable fixture script from a child shell, so this process never holds a
+/// write fd on it: a test thread spawning a process meanwhile would inherit that fd, and
+/// running the script would then fail with `ETXTBSY` on Linux.
+fn executable(path: &Path, body: &str) {
+    let status = Command::new("/bin/sh")
+        .args(["-c", r#"printf '%s' "$1" > "$2""#, "sh", body])
+        .arg(path)
+        .status()
+        .expect("writing fixture");
+    assert!(status.success(), "write {}", path.display());
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod fixture");
 }
 
 /// Whether an executable is on `PATH` (the update path shells out to curl and sh).
@@ -123,6 +143,46 @@ fn update_check_compares_the_running_version_against_the_release() {
     let out = skelly(&["update", "--wat"], home.path());
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("Unknown option"));
+}
+
+#[test]
+fn update_names_the_release_asset_it_could_not_download() {
+    let home = tempfile::tempdir().expect("temp home");
+    let bin = home.path().join("fake-bin");
+    fs::create_dir_all(&bin).unwrap();
+    // A fake network: the script itself is local, the latest release is published with no
+    // assets (a release cut by hand while its build failed), and every download is a 404.
+    executable(
+        &bin.join("curl"),
+        r#"#!/bin/sh
+case "$2" in
+  file://*) cp "${2#file://}" "$4" ;;
+  */releases/latest) printf '{\n  "tag_name": "v99.0.0",\n  "assets": []\n}\n' ;;
+  *) echo "curl: (56) The requested URL returned error: 404" >&2; printf 404; exit 56 ;;
+esac
+"#,
+    );
+    let path = std::env::join_paths(
+        std::iter::once(bin.clone())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+
+    let out = skelly_command(&["update"], home.path())
+        .env("PATH", path)
+        .output()
+        .expect("running skelly");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "a missing asset fails the update");
+    assert!(
+        stderr.contains("Skelly v99.0.0 has no download named"),
+        "names the release and the missing asset: {stderr}"
+    );
+    assert!(
+        stderr.contains("https://github.com/zottiben/skelly/releases/tag/v99.0.0"),
+        "points at the release page: {stderr}"
+    );
+    assert!(!home.path().join(".local/bin/skelly").exists());
 }
 
 #[test]

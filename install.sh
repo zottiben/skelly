@@ -139,7 +139,16 @@ TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
 echo "Downloading Skelly ${VERSION} for ${OS}..."
-curl -fsSL "${BASE}/${FILENAME}" -o "${TMPDIR}/${FILENAME}"
+if ! status="$(curl -fsSL "${BASE}/${FILENAME}" -o "${TMPDIR}/${FILENAME}" -w '%{http_code}')"; then
+  # A release published without its build assets 404s here; say which file is missing.
+  if [ "$status" = "404" ]; then
+    echo "Skelly ${VERSION} has no download named ${FILENAME}." >&2
+  else
+    echo "Could not download ${FILENAME} for Skelly ${VERSION}." >&2
+  fi
+  echo "See https://github.com/${REPO}/releases/tag/${VERSION}, or pick a release with --version <tag>." >&2
+  exit 1
+fi
 
 # --- verify checksum (best-effort: only if published and a hasher is available) --
 if curl -fsSL "${BASE}/checksums.txt" -o "${TMPDIR}/checksums.txt" 2>/dev/null; then
