@@ -170,8 +170,8 @@ mod tests {
             color: INK,
             weight: None,
             max_w: 200.0,
-                shrink: 0.0,
-            }
+            shrink: 0.0,
+        }
     }
 
     fn quad(x: f32) -> ChromeQuad {

@@ -171,29 +171,31 @@ impl ProseLayer {
             // Constrain to `max_w` when the caller wants truncation (sidebar tab names etc.).
             // A finite width here prevents the line from overflowing its container.
             let (w, text) = if label.shrink > 0.0 {
-                (
-                    Some(label.max_w.max(1.0)),
-                    Cow::Owned(label.text.clone()),
-                )
+                (Some(label.max_w.max(1.0)), Cow::Owned(label.text.clone()))
             } else {
                 (None, Cow::Borrowed(&label.text))
             };
             buf.buffer.set_size(w, Some(line_px.max(1.0)));
             let weight = Weight(label.weight.unwrap_or_else(|| role.weight()));
             let attrs = role_attrs(role, weight);
-            buf.buffer
-                .set_text(&text, &attrs, Shaping::Advanced, None);
+            buf.buffer.set_text(&text, &attrs, Shaping::Advanced, None);
             buf.buffer.shape_until_scroll(font_system, false);
             // Append `…` when the line overflows `max_w` (sidebar tab names, etc.).
             if label.shrink > 0.0 {
-                let total_w = buf.buffer
+                let total_w = buf
+                    .buffer
                     .layout_runs()
                     .map(|run| run.line_w)
                     .fold(0.0, f32::max);
                 if total_w > label.max_w {
                     let suffix = "…";
                     let suffix_w = measure_text_width(
-                        font_system, suffix, role, label.weight, font_px, line_px,
+                        font_system,
+                        suffix,
+                        role,
+                        label.weight,
+                        font_px,
+                        line_px,
                     );
                     // Binary-search the right prefix length so the prefix + suffix fit.
                     let mut lo = 0usize;
@@ -203,7 +205,12 @@ impl ProseLayer {
                         let mid = lo + (hi - lo) / 2;
                         let prefix: String = label.text.chars().take(mid).collect();
                         let pw = measure_text_width(
-                            font_system, &prefix, role, label.weight, font_px, line_px,
+                            font_system,
+                            &prefix,
+                            role,
+                            label.weight,
+                            font_px,
+                            line_px,
                         );
                         if pw + suffix_w <= label.max_w {
                             best = mid;

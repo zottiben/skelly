@@ -101,8 +101,8 @@ pub(crate) fn paint(
         color,
         weight: None,
         max_w: f32::MAX,
-            shrink: 0.0,
-        };
+        shrink: 0.0,
+    };
 
     // Right-anchored cursor position, placed first so the left segments can avoid it. Dropped
     // only if it cannot fit the pad-to-pad span at all (a vanishingly narrow pane).

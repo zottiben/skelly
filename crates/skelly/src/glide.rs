@@ -320,8 +320,8 @@ mod tests {
             color: INK,
             weight: None,
             max_w: 200.0,
-                shrink: 0.0,
-            }
+            shrink: 0.0,
+        }
     }
 
     /// A sidebar paint listing a row per key from the top, a row apart, with the pill on the

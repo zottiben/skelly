@@ -416,8 +416,8 @@ impl Bar {
                     color: theme.fg_muted,
                     weight: None,
                     max_w: avail,
-                        shrink: 0.0,
-                    });
+                    shrink: 0.0,
+                });
             }
         }
         (quads, labels)

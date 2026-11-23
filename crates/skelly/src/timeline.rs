@@ -578,8 +578,8 @@ fn push_event(
         color: ev.title_fg,
         weight: None,
         max_w: (right - RIGHT_GAP * scale - title_x).max(1.0),
-            shrink: 0.0,
-        });
+        shrink: 0.0,
+    });
 }
 
 /// The accent color for an event's actor tag: human = `accent`, agent = `session.ai`
@@ -615,8 +615,8 @@ fn push_row(
         color,
         weight: None,
         max_w: f32::MAX,
-            shrink: 0.0,
-        });
+        shrink: 0.0,
+    });
 }
 
 /// Push a right-anchored label ending at `right`, vertically centered in the row; returns

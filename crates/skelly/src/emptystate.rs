@@ -131,8 +131,8 @@ pub(crate) fn chips_paint(
                 color: theme.fg_secondary,
                 weight: None,
                 max_w: f32::MAX,
-                    shrink: 0.0,
-                });
+                shrink: 0.0,
+            });
             labels.push(ProseLabel {
                 text: label.to_owned(),
                 x: x + pad + kw + key_gap,
@@ -141,8 +141,8 @@ pub(crate) fn chips_paint(
                 color: theme.fg_muted,
                 weight: None,
                 max_w: f32::MAX,
-                    shrink: 0.0,
-                });
+                shrink: 0.0,
+            });
             x += pw + gap;
         }
         y += h + CHIP_ROW_GAP * scale;

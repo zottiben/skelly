@@ -934,7 +934,8 @@ fn push_row(
                     .unwrap_or_else(|| format!("Tab {}", index + 1));
                 // Measure to decide whether the title needs ellipsis truncation.
                 let title_w = measure.width(&title, FontRole::Label, None);
-                let avail_w = (ctx.panel.x + ctx.panel.w - x - LABEL_INSET * ctx.scale * 0.5).max(1.0);
+                let avail_w =
+                    (ctx.panel.x + ctx.panel.w - x - LABEL_INSET * ctx.scale * 0.5).max(1.0);
                 let shrink = if title_w > avail_w {
                     // The title won't fit - truncate with `…` in the prose layer.
                     // Leave room for the ellipsis glyph itself.

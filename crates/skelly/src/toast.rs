@@ -83,8 +83,8 @@ impl Toast {
             color: theme.fg_primary,
             weight: None,
             max_w: f32::MAX,
-                shrink: 0.0,
-            }];
+            shrink: 0.0,
+        }];
         (quads, labels)
     }
 }

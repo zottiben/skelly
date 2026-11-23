@@ -542,8 +542,8 @@ fn push_centered_in_row(
         color,
         weight: None,
         max_w: f32::MAX,
-            shrink: 0.0,
-        });
+        shrink: 0.0,
+    });
 }
 
 #[cfg(test)]
